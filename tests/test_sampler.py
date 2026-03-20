@@ -1,6 +1,6 @@
 import torch
 
-from kge_kernels.sampler import Sampler
+from kge_kernels.sampler import Sampler, corrupt
 
 
 def test_corrupt_with_mask_supports_zero_ids():
@@ -21,7 +21,8 @@ def test_corrupt_with_mask_supports_zero_ids():
     )
 
     pos = torch.tensor([[0, 0, 0]], dtype=torch.long)
-    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=None, mode="tail")
+    out = corrupt(sampler, pos, num_corruptions=None, mode="tail")
+    neg, valid = out.negatives, out.valid_mask
 
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert (0, 0, 0) not in rows
@@ -42,7 +43,8 @@ def test_domain_sampling_stays_in_domain():
     )
 
     pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
-    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=None, mode="head")
+    out = corrupt(sampler, pos, num_corruptions=None, mode="head")
+    neg, valid = out.negatives, out.valid_mask
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert rows == [(0, 2, 1)]
 
@@ -60,6 +62,7 @@ def test_exhaustive_domain_sampling_does_not_leak_padding_entity_zero():
     )
 
     pos = torch.tensor([[0, 1, 2]], dtype=torch.long)
-    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=None, mode="tail")
+    out = corrupt(sampler, pos, num_corruptions=None, mode="tail")
+    neg, valid = out.negatives, out.valid_mask
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert rows == [(0, 1, 3)]

@@ -2,32 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
 import torch
 
-
-LongTensor = torch.LongTensor
-Tensor = torch.Tensor
-
-
-def _mix_hash(triples: LongTensor, b_e: int, b_r: int) -> LongTensor:
-    h = triples[..., 1].to(torch.int64)
-    r = triples[..., 0].to(torch.int64)
-    t = triples[..., 2].to(torch.int64)
-    return (h << 42) | (r << 21) | t
-
-
-@dataclass
-class SamplerConfig:
-    num_entities: int
-    num_relations: int
-    device: torch.device
-    default_mode: Literal["head", "tail", "both"] = "both"
-    seed: int = 0
-    order_negatives: bool = False
-    min_entity_idx: int = 1
+from .types import CorruptionOutput, LongTensor, SamplerConfig, SupportsCorruptWithMask, Tensor
+from .utils import _mix_hash
 
 
 class Sampler:
@@ -44,7 +24,7 @@ class Sampler:
         self.default_mode = cfg.default_mode
         self.order_negatives = cfg.order_negatives
         self.min_entity_idx = cfg.min_entity_idx
-        self.hashes_sorted: Optional[LongTensor] = None
+        self._filter_hashes_sorted: Optional[LongTensor] = None
         self.b_e = max(2 * self.num_entities + 1, 1024)
         self.b_r = max(2 * self.num_relations + 1, 128)
         self.domain_padded: Optional[Tensor] = None
@@ -68,16 +48,40 @@ class Sampler:
         order_negatives: bool = False,
         min_entity_idx: int = 1,
     ) -> "Sampler":
+        """Construct a sampler from known triples and optional domain pools.
+
+        Args:
+            all_known_triples_idx: Known positive triples in ``(r, h, t)``
+                format. Used for filtered corruption generation.
+            num_entities: Number of entity ids available to corrupt with.
+            num_relations: Number of relation ids.
+            device: Device where the internal lookup tensors will live.
+            default_mode: Default corruption side used by ``corrupt`` methods.
+            seed: Stored seed for downstream callers; runtime sampling remains
+                purely tensor-based.
+            domain2idx: Optional domain-to-entity mapping for typed corruption.
+            entity2domain: Optional inverse mapping used with ``domain2idx``.
+            order_negatives: Whether to sort valid negatives deterministically.
+            min_entity_idx: Smallest valid entity id. Use ``0`` when entity 0
+                is real data rather than padding.
+        """
         cfg = SamplerConfig(num_entities, num_relations, device, default_mode, seed, order_negatives, min_entity_idx)
         self = cls(cfg)
         if all_known_triples_idx is not None and all_known_triples_idx.numel() > 0:
             hashes = _mix_hash(all_known_triples_idx.detach().to(device=self.device, dtype=torch.long), self.b_e, self.b_r)
-            self.hashes_sorted = torch.sort(torch.unique(hashes)).values
+            self._filter_hashes_sorted = torch.sort(torch.unique(hashes)).values
         else:
-            self.hashes_sorted = torch.empty((0,), dtype=torch.long, device=self.device)
+            self._filter_hashes_sorted = torch.empty((0,), dtype=torch.long, device=self.device)
         if domain2idx and entity2domain:
             self._build_domain_structures(domain2idx, entity2domain, device)
         return self
+
+    @property
+    def hashes_sorted(self) -> LongTensor:
+        """Return the sorted known-triple hashes used by the filter."""
+        if self._filter_hashes_sorted is None:
+            return torch.empty((0,), dtype=torch.long, device=self.device)
+        return self._filter_hashes_sorted
 
     def _build_domain_structures(
         self,
@@ -85,6 +89,7 @@ class Sampler:
         entity2domain: Dict[int, str],
         device: torch.device,
     ) -> None:
+        """Materialize padded domain pools for compiled-friendly sampling."""
         domain_names = sorted(domain2idx.keys())
         domain_lists = [torch.tensor(domain2idx[n], dtype=torch.int32, device=device) for n in domain_names]
         self.num_domains = len(domain_lists)
@@ -104,9 +109,11 @@ class Sampler:
                 self.pos_in_dom[row.long()] = torch.arange(row.numel(), device=device, dtype=torch.int32)
 
     def _has_domain_info(self) -> bool:
+        """Return ``True`` when typed/domain-aware corruption is available."""
         return self.domain_padded is not None and self.num_domains > 0
 
     def _get_corruption_indices(self, mode: str) -> List[int]:
+        """Map corruption mode to columns in internal ``(h, r, t)`` layout."""
         return [0] if mode == "head" else [2] if mode == "tail" else [0, 2]
 
     def _corrupt_relation_col(
@@ -116,6 +123,7 @@ class Sampler:
         is_exhaustive: bool,
         device: torch.device,
     ) -> LongTensor:
+        """Generate relation corruptions in internal ``(h, r, t)`` layout."""
         batch_size = pos_hrt.shape[0]
         if is_exhaustive:
             all_rels = torch.arange(self.num_relations, device=device, dtype=pos_hrt.dtype)
@@ -137,6 +145,7 @@ class Sampler:
         is_exhaustive: bool,
         device: torch.device,
     ) -> LongTensor:
+        """Generate entity corruptions from the global entity pool."""
         batch_size = pos_hrt.shape[0]
         pool_size = self.num_entities
         lo = self.min_entity_idx
@@ -163,6 +172,7 @@ class Sampler:
         orig_slice: LongTensor,
         device: torch.device,
     ) -> LongTensor:
+        """Generate entity corruptions restricted to each example's domain."""
         orig_ent = pos_hrt[:, col]
         d_ids = self.ent2dom[orig_ent].long()
         pools = self.domain_padded[d_ids]
@@ -200,13 +210,14 @@ class Sampler:
         return result_flat.reshape(orig_slice.shape)
 
     def _filter_mask_batched(self, triples: LongTensor) -> torch.BoolTensor:
-        if self.hashes_sorted is None or self.hashes_sorted.numel() == 0:
+        """Return a keep-mask for batched triples against known positives."""
+        if self._filter_hashes_sorted is None or self._filter_hashes_sorted.numel() == 0:
             return torch.ones(triples.shape[:-1], dtype=torch.bool, device=triples.device)
         batch_size, k = triples.shape[:2]
         flat = triples.reshape(-1, 3)
         hashes = _mix_hash(flat, self.b_e, self.b_r)
 
-        target = self.hashes_sorted
+        target = self._filter_hashes_sorted
         pos = torch.searchsorted(target, hashes)
         in_range = pos < target.numel()
         safe_pos = pos.clamp(min=0, max=target.numel() - 1)
@@ -214,10 +225,11 @@ class Sampler:
         return (~eq).reshape(batch_size, k)
 
     def _filter_keep_mask(self, triples: LongTensor) -> torch.BoolTensor:
-        if self.hashes_sorted is None or self.hashes_sorted.numel() == 0:
+        """Return a keep-mask for flat triples against known positives."""
+        if self._filter_hashes_sorted is None or self._filter_hashes_sorted.numel() == 0:
             return torch.ones((triples.shape[0],), dtype=torch.bool, device=triples.device)
         hashes = _mix_hash(triples, self.b_e, self.b_r)
-        target = self.hashes_sorted
+        target = self._filter_hashes_sorted
 
         pos = torch.searchsorted(target, hashes)
         in_range = pos < target.numel()
@@ -234,6 +246,7 @@ class Sampler:
         do_unique: bool,
         device: torch.device,
     ) -> tuple[LongTensor, torch.BoolTensor]:
+        """Convert internal triples to public ``(r, h, t)`` and compact them."""
         neg_rht = torch.stack([neg[:, :, 1], neg[:, :, 0], neg[:, :, 2]], dim=-1)
         lo = self.min_entity_idx
         valid = (neg_rht[:, :, 1] >= lo) & (neg_rht[:, :, 2] >= lo)
@@ -275,6 +288,22 @@ class Sampler:
         filter: bool = True,
         unique: bool = True,
     ) -> tuple[LongTensor, torch.BoolTensor]:
+        """Generate corruptions and an explicit validity mask.
+
+        Args:
+            positives: Positive triples in public ``(r, h, t)`` format.
+            num_negatives: Number of negatives per positive. ``None`` means
+                exhaustive corruption over the active candidate pool.
+            mode: Which side to corrupt: ``head``, ``tail``, or ``both``.
+            device: Optional override for the runtime device.
+            filter: Remove known positives using the indexed fact set.
+            unique: Deduplicate negatives within each row after filtering.
+
+        Returns:
+            ``(negatives, valid_mask)`` where ``negatives`` has shape
+            ``[B, K, 3]`` in ``(r, h, t)`` format and ``valid_mask`` has shape
+            ``[B, K]``.
+        """
         device = device or self.device
         mode = mode or self.default_mode
         pos = positives.to(device=device)
@@ -322,6 +351,11 @@ class Sampler:
         filter: bool = True,
         unique: bool = True,
     ) -> LongTensor:
+        """Generate corruptions only.
+
+        This is a convenience wrapper over :meth:`corrupt_with_mask` for callers
+        that rely on padded invalid rows instead of an explicit mask.
+        """
         neg, _ = self.corrupt_with_mask(
             positives,
             num_negatives=num_negatives,
@@ -333,4 +367,42 @@ class Sampler:
         return neg
 
 
-__all__ = ["Sampler", "SamplerConfig"]
+def corrupt(
+    sampler: SupportsCorruptWithMask,
+    positives: LongTensor,
+    *,
+    num_corruptions: Optional[int] = None,
+    mode: Optional[Literal["head", "tail", "both"]] = None,
+    device: Optional[torch.device] = None,
+    filter: bool = True,
+    unique: bool = True,
+) -> CorruptionOutput:
+    """Public corruption entry point for sampled or exhaustive generation.
+
+    Args:
+        sampler: Any sampler exposing ``corrupt_with_mask``.
+        positives: Positive triples in ``(r, h, t)`` format, shape ``[B, 3]``.
+        num_corruptions: Number of corruptions per query. ``None`` means
+            exhaustive corruption over the active candidate pool.
+        mode: Which side to corrupt: ``head``, ``tail``, or ``both``.
+        device: Optional runtime device override.
+        filter: Remove known positives using the sampler index.
+        unique: Deduplicate negatives within each query after filtering.
+
+    Returns:
+        ``CorruptionOutput`` with padded negatives ``[B, K, 3]`` in ``(r, h, t)``
+        format and a ``valid_mask`` of shape ``[B, K]``.
+    """
+
+    negatives, valid_mask = sampler.corrupt_with_mask(
+        positives,
+        num_negatives=num_corruptions,
+        mode=mode,
+        device=device,
+        filter=filter,
+        unique=unique,
+    )
+    return CorruptionOutput(negatives=negatives, valid_mask=valid_mask)
+
+
+__all__ = ["Sampler", "SamplerConfig", "corrupt"]
