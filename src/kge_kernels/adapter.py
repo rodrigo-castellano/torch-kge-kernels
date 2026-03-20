@@ -39,17 +39,21 @@ def _num_entities(model: nn.Module) -> int:
 
 def _score_triples_sigmoid(model: nn.Module, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
     actual = _unwrap_model(model)
-    if hasattr(actual, "score_triples"):
+    if hasattr(actual, "score"):
+        raw = actual.score(h, r, t)
+    elif hasattr(actual, "score_triples"):
         raw = actual.score_triples(h, r, t)
     elif hasattr(actual, "score_atoms"):
         raw = actual.score_atoms(r, h, t)
     else:
-        raise AttributeError("Model adapter requires score_triples(...) or score_atoms(preds, subjs, objs)")
+        raise AttributeError("Model adapter requires score(), score_triples(), or score_atoms()")
     return torch.sigmoid(raw)
 
 
 def _score_all_tails_sigmoid(model: nn.Module, h: Tensor, r: Tensor) -> Tensor:
     actual = _unwrap_model(model)
+    if hasattr(actual, "score"):
+        return torch.sigmoid(actual.score(h, r, None))
     if hasattr(actual, "score_all_tails_batch"):
         return torch.sigmoid(actual.score_all_tails_batch(h, r))
 
@@ -68,6 +72,8 @@ def _score_all_tails_sigmoid(model: nn.Module, h: Tensor, r: Tensor) -> Tensor:
 
 def _score_all_heads_sigmoid(model: nn.Module, r: Tensor, t: Tensor) -> Tensor:
     actual = _unwrap_model(model)
+    if hasattr(actual, "score"):
+        return torch.sigmoid(actual.score(None, r, t))
     if hasattr(actual, "score_all_heads_batch"):
         return torch.sigmoid(actual.score_all_heads_batch(r, t))
 
