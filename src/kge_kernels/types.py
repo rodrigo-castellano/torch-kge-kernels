@@ -36,7 +36,7 @@ class SamplerConfig:
     num_entities: int
     num_relations: int
     device: torch.device
-    default_mode: Literal["head", "tail", "both"] = "both"
+    default_mode: Literal["head", "tail", "both", "bernoulli"] = "both"
     seed: int = 0
     order_negatives: bool = False
     min_entity_idx: int = 1
@@ -50,7 +50,7 @@ class SupportsCorruptWithMask(Protocol):
         positives: LongTensor,
         *,
         num_negatives: int | None = None,
-        mode: Literal["head", "tail", "both"] | None = None,
+        mode: Literal["head", "tail", "both", "bernoulli"] | None = None,
         device: torch.device | None = None,
         filter: bool = True,
         unique: bool = True,

@@ -25,6 +25,7 @@ class Sampler:
         self.order_negatives = cfg.order_negatives
         self.min_entity_idx = cfg.min_entity_idx
         self._filter_hashes_sorted: Optional[LongTensor] = None
+        self._bern_probs: Optional[Tensor] = None
         self.b_e = max(2 * self.num_entities + 1, 1024)
         self.b_r = max(2 * self.num_relations + 1, 128)
         self.domain_padded: Optional[Tensor] = None
@@ -41,12 +42,13 @@ class Sampler:
         num_entities: int,
         num_relations: int,
         device: torch.device,
-        default_mode: Literal["head", "tail", "both"] = "both",
+        default_mode: Literal["head", "tail", "both", "bernoulli"] = "both",
         seed: int = 0,
         domain2idx: Optional[Dict[str, List[int]]] = None,
         entity2domain: Optional[Dict[int, str]] = None,
         order_negatives: bool = False,
         min_entity_idx: int = 1,
+        bern_probs: Optional[Tensor] = None,
     ) -> "Sampler":
         """Construct a sampler from known triples and optional domain pools.
 
@@ -64,6 +66,8 @@ class Sampler:
             order_negatives: Whether to sort valid negatives deterministically.
             min_entity_idx: Smallest valid entity id. Use ``0`` when entity 0
                 is real data rather than padding.
+            bern_probs: Per-relation head-corruption probabilities for
+                ``"bernoulli"`` mode.  Shape ``[num_relations]``.
         """
         cfg = SamplerConfig(num_entities, num_relations, device, default_mode, seed, order_negatives, min_entity_idx)
         self = cls(cfg)
@@ -72,6 +76,8 @@ class Sampler:
             self._filter_hashes_sorted = torch.sort(torch.unique(hashes)).values
         else:
             self._filter_hashes_sorted = torch.empty((0,), dtype=torch.long, device=self.device)
+        if bern_probs is not None:
+            self._bern_probs = bern_probs.to(device=device)
         if domain2idx and entity2domain:
             self._build_domain_structures(domain2idx, entity2domain, device)
         return self
@@ -278,12 +284,43 @@ class Sampler:
 
         return neg_rht, valid
 
+    def _corrupt_bernoulli(
+        self,
+        positives: LongTensor,
+        *,
+        num_negatives: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        filter: bool = True,
+        unique: bool = True,
+    ) -> tuple[LongTensor, torch.BoolTensor]:
+        """Bernoulli mode: per-triple coin flip between head and tail corruption."""
+        if self._bern_probs is None:
+            raise RuntimeError(
+                "Bernoulli corruption requires bern_probs; pass them to from_data()."
+            )
+        head_neg, head_valid = self.corrupt_with_mask(
+            positives, num_negatives=num_negatives, mode="head",
+            device=device, filter=filter, unique=unique,
+        )
+        tail_neg, tail_valid = self.corrupt_with_mask(
+            positives, num_negatives=num_negatives, mode="tail",
+            device=device, filter=filter, unique=unique,
+        )
+        rels = positives[:, 0]
+        bern = self._bern_probs.to(device=rels.device)
+        corrupt_head = torch.bernoulli(bern[rels]).bool()
+        ch = corrupt_head[:, None, None]
+        return (
+            torch.where(ch, head_neg, tail_neg),
+            torch.where(corrupt_head[:, None], head_valid, tail_valid),
+        )
+
     def corrupt_with_mask(
         self,
         positives: LongTensor,
         *,
         num_negatives: Optional[int] = None,
-        mode: Optional[Literal["head", "tail", "both"]] = None,
+        mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
         device: Optional[torch.device] = None,
         filter: bool = True,
         unique: bool = True,
@@ -294,7 +331,8 @@ class Sampler:
             positives: Positive triples in public ``(r, h, t)`` format.
             num_negatives: Number of negatives per positive. ``None`` means
                 exhaustive corruption over the active candidate pool.
-            mode: Which side to corrupt: ``head``, ``tail``, or ``both``.
+            mode: Which side to corrupt: ``head``, ``tail``, ``both``, or
+                ``bernoulli`` (per-triple coin flip between head and tail).
             device: Optional override for the runtime device.
             filter: Remove known positives using the indexed fact set.
             unique: Deduplicate negatives within each row after filtering.
@@ -306,6 +344,13 @@ class Sampler:
         """
         device = device or self.device
         mode = mode or self.default_mode
+
+        if mode == "bernoulli":
+            return self._corrupt_bernoulli(
+                positives, num_negatives=num_negatives,
+                device=device, filter=filter, unique=unique,
+            )
+
         pos = positives.to(device=device)
         batch_size = pos.shape[0]
 
@@ -346,7 +391,7 @@ class Sampler:
         positives: LongTensor,
         *,
         num_negatives: Optional[int] = None,
-        mode: Optional[Literal["head", "tail", "both"]] = None,
+        mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
         device: Optional[torch.device] = None,
         filter: bool = True,
         unique: bool = True,
@@ -372,7 +417,7 @@ def corrupt(
     positives: LongTensor,
     *,
     num_corruptions: Optional[int] = None,
-    mode: Optional[Literal["head", "tail", "both"]] = None,
+    mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
     device: Optional[torch.device] = None,
     filter: bool = True,
     unique: bool = True,
