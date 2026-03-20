@@ -45,3 +45,21 @@ def test_domain_sampling_stays_in_domain():
     neg, valid = sampler.corrupt_with_mask(pos, num_negatives=None, mode="head")
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert rows == [(0, 2, 1)]
+
+
+def test_exhaustive_domain_sampling_does_not_leak_padding_entity_zero():
+    known = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    sampler = Sampler.from_data(
+        all_known_triples_idx=known,
+        num_entities=5,
+        num_relations=1,
+        device=torch.device("cpu"),
+        domain2idx={"small": [2, 3], "large": [0, 1, 4]},
+        entity2domain={0: "large", 1: "large", 2: "small", 3: "small", 4: "large"},
+        min_entity_idx=0,
+    )
+
+    pos = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=None, mode="tail")
+    rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
+    assert rows == [(0, 1, 3)]

@@ -167,7 +167,10 @@ class Sampler:
         d_ids = self.ent2dom[orig_ent].long()
         pools = self.domain_padded[d_ids]
         lo = self.min_entity_idx
-        valid_mask = (pools != orig_ent.unsqueeze(1)) & (pools >= lo)
+        lengths = self.domain_len[d_ids].long()
+        positions = torch.arange(pools.shape[1], device=device).unsqueeze(0)
+        in_domain = positions < lengths.unsqueeze(1)
+        valid_mask = in_domain & (pools != orig_ent.unsqueeze(1)) & (pools >= lo)
 
         if is_exhaustive:
             sort_keys = (~valid_mask).long()
@@ -175,7 +178,7 @@ class Sampler:
             sorted_pools = torch.gather(pools, 1, perm)
             sorted_valid = torch.gather(valid_mask, 1, perm)
             result = sorted_pools[:, :count]
-            result.masked_fill_(~sorted_valid[:, :count], 0)
+            result.masked_fill_(~sorted_valid[:, :count], -1)
             return result
 
         orig_flat = orig_slice.reshape(-1)
@@ -278,7 +281,9 @@ class Sampler:
         batch_size = pos.shape[0]
 
         if batch_size == 0:
-            return torch.zeros((0, num_negatives or 0, 3), dtype=pos.dtype, device=device)
+            empty_neg = torch.zeros((0, num_negatives or 0, 3), dtype=pos.dtype, device=device)
+            empty_valid = torch.zeros((0, num_negatives or 0), dtype=torch.bool, device=device)
+            return empty_neg, empty_valid
 
         pos_hrt = torch.stack([pos[:, 1], pos[:, 0], pos[:, 2]], dim=1)
         cols = self._get_corruption_indices(mode)
