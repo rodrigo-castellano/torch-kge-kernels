@@ -17,8 +17,12 @@ from .scoring import (
 )
 from .types import CorruptionOutput, ScoreOutput
 from .utils import compute_bernoulli_probs
+from .eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
 
 __all__ = [
+    "CandidatePool",
+    "EvalResults",
+    "Evaluator",
     "Sampler",
     "SamplerConfig",
     "KGEBackend",
@@ -35,6 +39,8 @@ __all__ = [
     "ranking_metrics",
     "ranks_from_scores",
     "ranks_from_scores_matrix",
+    "rrf",
     "score",
     "score_partial_atoms",
+    "zscore_fusion",
 ]
