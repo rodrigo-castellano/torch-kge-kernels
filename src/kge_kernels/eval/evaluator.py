@@ -122,18 +122,23 @@ class Evaluator:
             # One _score_pool call for all modes
             scores_dict = self._score_pool(combined)
 
-            # Apply fusion per-mode if configured
-            if self.fusion is not None and len(scores_dict) > 1 and nm == 1:
-                fused = self.fusion(scores_dict, pools[0].K, pools[0].CQ, self.device)
-                scores_dict.update(fused)
-
-            # Split results per mode, compute ranks
+            # Split results per corruption mode, apply fusion, compute ranks
             offset = 0
             for mode, pool_obj in zip(corruption_modes, pools):
                 P = pool_obj.pool_size
 
-                for mode_name, scores_flat in scores_dict.items():
-                    mode_scores = scores_flat[offset:offset + P]
+                # Extract per-corruption-mode scores
+                mode_scores_dict = {
+                    mode_name: scores_flat[offset:offset + P]
+                    for mode_name, scores_flat in scores_dict.items()
+                }
+
+                # Apply fusion within this corruption mode's pool
+                if self.fusion is not None and len(mode_scores_dict) > 1:
+                    fused = self.fusion(mode_scores_dict, pool_obj.K, pool_obj.CQ, self.device)
+                    mode_scores_dict.update(fused)
+
+                for mode_name, mode_scores in mode_scores_dict.items():
                     scores_2d = mode_scores.view(pool_obj.K, pool_obj.CQ).t()
                     pos_scores = scores_2d[:, 0]
                     neg_scores = scores_2d[:, 1:]
