@@ -56,8 +56,8 @@ def rrf(
         # Reshape flat [CQ*K] → [CQ, K] (column-major pool layout)
         scores_2d = scores_flat.view(K, CQ).t()
 
-        # Rank with seeded noise for fair tie-breaking
-        noise = torch.rand(CQ, K, generator=gen, device=device, dtype=scores_2d.dtype) * 1e-6
+        # Rank with seeded noise for fair tie-breaking (1e-10 matches v1 behavior)
+        noise = torch.rand(CQ, K, generator=gen, device=device, dtype=scores_2d.dtype) * 1e-10
         sorted_idx = (scores_2d + noise).argsort(dim=1, descending=True)
         ranks = torch.zeros_like(sorted_idx, dtype=torch.long)
         ranks.scatter_(1, sorted_idx, arange_k + 1)

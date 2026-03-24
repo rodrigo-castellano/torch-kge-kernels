@@ -7,7 +7,10 @@ All pool construction uses pre-allocated buffers for reduce-overhead compatibili
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 import torch
 from torch import Tensor
@@ -108,10 +111,13 @@ class Evaluator:
         tie_gen = torch.Generator(device=self.device).manual_seed(self.seed)
         all_ranks: Dict[str, List[Tensor]] = {}
 
-        for start in range(0, N, chunk_queries):
+        n_chunks = (N + chunk_queries - 1) // chunk_queries
+        for chunk_i, start in enumerate(range(0, N, chunk_queries)):
             end = min(start + chunk_queries, N)
             chunk_q = test_queries[start:end].to(self.device)
             CQ = chunk_q.shape[0]
+            if n_chunks > 5 and (chunk_i % max(1, n_chunks // 10) == 0 or chunk_i == n_chunks - 1):
+                logger.info("Evaluating chunk %d/%d (queries %d-%d/%d)", chunk_i + 1, n_chunks, start + 1, end, N)
 
             # Build all mode pools into one buffer
             combined, pools = CandidatePool.build_batched(
