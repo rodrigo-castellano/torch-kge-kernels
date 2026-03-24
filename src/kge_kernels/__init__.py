@@ -1,5 +1,15 @@
 """Shared PyTorch kernels for KGE sampling and scoring."""
 
+from .logging import (
+    ExperimentSpec,
+    LoggingConfig,
+    ModelConfig,
+    OutputConfig,
+    RegistryConfig,
+    ReportConfig,
+    RunContext,
+    run_experiment as run_logged_experiment,
+)
 from .adapter import (
     apply_masks,
     build_backend,
@@ -26,6 +36,13 @@ __all__ = [
     "Sampler",
     "SamplerConfig",
     "KGEBackend",
+    "LoggingConfig",
+    "ModelConfig",
+    "OutputConfig",
+    "RegistryConfig",
+    "ReportConfig",
+    "RunContext",
+    "ExperimentSpec",
     "CorruptionOutput",
     "ScoreOutput",
     "apply_masks",
@@ -39,6 +56,7 @@ __all__ = [
     "ranking_metrics",
     "ranks_from_scores",
     "ranks_from_scores_matrix",
+    "run_logged_experiment",
     "rrf",
     "score",
     "LazyPartialScorer",
