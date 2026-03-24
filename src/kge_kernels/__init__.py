@@ -8,7 +8,7 @@ from .adapter import (
     kge_score_triples,
 )
 from .adapter import precompute_partial_scores as precompute_partial_scores
-from .partial import score_partial_atoms
+from .partial import LazyPartialScorer, score_partial_atoms
 from .ranking import ranking_metrics, ranks_from_scores, ranks_from_scores_matrix
 from .sampler import Sampler, SamplerConfig, corrupt
 from .scoring import (
@@ -41,6 +41,7 @@ __all__ = [
     "ranks_from_scores_matrix",
     "rrf",
     "score",
+    "LazyPartialScorer",
     "score_partial_atoms",
     "zscore_fusion",
 ]
