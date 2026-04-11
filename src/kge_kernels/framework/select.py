@@ -25,7 +25,6 @@ from torch import Tensor
 from .repr import Repr
 from .types import ProofEvidence, ProofState, SelectInfo
 
-
 StateFactory = Callable[[ProofState, Tensor, Tensor], ProofState]
 
 

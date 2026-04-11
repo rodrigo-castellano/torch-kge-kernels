@@ -71,7 +71,7 @@ def test_q_select_can_read_evidence_for_future_compat():
     is expressive enough, not that any learning happens."""
     import torch.nn as nn
 
-    from kge_kernels.framework import Repr, SelectInfo
+    from kge_kernels.framework import SelectInfo
 
     class QSelect(nn.Module):
         def __init__(self):

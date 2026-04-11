@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-import torch
 from torch import Tensor
 
 from .protocols import AtomRepr, QueryRepr, ResolutionOp, Select, StateRepr, TrajRepr

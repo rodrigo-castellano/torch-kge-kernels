@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import is_dataclass
-from typing import Any, Mapping, Protocol
 import traceback
+from typing import Any, Mapping, Protocol
 
 from .config import LoggingConfig
 from .context import RunContext

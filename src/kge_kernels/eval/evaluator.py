@@ -8,9 +8,7 @@ All pool construction uses pre-allocated buffers for reduce-overhead compatibili
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
-
-logger = logging.getLogger(__name__)
+from typing import Callable, Dict, List, Literal, Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -19,6 +17,8 @@ from ..ranking import ranking_metrics, ranks_from_scores
 from ..types import SupportsCorruptWithMask
 from .pool import CandidatePool
 from .results import EvalResults
+
+logger = logging.getLogger(__name__)
 
 ScorerFn = Callable[[Tensor], Dict[str, Tensor]]
 FusionFn = Callable[[Dict[str, Tensor], int, int, torch.device], Dict[str, Tensor]]
@@ -115,7 +115,6 @@ class Evaluator:
         for chunk_i, start in enumerate(range(0, N, chunk_queries)):
             end = min(start + chunk_queries, N)
             chunk_q = test_queries[start:end].to(self.device)
-            CQ = chunk_q.shape[0]
             if n_chunks > 5 and (chunk_i % max(1, n_chunks // 10) == 0 or chunk_i == n_chunks - 1):
                 logger.info("Evaluating chunk %d/%d (queries %d-%d/%d)", chunk_i + 1, n_chunks, start + 1, end, N)
 

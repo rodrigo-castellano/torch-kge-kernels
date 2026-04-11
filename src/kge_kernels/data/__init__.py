@@ -18,9 +18,9 @@ from __future__ import annotations
 from .loaders import (
     TripleExample,
     detect_triple_format,
+    encode_split_triples,
     load_triples,
     load_triples_with_mappings,
-    encode_split_triples,
 )
 from .transforms import (
     add_reciprocal_triples,

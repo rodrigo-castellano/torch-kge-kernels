@@ -259,8 +259,10 @@ class LazyPartialScorer:
         is_partial_tail = a1_const & ~a2_const & (preds != pad) & (preds != self.true_pred_idx)
         is_partial_head = ~a1_const & a2_const & (preds != pad) & (preds != self.true_pred_idx)
 
-        tp = preds[is_partial_tail]; te = args1[is_partial_tail]
-        hp = preds[is_partial_head]; he = args2[is_partial_head]
+        tp = preds[is_partial_tail]
+        te = args1[is_partial_tail]
+        hp = preds[is_partial_head]
+        he = args2[is_partial_head]
 
         tail_uncached = ~self._cached_tail[tp, te] if tp.numel() > 0 else tp
         head_uncached = ~self._cached_head[hp, he] if hp.numel() > 0 else hp

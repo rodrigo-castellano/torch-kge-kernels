@@ -17,7 +17,6 @@ from typing import Optional, Protocol, runtime_checkable
 
 from torch import Tensor
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # Protocols satisfied by grounder.ProofState / grounder.ProofEvidence
 # ═══════════════════════════════════════════════════════════════════════

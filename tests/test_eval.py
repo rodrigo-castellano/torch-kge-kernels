@@ -151,7 +151,8 @@ def test_evaluator_with_rrf():
         s2 = queries[:, 1].float() * 2 + queries[:, 2].float()
         return {"mode_a": s1, "mode_b": s2}
 
-    fusion_fn = lambda sd, pk, nq, dev: rrf(sd, pk, nq, dev, k=60.0, seed=42)
+    def fusion_fn(sd, pk, nq, dev):
+        return rrf(sd, pk, nq, dev, k=60.0, seed=42)
 
     evaluator = Evaluator(
         scorer=scorer,

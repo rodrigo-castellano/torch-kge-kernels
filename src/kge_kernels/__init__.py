@@ -1,15 +1,23 @@
-"""Shared PyTorch kernels for KGE sampling and scoring."""
+"""Shared PyTorch building blocks for proof-based neural-symbolic KGE methods.
 
-from .logging import (
-    ExperimentSpec,
-    LoggingConfig,
-    ModelConfig,
-    OutputConfig,
-    RegistryConfig,
-    ReportConfig,
-    RunContext,
-    run_experiment as run_logged_experiment,
-)
+See ``README.md`` for an overview of the framework primitives, KGE models,
+losses, data utilities, ranking metrics, and evaluation pipeline shipped
+by this package.
+"""
+
+__version__ = "0.3.0"
+
+# Dataset utilities
+from . import data as data  # noqa: F401  re-export subpackage
+
+# Framework primitives (atom_repr, state_repr, traj_repr, query_repr, select)
+from . import framework as framework  # noqa: F401  re-export subpackage
+
+# Loss functions
+from . import losses as losses  # noqa: F401  re-export subpackage
+
+# Raw KGE nn.Module classes
+from . import models as models  # noqa: F401  re-export subpackage
 from .adapter import (
     apply_masks,
     build_backend,
@@ -18,6 +26,89 @@ from .adapter import (
     kge_score_triples,
 )
 from .adapter import precompute_partial_scores as precompute_partial_scores
+from .data import (
+    TripleExample,
+    add_reciprocal_triples,
+    build_filter_maps,
+    build_relation_domains,
+    detect_triple_format,
+    encode_split_triples,
+    load_triples,
+    load_triples_with_mappings,
+)
+from .eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
+from .framework import (
+    AtomRepr,
+    BeamSelect,
+    BestCumulativeTrajRepr,
+    ConcatStateRepr,
+    ConceptMaxQueryRepr,
+    CumulativeLogTrajRepr,
+    ExhaustiveSelect,
+    GreedySelect,
+    KGEBothAtom,
+    KGEEmbedAtom,
+    KGEScoreAtom,
+    LogSumExpQueryRepr,
+    MaxQueryRepr,
+    MaxStateRepr,
+    MeanQueryRepr,
+    MeanStateRepr,
+    MinStepTrajRepr,
+    MLPAtom,
+    MLPSumQueryRepr,
+    PolicyProductTrajRepr,
+    ProofEvidence,
+    ProofState,
+    QueryRepr,
+    Repr,
+    ResolutionOp,
+    SampleSelect,
+    SBRBodyMinTrajRepr,
+    ScorerFn,
+    Select,
+    SelectInfo,
+    StateRepr,
+    SumQueryRepr,
+    SumStateRepr,
+    TNormStateRepr,
+    TNormTrajRepr,
+    TrajRepr,
+    build_scorer,
+    search_and_score,
+)
+from .logging import (
+    ExperimentSpec,
+    LoggingConfig,
+    ModelConfig,
+    OutputConfig,
+    RegistryConfig,
+    ReportConfig,
+    RunContext,
+)
+from .logging import (
+    run_experiment as run_logged_experiment,
+)
+from .losses import (
+    BinaryCrossEntropyRagged,
+    BinaryCrossEntropyWithMask,
+    CategoricalCrossEntropyRagged,
+    HingeLossRagged,
+    L2LossRagged,
+    PairwiseCrossEntropyRagged,
+    WeightedBinaryCrossEntropy,
+    build_loss,
+)
+from .models import (
+    ComplEx,
+    ConvE,
+    DistMult,
+    KGEModel,
+    ModE,
+    RotatE,
+    TransE,
+    TuckER,
+)
 from .partial import LazyPartialScorer, score_partial_atoms
 from .ranking import (
     StreamingRankingMetrics,
@@ -33,89 +124,6 @@ from .scoring import (
 )
 from .types import CorruptionOutput, ScoreOutput
 from .utils import compute_bernoulli_probs
-from .eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
-
-# Loss functions
-from . import losses as losses  # noqa: F401  re-export subpackage
-from .losses import (
-    BinaryCrossEntropyRagged,
-    BinaryCrossEntropyWithMask,
-    CategoricalCrossEntropyRagged,
-    HingeLossRagged,
-    L2LossRagged,
-    PairwiseCrossEntropyRagged,
-    WeightedBinaryCrossEntropy,
-    build_loss,
-)
-
-# Dataset utilities
-from . import data as data  # noqa: F401  re-export subpackage
-from .data import (
-    TripleExample,
-    add_reciprocal_triples,
-    build_filter_maps,
-    build_relation_domains,
-    detect_triple_format,
-    encode_split_triples,
-    load_triples,
-    load_triples_with_mappings,
-)
-
-# Framework primitives (atom_repr, state_repr, traj_repr, query_repr, select)
-from . import framework as framework  # noqa: F401  re-export subpackage
-from .framework import (
-    AtomRepr,
-    BeamSelect,
-    BestCumulativeTrajRepr,
-    ConcatStateRepr,
-    ConceptMaxQueryRepr,
-    CumulativeLogTrajRepr,
-    ExhaustiveSelect,
-    GreedySelect,
-    KGEBothAtom,
-    KGEEmbedAtom,
-    KGEScoreAtom,
-    LogSumExpQueryRepr,
-    MLPAtom,
-    MLPSumQueryRepr,
-    MaxQueryRepr,
-    MaxStateRepr,
-    MeanQueryRepr,
-    MeanStateRepr,
-    MinStepTrajRepr,
-    PolicyProductTrajRepr,
-    ProofEvidence,
-    ProofState,
-    QueryRepr,
-    Repr,
-    ResolutionOp,
-    SBRBodyMinTrajRepr,
-    SampleSelect,
-    ScorerFn,
-    Select,
-    SelectInfo,
-    StateRepr,
-    SumQueryRepr,
-    SumStateRepr,
-    TNormStateRepr,
-    TNormTrajRepr,
-    TrajRepr,
-    build_scorer,
-    search_and_score,
-)
-
-# Raw KGE nn.Module classes
-from . import models as models  # noqa: F401  re-export subpackage
-from .models import (
-    ComplEx,
-    ConvE,
-    DistMult,
-    KGEModel,
-    ModE,
-    RotatE,
-    TransE,
-    TuckER,
-)
 
 __all__ = [
     "CandidatePool",

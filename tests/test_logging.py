@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import json
-
-from kge_kernels.logging import LoggingConfig, ReportConfig, RegistryConfig, run_experiment
+from kge_kernels.logging import LoggingConfig, RegistryConfig, ReportConfig, run_experiment
 
 
 @dataclass

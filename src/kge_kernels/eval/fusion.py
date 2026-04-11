@@ -56,9 +56,14 @@ def rrf(
         # Reshape flat [CQ*K] → [CQ, K] (column-major pool layout)
         scores_2d = scores_flat.view(K, CQ).t()
 
-        # Rank with seeded noise for fair tie-breaking (1e-10 matches v1 behavior)
-        noise = torch.rand(CQ, K, generator=gen, device=device, dtype=scores_2d.dtype) * 1e-10
-        sorted_idx = (scores_2d + noise).argsort(dim=1, descending=True)
+        # Rank with seeded noise for fair tie-breaking. The addition must
+        # happen in float64: float32 has ~1.19e-7 precision, so a
+        # 1e-10 perturbation added to a float32 score is invisible and
+        # argsort's stable ordering would always favor position 0.
+        # float64 precision (~2.2e-16) keeps the perturbation observable
+        # while staying well below any realistic score difference.
+        noise = torch.rand(CQ, K, generator=gen, device=device, dtype=torch.float64) * 1e-10
+        sorted_idx = (scores_2d.to(torch.float64) + noise).argsort(dim=1, descending=True)
         ranks = torch.zeros_like(sorted_idx, dtype=torch.long)
         ranks.scatter_(1, sorted_idx, arange_k + 1)
 

@@ -22,9 +22,9 @@ from .protocols import (
 from .query_repr import (
     ConceptMaxQueryRepr,
     LogSumExpQueryRepr,
-    MLPSumQueryRepr,
     MaxQueryRepr,
     MeanQueryRepr,
+    MLPSumQueryRepr,
     SumQueryRepr,
 )
 from .repr import Repr

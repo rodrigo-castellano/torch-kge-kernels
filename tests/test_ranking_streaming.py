@@ -12,7 +12,6 @@ from kge_kernels.ranking import (
     ranks_from_labeled_predictions,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # ranking_metrics with ks parameter
 # ═══════════════════════════════════════════════════════════════════════

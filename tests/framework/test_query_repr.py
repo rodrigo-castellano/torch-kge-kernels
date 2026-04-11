@@ -7,9 +7,9 @@ import torch
 
 from kge_kernels.framework import (
     LogSumExpQueryRepr,
-    MLPSumQueryRepr,
     MaxQueryRepr,
     MeanQueryRepr,
+    MLPSumQueryRepr,
     Repr,
     SumQueryRepr,
 )

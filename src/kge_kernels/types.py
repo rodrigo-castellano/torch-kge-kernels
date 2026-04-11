@@ -8,7 +8,6 @@ from typing import Callable, Literal, Protocol
 import torch
 from torch import Tensor
 
-
 LongTensor = torch.LongTensor
 ScoreTriplesFn = Callable[[Tensor, Tensor, Tensor], Tensor]
 ScoreAllTailsFn = Callable[[Tensor, Tensor], Tensor]

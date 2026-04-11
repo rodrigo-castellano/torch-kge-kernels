@@ -4,10 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torch-kge-kernels"
-version = "0.2.0"
-description = "Shared PyTorch KGE corruption, sampling, and scoring kernels"
+version = "0.3.0"
+description = "Shared PyTorch building blocks for proof-based neural-symbolic KGE methods: framework primitives, KGE models, losses, dataset utilities, ranking metrics, and evaluation pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Rodrigo Castellano Ontiveros" },
+]
+keywords = [
+    "knowledge-graph",
+    "knowledge-graph-embeddings",
+    "neural-symbolic",
+    "pytorch",
+    "kge",
+    "proof-search",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "torch>=2.0",
 ]
@@ -18,8 +42,16 @@ dev = [
     "ruff>=0.5.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/rodrigo-castellano/torch-kge-kernels"
+Repository = "https://github.com/rodrigo-castellano/torch-kge-kernels"
+Issues = "https://github.com/rodrigo-castellano/torch-kge-kernels/issues"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+kge_kernels = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

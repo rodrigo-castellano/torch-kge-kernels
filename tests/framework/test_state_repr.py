@@ -12,7 +12,7 @@ from kge_kernels.framework import (
     TNormStateRepr,
 )
 
-from .conftest import FakeProofEvidence, make_legacy_evidence, make_structured_evidence
+from .conftest import make_legacy_evidence, make_structured_evidence
 
 
 def test_tnorm_min_structured():
