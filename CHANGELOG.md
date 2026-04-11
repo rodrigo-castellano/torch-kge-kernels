@@ -5,6 +5,48 @@ All notable changes to `torch-kge-kernels` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to semantic versioning starting from 0.3.0.
 
+## [0.4.2] — 2026-04-11
+
+Framework-completeness polish pass. No public API additions — the
+goal is to close out the design gaps identified in the post-Phase-7
+audit of ``framework.tex``.
+
+### Added
+
+- **``tests/framework/test_compile_safety.py``** — verifies that the
+  canonical SBR-exhaustive composition (``KGEScoreAtom`` +
+  ``TNormStateRepr("min")`` + ``TNormTrajRepr("min")`` + ``MaxQueryRepr``
+  + ``ExhaustiveSelect`` fed through ``search_and_score``) runs under
+  ``torch.compile(fullgraph=True)`` with **zero graph breaks**. Uses
+  ``torch._dynamo.explain`` for a structured report. Also exercises
+  ``TNormStateRepr`` and ``MaxQueryRepr`` in isolation.  This test
+  was flagged as blocking in the Phase-1 plan but was never written;
+  catching up now. The ``test_compile_safety.py`` gate enforces the
+  architectural contract claim that framework primitives are
+  fullgraph-compile-safe by design.
+- **``examples/``** directory — three runnable self-contained scripts
+  that compose tkk primitives end-to-end:
+  - ``01_sbr_exhaustive.py``: SBR-style exhaustive scoring via the
+    reference ``search_and_score`` loop.
+  - ``02_train_kge.py``: pure KGE training using ``train_kge``,
+    ``NSSALoss``, cosine warmup scheduler, and
+    ``evaluate_filtered_ranking``. Synthesizes a toy KG so the script
+    runs without any dataset files.
+  - ``03_filtered_eval.py``: standalone filtered ranking evaluation
+    with both exhaustive and sampled modes.
+  Each example runs in <15 seconds on CPU and is smoke-tested by
+  ``tests/test_examples.py`` (parameterized via ``runpy.run_path``).
+
+### Changed
+
+- **``PolicyProductTrajRepr.forward``** now raises ``TypeError``
+  instead of ``NotImplementedError`` with a clearer message. The
+  primitive is incremental-only by design (there is no batch closed
+  form because the quantity depends on which action the
+  ``Select`` picked at each step) — the docstring makes that
+  explicit so reviewers reading the source don't mistake it for
+  a half-baked implementation.
+
 ## [0.4.1] — 2026-04-11
 
 ### Changed
@@ -167,6 +209,7 @@ truth for shared KGE infrastructure.
 - `kge_kernels.ranking` — `ranks_from_scores`, `ranks_from_scores_matrix`,
   `ranking_metrics`.
 
+[0.4.2]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.2.0...v0.3.0

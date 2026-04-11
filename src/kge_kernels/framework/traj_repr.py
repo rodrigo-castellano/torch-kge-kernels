@@ -214,16 +214,41 @@ class BestCumulativeTrajRepr(nn.Module):
 
 
 class PolicyProductTrajRepr(nn.Module):
-    """Sum of policy log-probs along the chosen path.
+    """Sum of policy log-probs along the chosen path — incremental only.
 
-    Reads ``info.log_probs`` rather than ``state_repr.scores``. Used by
-    sequential samplers when scoring "the probability we took this path".
+    Reads ``info.log_probs`` from the ``SelectInfo`` returned by the
+    ``Select`` primitive, not ``state_repr.scores``. The accumulated
+    value at the end of a sequential search is the log-likelihood the
+    policy assigns to the whole rollout — i.e. the quantity used for
+    REINFORCE / PPO policy-gradient scoring.
+
+    **Incremental-only.** This primitive does *not* implement the batch
+    ``forward(state_repr, evidence)`` interface because the quantity
+    depends on which action was chosen at each step, and the batched
+    ``evidence`` does not carry per-step policy log-probs. Calling
+    :meth:`forward` raises :class:`TypeError` with a pointer to the
+    incremental API. Sequential search loops (including the reference
+    :func:`kge_kernels.framework.search_and_score`) always go through
+    :meth:`init` + :meth:`step`, so this does not limit the reference
+    implementation.
+
+    Contract::
+
+        accum = traj_repr.init(B, device)
+        for d in range(max_depth):
+            state, info = select(evidence, s_repr)
+            # info.log_probs has shape [B] and carries log π(a_t | s_t)
+            accum = traj_repr.step(accum, s_repr, info)
     """
 
     def forward(self, state_repr: Repr, evidence: ProofEvidence) -> Repr:
-        # No batch closed form — sequential by construction.
-        raise NotImplementedError(
-            "PolicyProductTrajRepr is incremental-only; use init/step in a search loop"
+        # Raise TypeError rather than NotImplementedError: this is an
+        # interface contract violation, not a missing implementation.
+        # The primitive is correctly incremental-only by design.
+        raise TypeError(
+            "PolicyProductTrajRepr has no batch forward(); it is incremental-only. "
+            "Use traj_repr.init(B, device) and traj_repr.step(accum, s_repr, info) "
+            "inside a sequential search loop."
         )
 
     def init(self, B: int, device) -> Repr:
@@ -231,7 +256,9 @@ class PolicyProductTrajRepr(nn.Module):
 
     def step(self, accum: Repr, state_repr: Repr, info: Optional[SelectInfo]) -> Repr:
         if info is None or info.log_probs is None:
-            raise ValueError("PolicyProductTrajRepr requires SelectInfo.log_probs at each step")
+            raise ValueError(
+                "PolicyProductTrajRepr requires SelectInfo.log_probs at each step"
+            )
         return Repr(scores=accum.scores + info.log_probs)
 
 
