@@ -5,7 +5,7 @@ losses, data utilities, ranking metrics, and evaluation pipeline shipped
 by this package.
 """
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 # Hot-path imports: tkk's original surface (kernels + framework primitives +
 # models + losses + data + ranking + eval + logging + sampler + scoring).

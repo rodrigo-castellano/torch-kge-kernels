@@ -5,6 +5,23 @@ All notable changes to `torch-kge-kernels` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to semantic versioning starting from 0.3.0.
 
+## [0.4.3] — 2026-04-11
+
+### Fixed
+
+- **``StreamingRankingMetrics`` accumulator dtype.** The MRR sum
+  accumulator was allocated as ``float64`` and the per-batch inverse
+  rank was cast via ``ranks.double()``. This added an extra GPU kernel
+  launch (float32→float64 cast) on every validation batch, which
+  measurably slowed downstream consumers that call ``metric.update``
+  in a hot loop (e.g. torch-ns ``evaluate_chunked`` in the speed
+  regression test). Restored to ``float32`` throughout and switched
+  to an in-place ``masked_fill_`` — the old torch-ns
+  ``FusedRankingMetrics`` behavior that the class was meant to replace.
+  MRR/Hits@k are bit-identical between float32 and float64 for
+  vocabulary sizes encountered in practice (max rank ≪ 10⁷), so the
+  dtype downgrade is safe.
+
 ## [0.4.2] — 2026-04-11
 
 Framework-completeness polish pass. No public API additions — the
@@ -209,6 +226,7 @@ truth for shared KGE infrastructure.
 - `kge_kernels.ranking` — `ranks_from_scores`, `ranks_from_scores_matrix`,
   `ranking_metrics`.
 
+[0.4.3]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.3.0...v0.4.0

@@ -207,14 +207,25 @@ class StreamingRankingMetrics:
             self._initialized = False
 
     def _init(self, device: torch.device) -> None:
-        self._mrr_sum = torch.zeros((), device=device, dtype=torch.float64)
+        # Float32 accumulators match torch-ns's pre-consolidation
+        # FusedRankingMetrics byte-for-byte. float64 is overkill for MRR /
+        # Hits@k summations (ranks are at most ~vocab_size, 1/rank ≥ 1e-5
+        # has plenty of float32 precision) and the extra float32→float64
+        # cast on the hot path measurably slowed torch-ns test_train_speed
+        # via the per-validation-batch overhead in evaluate_chunked.
+        self._mrr_sum = torch.zeros((), device=device, dtype=torch.float32)
         self._count = torch.zeros((), device=device, dtype=torch.long)
         for k in self.ks:
             self._hits_sums[k] = torch.zeros((), device=device, dtype=torch.long)
         self._initialized = True
 
     def update(self, y_pred: Tensor, y_true: Tensor) -> None:
-        """Accumulate one batch without any GPU→CPU sync."""
+        """Accumulate one batch without any GPU→CPU sync.
+
+        All operations run in ``y_pred.dtype`` (typically float32) with
+        no dtype promotion. The in-place ``masked_fill_`` avoids
+        allocating a fresh tensor per batch.
+        """
         if not self._initialized:
             self._init(y_pred.device)
         assert self._mrr_sum is not None and self._count is not None
@@ -225,14 +236,19 @@ class StreamingRankingMetrics:
             pad_value=self.pad_value,
             positive_value=self.positive_value,
         )
-        inv = (1.0 / ranks.double()).masked_fill(~valid, 0.0)
-        self._mrr_sum.add_(inv.sum())
+        inv_ranks = (1.0 / ranks).masked_fill_(~valid, 0.0)
+        self._mrr_sum.add_(inv_ranks.sum())
         self._count.add_(valid.sum())
         for k in self.ks:
             self._hits_sums[k].add_((ranks.le(k) & valid).sum())
 
     def compute(self) -> Dict[str, float]:
-        """Return ``{metric_key: mrr, "Hits@{k}": hits@k}`` as Python floats."""
+        """Return ``{metric_key: mrr, "Hits@{k}": hits@k}`` as Python floats.
+
+        The final division uses float32 to match torch-ns legacy behavior.
+        For the ``mrrmetric`` / ``hits@k`` lowercase convention, set
+        ``metric_key="mrrmetric"`` at construction time.
+        """
         hits_prefix = "Hits"
         if self.metric_key == "mrrmetric":
             hits_prefix = "hits"
@@ -241,13 +257,13 @@ class StreamingRankingMetrics:
             for k in self.ks:
                 out[f"{hits_prefix}@{k}"] = 0.0
             return out
-        count = self._count.clamp(min=1).double()
+        count = self._count.clamp(min=1).float()
         results: Dict[str, float] = {
             self.metric_key: (self._mrr_sum / count).item(),
         }
         for k in self.ks:
             results[f"{hits_prefix}@{k}"] = (
-                self._hits_sums[k].double() / count
+                self._hits_sums[k].float() / count
             ).item()
         return results
 
