@@ -191,6 +191,7 @@ __all__ = [
     "CategoricalCrossEntropyRagged",
     "HingeLossRagged",
     "L2LossRagged",
+    "NSSALoss",
     "PairwiseCrossEntropyRagged",
     "WeightedBinaryCrossEntropy",
     "build_loss",
