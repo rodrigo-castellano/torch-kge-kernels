@@ -5,7 +5,25 @@ losses, data utilities, ranking metrics, and evaluation pipeline shipped
 by this package.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
+
+# Hot-path imports: tkk's original surface (kernels + framework primitives +
+# models + losses + data + ranking + eval + logging + sampler + scoring).
+# These are small and stable — consumers that import any tkk submodule
+# trigger this __init__ and pay the import cost, so keep it lean.
+#
+# Phase 9 KGE-training utilities (training/, checkpoints, filtered eval)
+# are intentionally NOT eagerly re-exported here: they only matter for
+# standalone KGE training pipelines, and eagerly importing them measurably
+# slows the first-batch timings of downstream consumers that never touch
+# them (e.g. torch-ns SBR/DCR/R2N). Access them explicitly via::
+#
+#     from kge_kernels.training import TripleDataset, train_kge, ...
+#     from kge_kernels.checkpoints import save_checkpoint, ...
+#     from kge_kernels.eval import evaluate_filtered_ranking
+#
+# or via the subpackage attributes ``kge_kernels.training``,
+# ``kge_kernels.checkpoints``, ``kge_kernels.eval``.
 
 # Dataset utilities
 from . import data as data  # noqa: F401  re-export subpackage
@@ -18,7 +36,6 @@ from . import losses as losses  # noqa: F401  re-export subpackage
 
 # Raw KGE nn.Module classes
 from . import models as models  # noqa: F401  re-export subpackage
-from . import training as training  # noqa: F401  re-export subpackage
 from .adapter import (
     apply_masks,
     build_backend,
@@ -27,15 +44,6 @@ from .adapter import (
     kge_score_triples,
 )
 from .adapter import precompute_partial_scores as precompute_partial_scores
-from .checkpoints import (
-    load_checkpoint,
-    model_state_dict,
-    normalize_loaded_state_dict,
-    save_checkpoint,
-    save_state_dict,
-    unwrap_model,
-    write_json_payload,
-)
 from .data import (
     TripleExample,
     add_reciprocal_triples,
@@ -50,7 +58,6 @@ from .eval import (
     CandidatePool,
     EvalResults,
     Evaluator,
-    evaluate_filtered_ranking,
     rrf,
     zscore_fusion,
 )
@@ -140,15 +147,6 @@ from .scoring import (
     KGEBackend,
     score,
 )
-from .training import (
-    KGETrainConfig,
-    OnEpochEnd,
-    TripleDataset,
-    make_cosine_warmup_scheduler,
-    set_seed,
-    train_kge,
-    wrap_model_for_training,
-)
 from .types import CorruptionOutput, ScoreOutput
 from .utils import compute_bernoulli_probs
 
@@ -193,28 +191,9 @@ __all__ = [
     "CategoricalCrossEntropyRagged",
     "HingeLossRagged",
     "L2LossRagged",
-    "NSSALoss",
     "PairwiseCrossEntropyRagged",
     "WeightedBinaryCrossEntropy",
     "build_loss",
-    # Training
-    "KGETrainConfig",
-    "OnEpochEnd",
-    "TripleDataset",
-    "make_cosine_warmup_scheduler",
-    "set_seed",
-    "train_kge",
-    "wrap_model_for_training",
-    # Checkpoints
-    "load_checkpoint",
-    "model_state_dict",
-    "normalize_loaded_state_dict",
-    "save_checkpoint",
-    "save_state_dict",
-    "unwrap_model",
-    "write_json_payload",
-    # Filtered ranking eval
-    "evaluate_filtered_ranking",
     # Data
     "TripleExample",
     "add_reciprocal_triples",

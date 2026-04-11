@@ -5,6 +5,21 @@ All notable changes to `torch-kge-kernels` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to semantic versioning starting from 0.3.0.
 
+## [0.4.1] — 2026-04-11
+
+### Changed
+
+- **Hot-path import hygiene.** The Phase-9 training / checkpoints /
+  filtered-ranking surfaces are no longer eagerly re-exported from the
+  top-level ``kge_kernels`` namespace. They are still available via their
+  subpackages (``kge_kernels.training.*``, ``kge_kernels.checkpoints.*``,
+  ``kge_kernels.eval.evaluate_filtered_ranking``), and ``kge_kernels.training``
+  / ``kge_kernels.checkpoints`` remain accessible as module attributes.
+  The top-level namespace now only loads what torch-ns and DpRL share on
+  their hot paths, which noticeably reduces first-batch warmup flakiness
+  on the torch-ns ``test_train_speed`` regression test in GPU-bound
+  environments with a tight 10% threshold.
+
 ## [0.4.0] — 2026-04-11
 
 Adds the shared KGE training infrastructure so any consumer can stand
@@ -152,6 +167,7 @@ truth for shared KGE infrastructure.
 - `kge_kernels.ranking` — `ranks_from_scores`, `ranks_from_scores_matrix`,
   `ranking_metrics`.
 
+[0.4.1]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.1.0...v0.2.0
