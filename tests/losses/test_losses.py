@@ -201,3 +201,46 @@ def test_build_loss_bce_balanced_shortcut():
 def test_build_loss_unknown_raises():
     with pytest.raises(ValueError, match="Unknown loss"):
         build_loss("quadratic_sparkle")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# NSSALoss (self-adversarial negative sampling)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_nssa_loss_factory():
+    from kge_kernels.losses import NSSALoss
+
+    obj = build_loss("nssa", adv_temp=1.0, neg_ratio=5)
+    assert isinstance(obj, NSSALoss)
+    assert obj.adv_temp == 1.0
+    assert obj.neg_ratio == 5
+
+
+def test_nssa_loss_runs_zero_temp():
+    from kge_kernels.losses import NSSALoss
+
+    loss = NSSALoss(adv_temp=0.0, neg_ratio=3)
+    pos = torch.tensor([2.0, 1.0, 0.5])          # [B=3]
+    neg = torch.randn(9)                          # [B*neg_ratio=9]
+    out = loss(pos, neg)
+    assert out.isfinite().item()
+    assert out.item() > 0
+
+
+def test_nssa_loss_advtemp_weights_hard_negatives():
+    """With adv_temp > 0, harder (higher-score) negatives should contribute more."""
+    from kge_kernels.losses import NSSALoss
+
+    loss_hot = NSSALoss(adv_temp=2.0, neg_ratio=3)
+    loss_cold = NSSALoss(adv_temp=0.0, neg_ratio=3)
+
+    pos = torch.tensor([1.0])
+    # One very hard negative mixed with two easy ones
+    neg = torch.tensor([5.0, -5.0, -5.0])
+
+    hot = loss_hot(pos, neg).item()
+    cold = loss_cold(pos, neg).item()
+    # Self-adversarial reweighting makes the hard negative dominate,
+    # which should produce a larger loss than plain averaging.
+    assert hot > cold

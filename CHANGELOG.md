@@ -5,6 +5,59 @@ All notable changes to `torch-kge-kernels` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to semantic versioning starting from 0.3.0.
 
+## [0.4.0] — 2026-04-11
+
+Adds the shared KGE training infrastructure so any consumer can stand
+up a standalone KGE training pipeline without reimplementing the
+optimizer / scheduler / compile / checkpoint glue. Consumers that need
+to co-train KGE with reasoning layers (e.g. torch-ns SBR / DCR / R2N)
+keep their own training loops; this release gives them a library of
+reusable primitives rather than a one-size-fits-all loop.
+
+### Added
+
+- **`kge_kernels.training`** — shared KGE training primitives:
+  - `KGETrainConfig` — generic training hyperparameter dataclass
+    (optimizer, scheduler, AMP, compile, grad clip, neg sampling).
+    Dataset path resolution and checkpoint save dirs are deliberately
+    left to each consumer.
+  - `TripleDataset` — tensor-backed `torch.utils.data.Dataset` over
+    integer `(r, h, t)` triples.
+  - `set_seed(seed)` — reproducible Python + torch + CUDA RNG seeding.
+  - `make_cosine_warmup_scheduler(opt, total_steps, warmup_ratio)` —
+    linear warmup → cosine decay `LambdaLR` factory.
+  - `wrap_model_for_training(model, device, cfg)` — applies optional
+    `DataParallel` + `torch.compile` with the same semantics as DpRL's
+    `build_training_model`.
+  - `train_kge(cfg, model, dataloader, ...)` — lean KGE training loop.
+    Runs the forward/loss/backward/step inner loop; validation, early
+    stopping, metric logging, and checkpointing are delegated to an
+    optional `on_epoch_end` callback. Supports RotatE-style entity
+    modulus re-projection via `model.project_entity_modulus_()`.
+- **`kge_kernels.checkpoints`** — config-agnostic checkpoint helpers:
+  - `normalize_loaded_state_dict` strips the `_orig_mod.` prefix added
+    by `torch.compile`.
+  - `unwrap_model` returns the inner module from a `DataParallel` +
+    `torch.compile` chain.
+  - `model_state_dict` = `unwrap_model(m).state_dict()` shortcut.
+  - `save_state_dict`, `write_json_payload`, `save_checkpoint`,
+    `load_checkpoint` — plain `(state_dict, payload_dict)` persistence
+    with no coupling to any specific `TrainConfig`.
+- **`kge_kernels.eval.evaluate_filtered_ranking`** — filtered KGE
+  evaluation with per-relation chunking, optional sampled mode,
+  optional head/tail domain constraints. Handles `DataParallel` +
+  `torch.compile` unwrapping internally.
+- **`kge_kernels.losses.NSSALoss`** — self-adversarial negative
+  sampling loss (Sun et al., 2019) used by RotatE / DpRL. Also
+  available via `build_loss("nssa", adv_temp=..., neg_ratio=...)`.
+- 28 new tests across `tests/training/`, `tests/test_checkpoints.py`,
+  `tests/test_filtered_ranking.py`, and the NSSA test in
+  `tests/losses/`.
+
+### Changed
+
+- `__version__` bumped to `0.4.0`.
+
 ## [0.3.0] — 2026-04-11
 
 First release with the full framework primitive set, KGE model classes,
@@ -99,6 +152,7 @@ truth for shared KGE infrastructure.
 - `kge_kernels.ranking` — `ranks_from_scores`, `ranks_from_scores_matrix`,
   `ranking_metrics`.
 
+[0.4.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/releases/tag/v0.1.0

@@ -24,7 +24,12 @@ from .classification import (
     CategoricalCrossEntropyRagged,
     WeightedBinaryCrossEntropy,
 )
-from .ranking_losses import HingeLossRagged, L2LossRagged, PairwiseCrossEntropyRagged
+from .ranking_losses import (
+    HingeLossRagged,
+    L2LossRagged,
+    NSSALoss,
+    PairwiseCrossEntropyRagged,
+)
 
 
 def build_loss(name: str, **kwargs: Any) -> nn.Module:
@@ -75,6 +80,8 @@ def build_loss(name: str, **kwargs: Any) -> nn.Module:
         return HingeLossRagged(**kwargs)
     if key == "l2":
         return L2LossRagged()
+    if key == "nssa":
+        return NSSALoss(**kwargs)
     raise ValueError(f"Unknown loss: {name!r}")
 
 
@@ -84,6 +91,7 @@ __all__ = [
     "CategoricalCrossEntropyRagged",
     "HingeLossRagged",
     "L2LossRagged",
+    "NSSALoss",
     "PairwiseCrossEntropyRagged",
     "WeightedBinaryCrossEntropy",
     "build_loss",

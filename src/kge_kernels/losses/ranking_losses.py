@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, nn
 
 
 class PairwiseCrossEntropyRagged(nn.Module):
@@ -79,8 +78,48 @@ class L2LossRagged(nn.Module):
         return F.mse_loss(y_pred, y_true)
 
 
+class NSSALoss(nn.Module):
+    """Self-adversarial negative-sampling loss (Sun et al., 2019 — RotatE).
+
+    Maximizes the log-sigmoid of positive scores and the log-sigmoid of
+    negated negative scores. When ``adv_temp > 0`` the negatives are
+    weighted by a stop-gradient softmax over ``adv_temp * neg_scores``,
+    which self-adversarially upweights hard negatives.
+
+    This is the loss used by RotatE / ComplEx / TransE in DpRL's
+    standalone KGE training pipeline. Input format: ``pos_scores`` has
+    shape ``[B]`` and ``neg_scores`` has shape ``[B * neg_ratio]`` (it
+    is reshaped internally to ``[B, neg_ratio]`` for the softmax step).
+
+    Args:
+        adv_temp: Self-adversarial temperature. ``0`` recovers plain
+            uniform averaging over negatives. Typical values: 0.5–2.0.
+        neg_ratio: Number of negatives per positive. Must match what the
+            sampler produces; the loss uses it only to reshape.
+    """
+
+    def __init__(self, adv_temp: float = 0.0, neg_ratio: int = 1) -> None:
+        super().__init__()
+        self.adv_temp = adv_temp
+        self.neg_ratio = neg_ratio
+
+    def forward(self, pos_scores: Tensor, neg_scores: Tensor) -> Tensor:
+        pos_loss = -F.logsigmoid(pos_scores).mean()
+        neg_flat = neg_scores.view(-1, self.neg_ratio)
+
+        if self.adv_temp > 0:
+            with torch.no_grad():
+                weights = torch.softmax(self.adv_temp * neg_flat, dim=1)
+            neg_loss = (weights * (-F.logsigmoid(-neg_flat))).sum(dim=1).mean()
+        else:
+            neg_loss = -F.logsigmoid(-neg_flat).mean()
+
+        return pos_loss + neg_loss
+
+
 __all__ = [
     "HingeLossRagged",
     "L2LossRagged",
+    "NSSALoss",
     "PairwiseCrossEntropyRagged",
 ]

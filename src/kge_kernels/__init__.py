@@ -5,7 +5,7 @@ losses, data utilities, ranking metrics, and evaluation pipeline shipped
 by this package.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # Dataset utilities
 from . import data as data  # noqa: F401  re-export subpackage
@@ -18,6 +18,7 @@ from . import losses as losses  # noqa: F401  re-export subpackage
 
 # Raw KGE nn.Module classes
 from . import models as models  # noqa: F401  re-export subpackage
+from . import training as training  # noqa: F401  re-export subpackage
 from .adapter import (
     apply_masks,
     build_backend,
@@ -26,6 +27,15 @@ from .adapter import (
     kge_score_triples,
 )
 from .adapter import precompute_partial_scores as precompute_partial_scores
+from .checkpoints import (
+    load_checkpoint,
+    model_state_dict,
+    normalize_loaded_state_dict,
+    save_checkpoint,
+    save_state_dict,
+    unwrap_model,
+    write_json_payload,
+)
 from .data import (
     TripleExample,
     add_reciprocal_triples,
@@ -36,7 +46,14 @@ from .data import (
     load_triples,
     load_triples_with_mappings,
 )
-from .eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
+from .eval import (
+    CandidatePool,
+    EvalResults,
+    Evaluator,
+    evaluate_filtered_ranking,
+    rrf,
+    zscore_fusion,
+)
 from .framework import (
     AtomRepr,
     BeamSelect,
@@ -95,6 +112,7 @@ from .losses import (
     CategoricalCrossEntropyRagged,
     HingeLossRagged,
     L2LossRagged,
+    NSSALoss,
     PairwiseCrossEntropyRagged,
     WeightedBinaryCrossEntropy,
     build_loss,
@@ -121,6 +139,15 @@ from .sampler import Sampler, SamplerConfig, corrupt
 from .scoring import (
     KGEBackend,
     score,
+)
+from .training import (
+    KGETrainConfig,
+    OnEpochEnd,
+    TripleDataset,
+    make_cosine_warmup_scheduler,
+    set_seed,
+    train_kge,
+    wrap_model_for_training,
 )
 from .types import CorruptionOutput, ScoreOutput
 from .utils import compute_bernoulli_probs
@@ -166,9 +193,28 @@ __all__ = [
     "CategoricalCrossEntropyRagged",
     "HingeLossRagged",
     "L2LossRagged",
+    "NSSALoss",
     "PairwiseCrossEntropyRagged",
     "WeightedBinaryCrossEntropy",
     "build_loss",
+    # Training
+    "KGETrainConfig",
+    "OnEpochEnd",
+    "TripleDataset",
+    "make_cosine_warmup_scheduler",
+    "set_seed",
+    "train_kge",
+    "wrap_model_for_training",
+    # Checkpoints
+    "load_checkpoint",
+    "model_state_dict",
+    "normalize_loaded_state_dict",
+    "save_checkpoint",
+    "save_state_dict",
+    "unwrap_model",
+    "write_json_payload",
+    # Filtered ranking eval
+    "evaluate_filtered_ranking",
     # Data
     "TripleExample",
     "add_reciprocal_triples",
