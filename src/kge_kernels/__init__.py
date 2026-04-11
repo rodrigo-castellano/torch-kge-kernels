@@ -76,6 +76,7 @@ from .framework import (
 from . import models as models  # noqa: F401  re-export subpackage
 from .models import (
     ComplEx,
+    ConvE,
     DistMult,
     KGEModel,
     ModE,
@@ -158,6 +159,7 @@ __all__ = [
     "search_and_score",
     # KGE models
     "ComplEx",
+    "ConvE",
     "DistMult",
     "KGEModel",
     "ModE",

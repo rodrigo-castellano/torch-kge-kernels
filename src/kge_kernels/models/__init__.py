@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .base import KGEModel
 from .complex import ComplEx
+from .conve import ConvE
 from .distmult import DistMult
 from .mode import ModE
 from .rotate import RotatE
@@ -16,6 +17,7 @@ from .tucker import TuckER
 
 __all__ = [
     "ComplEx",
+    "ConvE",
     "DistMult",
     "KGEModel",
     "ModE",
