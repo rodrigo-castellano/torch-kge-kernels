@@ -19,7 +19,13 @@ from .adapter import (
 )
 from .adapter import precompute_partial_scores as precompute_partial_scores
 from .partial import LazyPartialScorer, score_partial_atoms
-from .ranking import ranking_metrics, ranks_from_scores, ranks_from_scores_matrix
+from .ranking import (
+    StreamingRankingMetrics,
+    ranking_metrics,
+    ranks_from_labeled_predictions,
+    ranks_from_scores,
+    ranks_from_scores_matrix,
+)
 from .sampler import Sampler, SamplerConfig, corrupt
 from .scoring import (
     KGEBackend,
@@ -28,6 +34,32 @@ from .scoring import (
 from .types import CorruptionOutput, ScoreOutput
 from .utils import compute_bernoulli_probs
 from .eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
+
+# Loss functions
+from . import losses as losses  # noqa: F401  re-export subpackage
+from .losses import (
+    BinaryCrossEntropyRagged,
+    BinaryCrossEntropyWithMask,
+    CategoricalCrossEntropyRagged,
+    HingeLossRagged,
+    L2LossRagged,
+    PairwiseCrossEntropyRagged,
+    WeightedBinaryCrossEntropy,
+    build_loss,
+)
+
+# Dataset utilities
+from . import data as data  # noqa: F401  re-export subpackage
+from .data import (
+    TripleExample,
+    add_reciprocal_triples,
+    build_filter_maps,
+    build_relation_domains,
+    detect_triple_format,
+    encode_split_triples,
+    load_triples,
+    load_triples_with_mappings,
+)
 
 # Framework primitives (atom_repr, state_repr, traj_repr, query_repr, select)
 from . import framework as framework  # noqa: F401  re-export subpackage
@@ -110,6 +142,7 @@ __all__ = [
     "kge_score_triples",
     "precompute_partial_scores",
     "ranking_metrics",
+    "ranks_from_labeled_predictions",
     "ranks_from_scores",
     "ranks_from_scores_matrix",
     "run_logged_experiment",
@@ -117,7 +150,26 @@ __all__ = [
     "score",
     "LazyPartialScorer",
     "score_partial_atoms",
+    "StreamingRankingMetrics",
     "zscore_fusion",
+    # Losses
+    "BinaryCrossEntropyRagged",
+    "BinaryCrossEntropyWithMask",
+    "CategoricalCrossEntropyRagged",
+    "HingeLossRagged",
+    "L2LossRagged",
+    "PairwiseCrossEntropyRagged",
+    "WeightedBinaryCrossEntropy",
+    "build_loss",
+    # Data
+    "TripleExample",
+    "add_reciprocal_triples",
+    "build_filter_maps",
+    "build_relation_domains",
+    "detect_triple_format",
+    "encode_split_triples",
+    "load_triples",
+    "load_triples_with_mappings",
     # Framework primitives
     "AtomRepr",
     "BeamSelect",
