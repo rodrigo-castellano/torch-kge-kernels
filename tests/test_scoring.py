@@ -1,6 +1,7 @@
 import torch
 
-from kge_kernels.scoring import KGEBackend, Sampler, score
+from kge_kernels.scoring import KGEBackend, Sampler
+from kge_kernels.scoring.backend import score
 
 
 def _make_backend() -> KGEBackend:

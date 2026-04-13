@@ -1,21 +1,21 @@
 """Example 3 — Standalone filtered-ranking evaluation.
 
 Shows how to evaluate an already-trained KGE model on a test split
-using ``kge_kernels.eval.evaluate_filtered_ranking``. This is what
-every published KGE paper computes for its MRR / Hits@1 / Hits@3 /
-Hits@10 table.
+using ``kge_kernels.eval.Evaluator``. This is what every published KGE
+paper computes for its MRR / Hits@1 / Hits@3 / Hits@10 table.
 
-Use this pattern in a ``python examples/03_filtered_eval.py`` style
-script when you want to eval a checkpoint end-to-end without setting
-up a training loop.
+Both exhaustive and sampled evaluation modes are demonstrated:
+  - Exhaustive (``num_corruptions=0``): rank against all entities
+  - Sampled (``num_corruptions=K``): rank against K random candidates
 """
 from __future__ import annotations
 
 import torch
 
 from kge_kernels.data import build_filter_maps
-from kge_kernels.eval import evaluate_filtered_ranking
+from kge_kernels.eval import Evaluator
 from kge_kernels.models import TransE
+from kge_kernels.scoring import Sampler
 
 
 def main() -> None:
@@ -24,15 +24,10 @@ def main() -> None:
     num_entities = 15
     num_relations = 3
 
-    # Random TransE — in real usage you would load a trained checkpoint
-    # via ``kge_kernels.checkpoints.load_checkpoint`` and then
-    # ``model.load_state_dict(state_dict)``.
     model = TransE(
         num_entities=num_entities, num_relations=num_relations, dim=16
     )
 
-    # Toy train / valid / test triples. Real pipelines load these via
-    # ``kge_kernels.data.load_triples_with_mappings``.
     train = [
         (0, 0, 1), (0, 1, 2), (0, 2, 3), (0, 3, 4),
         (1, 0, 5), (1, 2, 6), (1, 4, 7),
@@ -41,37 +36,35 @@ def main() -> None:
     valid = [(0, 4, 5), (1, 1, 3)]
     test = [(0, 5, 6), (1, 6, 7), (2, 2, 4)]
 
-    # Build filter maps over ALL known positives so that filtered ranking
-    # ignores entities that are provably correct for other (h, r) or
-    # (r, t) pairs in the KG.
     head_filter, tail_filter = build_filter_maps(train, valid, test)
 
-    # Exhaustive filtered ranking: ranks the true entity against every
-    # other entity in the vocabulary, filtering out known positives.
-    exhaustive = evaluate_filtered_ranking(
-        model,
-        triples=test,
-        num_entities=num_entities,
-        head_filter=head_filter,
-        tail_filter=tail_filter,
+    # Exhaustive filtered ranking (num_corruptions=0)
+    evaluator = Evaluator(
+        model, num_entities,
+        head_filter=head_filter, tail_filter=tail_filter,
         device=torch.device("cpu"),
     )
+    test_t = torch.tensor(test, dtype=torch.long)
+    exhaustive = evaluator.evaluate(test_t)
     print("Exhaustive filtered ranking:")
     for k, v in exhaustive.items():
         print(f"  {k:>8}: {v:.4f}")
 
-    # Sampled filtered ranking: ranks the true entity against K random
-    # (filtered) candidates. Faster, lower variance per query.
-    sampled = evaluate_filtered_ranking(
-        model,
-        triples=test,
-        num_entities=num_entities,
-        head_filter=head_filter,
-        tail_filter=tail_filter,
+    # Sampled filtered ranking (num_corruptions=10)
+    sampler = Sampler.from_data(
+        all_known_triples_idx=torch.tensor(train + valid + test, dtype=torch.long),
+        num_entities=num_entities, num_relations=num_relations,
         device=torch.device("cpu"),
-        eval_num_corruptions=10,
-        seed=42,
     )
+    sampled_evaluator = Evaluator(
+        model, num_entities,
+        num_corruptions=10,
+        sampler=sampler,
+        head_filter=head_filter, tail_filter=tail_filter,
+        seed=42,
+        device=torch.device("cpu"),
+    )
+    sampled = sampled_evaluator.evaluate(test_t)
     print("\nSampled filtered ranking (K=10):")
     for k, v in sampled.items():
         print(f"  {k:>8}: {v:.4f}")

@@ -20,7 +20,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from kge_kernels.data import build_filter_maps
-from kge_kernels.eval import evaluate_filtered_ranking
+from kge_kernels.eval import Evaluator
 from kge_kernels.losses import NSSALoss
 from kge_kernels.models import TransE
 from kge_kernels.training import (
@@ -118,14 +118,12 @@ def main() -> None:
 
     # Evaluate using filtered ranking on the test split.
     head_filter, tail_filter = build_filter_maps(train_triples, test_triples)
-    metrics = evaluate_filtered_ranking(
-        model,
-        triples=test_triples,
-        num_entities=num_entities,
-        head_filter=head_filter,
-        tail_filter=tail_filter,
+    evaluator = Evaluator(
+        model, num_entities,
+        head_filter=head_filter, tail_filter=tail_filter,
         device=torch.device("cpu"),
     )
+    metrics = evaluator.evaluate(torch.tensor(test_triples, dtype=torch.long))
     print("Test metrics (exhaustive filtered ranking):")
     for k, v in metrics.items():
         print(f"  {k:>8}: {v:.4f}")

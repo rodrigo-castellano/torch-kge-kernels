@@ -5,7 +5,7 @@ losses, data utilities, ranking metrics, and evaluation pipeline shipped
 by this package.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Hot-path imports: subpackage re-exports that downstream consumers always
 # need. These are small and stable — consumers that import any tkk submodule
@@ -47,10 +47,8 @@ from .eval import (
     EvalResults,
     Evaluator,
     StreamingRankingMetrics,
+    compute_ranks,
     ranking_metrics,
-    ranks_from_labeled_predictions,
-    ranks_from_scores,
-    ranks_from_scores_matrix,
     rrf,
     zscore_fusion,
 )
@@ -136,7 +134,7 @@ from .models import (
     TuckER,
 )
 
-# Scoring pipeline (adapter, backend, sampler, partial, types, utils)
+# Scoring pipeline (adapter, sampler, partial, types, utils)
 from .scoring import (
     CorruptionOutput,
     KGEBackend,
@@ -144,15 +142,10 @@ from .scoring import (
     Sampler,
     SamplerConfig,
     ScoreOutput,
-    apply_masks,
     build_backend,
     compute_bernoulli_probs,
     corrupt,
-    kge_score_all_heads,
-    kge_score_all_tails,
-    kge_score_triples,
     precompute_partial_scores,
-    score,
     score_partial_atoms,
 )
 
@@ -162,10 +155,8 @@ __all__ = [
     "EvalResults",
     "Evaluator",
     "StreamingRankingMetrics",
+    "compute_ranks",
     "ranking_metrics",
-    "ranks_from_labeled_predictions",
-    "ranks_from_scores",
-    "ranks_from_scores_matrix",
     "rrf",
     "zscore_fusion",
     # Scoring pipeline
@@ -175,15 +166,10 @@ __all__ = [
     "Sampler",
     "SamplerConfig",
     "ScoreOutput",
-    "apply_masks",
     "build_backend",
     "compute_bernoulli_probs",
     "corrupt",
-    "kge_score_all_heads",
-    "kge_score_all_tails",
-    "kge_score_triples",
     "precompute_partial_scores",
-    "score",
     "score_partial_atoms",
     # Logging
     "ExperimentSpec",

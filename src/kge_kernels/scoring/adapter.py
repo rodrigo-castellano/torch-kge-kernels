@@ -1,20 +1,19 @@
-"""Model adapter: unwrapping, sigmoid normalization, backend construction, and masking.
+"""Model adapter: unwrapping, sigmoid normalization, and backend construction.
 
 Consumers pass raw ``nn.Module`` model objects; this module handles
-DataParallel/compile unwrapping, dispatches to the appropriate scoring method
-(``score_triples`` or ``score_atoms``), applies sigmoid, and constructs
-``KGEBackend`` instances for the lower-level scoring kernels.
+DataParallel/compile unwrapping, dispatches to the appropriate scoring method,
+applies sigmoid, and constructs ``KGEBackend`` instances for the lower-level
+scoring kernels (used by partial-atom scoring and grounder).
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Set, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .backend import score as _score
 from .partial import precompute_partial_scores as _precompute_partial_scores
 from .partial import score_partial_atoms
 from .types import KGEBackend
@@ -103,80 +102,19 @@ def build_backend(model: nn.Module) -> KGEBackend:
     )
 
 
-def _stack_rht(r: Tensor, h: Tensor, t: Tensor) -> Tensor:
-    if r.dim() == 0:
-        r = r.expand(h.shape[0])
-    return torch.stack([r, h, t], dim=1)
-
-
-def apply_masks(
-    scores: Tensor,
-    idx1: Tensor,
-    idx2: Tensor,
-    filter_map: Optional[Dict[Tuple[int, int], Set[int]]],
-    true_entities: Optional[Tensor],
-    domain: Optional[Set[int]],
-) -> None:
-    """Apply domain and known-fact filter masks to a score matrix in-place."""
-    batch_size, num_entities = scores.shape
-    device = scores.device
-
-    if domain is not None:
-        domain_mask = torch.zeros(num_entities, dtype=torch.bool, device=device)
-        domain_mask[torch.tensor(sorted(domain), dtype=torch.long, device=device)] = True
-        scores[:, ~domain_mask] = float("-inf")
-
-    if filter_map is not None and true_entities is not None:
-        idx1_list = idx1.tolist() if idx1.dim() > 0 else [int(idx1.item())] * batch_size
-        idx2_list = idx2.tolist() if idx2.dim() > 0 else [int(idx2.item())] * batch_size
-        for row in range(batch_size):
-            key = (int(idx1_list[row]), int(idx2_list[row]))
-            known = filter_map.get(key)
-            if known:
-                true_ent = int(true_entities[row].item())
-                filtered = [ent for ent in known if ent != true_ent]
-                if filtered:
-                    scores[row, torch.tensor(filtered, dtype=torch.long, device=device)] = float("-inf")
-
-
 def kge_score_triples(model: nn.Module, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
     """Score specific triples with sigmoid normalization."""
-    triples = _stack_rht(r, h, t)
-    return _score(build_backend(model), triples, mode="triples").scores
+    return _score_triples_sigmoid(model, h, r, t)
 
 
-def kge_score_all_tails(
-    model: nn.Module,
-    h: Tensor,
-    r: Tensor,
-    *,
-    filter_map: Optional[Dict[Tuple[int, int], Set[int]]] = None,
-    true_tails: Optional[Tensor] = None,
-    domain: Optional[Set[int]] = None,
-) -> Tensor:
-    """Score all entities as tails with optional filter and domain masking."""
-    anchor_t = true_tails if true_tails is not None else torch.zeros_like(h)
-    triples = _stack_rht(r, h, anchor_t)
-    scores = _score(build_backend(model), triples, mode="tail").scores
-    apply_masks(scores, h, r, filter_map, true_tails, domain)
-    return scores
+def kge_score_all_tails(model: nn.Module, h: Tensor, r: Tensor) -> Tensor:
+    """Score all entities as tails with sigmoid normalization."""
+    return _score_all_tails_sigmoid(model, h, r)
 
 
-def kge_score_all_heads(
-    model: nn.Module,
-    r: Tensor,
-    t: Tensor,
-    *,
-    filter_map: Optional[Dict[Tuple[int, int], Set[int]]] = None,
-    true_heads: Optional[Tensor] = None,
-    domain: Optional[Set[int]] = None,
-) -> Tensor:
-    """Score all entities as heads with optional filter and domain masking."""
-    anchor_h = true_heads if true_heads is not None else torch.zeros_like(t)
-    triples = _stack_rht(r, anchor_h, t)
-    scores = _score(build_backend(model), triples, mode="head").scores
-    apply_masks(scores, r, t, filter_map, true_heads, domain)
-    return scores
+def kge_score_all_heads(model: nn.Module, r: Tensor, t: Tensor) -> Tensor:
+    """Score all entities as heads with sigmoid normalization."""
+    return _score_all_heads_sigmoid(model, r, t)
 
 
 def precompute_partial_scores(
@@ -190,11 +128,7 @@ def precompute_partial_scores(
 
 
 __all__ = [
-    "apply_masks",
     "build_backend",
-    "kge_score_all_heads",
-    "kge_score_all_tails",
-    "kge_score_triples",
     "precompute_partial_scores",
     "score_partial_atoms",
 ]

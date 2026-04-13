@@ -9,8 +9,8 @@ import torch
 from kge_kernels.eval import (
     StreamingRankingMetrics,
     ranking_metrics,
-    ranks_from_labeled_predictions,
 )
+from kge_kernels.eval.ranking import _ranks_from_labeled_predictions as ranks_from_labeled_predictions
 
 # ═══════════════════════════════════════════════════════════════════════
 # ranking_metrics with ks parameter

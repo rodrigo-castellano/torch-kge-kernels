@@ -1,14 +1,14 @@
-"""Scoring pipeline: types, corruption sampling, backend dispatch, model adaptation, and partial-atom scoring."""
+"""Scoring pipeline: types, corruption sampling, backend construction, and partial-atom scoring."""
 
 from .adapter import (
-    apply_masks,
     build_backend,
     kge_score_all_heads,
     kge_score_all_tails,
     kge_score_triples,
 )
-from .adapter import precompute_partial_scores as precompute_partial_scores_from_model
-from .backend import score
+from .adapter import (
+    precompute_partial_scores as precompute_partial_scores_from_model,
+)
 from .partial import LazyPartialScorer, precompute_partial_scores, score_partial_atoms
 from .sampler import Sampler, corrupt
 from .types import (
@@ -38,10 +38,7 @@ __all__ = [
     # Sampler
     "Sampler",
     "corrupt",
-    # Backend
-    "score",
     # Adapter
-    "apply_masks",
     "build_backend",
     "kge_score_all_heads",
     "kge_score_all_tails",
