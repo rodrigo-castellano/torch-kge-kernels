@@ -3,7 +3,7 @@
 import torch
 
 from kge_kernels.eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
-from kge_kernels.sampler import Sampler
+from kge_kernels.scoring import Sampler
 
 
 def _make_sampler(num_entities: int = 50, num_relations: int = 5) -> Sampler:

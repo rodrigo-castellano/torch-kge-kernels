@@ -8,7 +8,7 @@ from typing import Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
-from ..types import SupportsCorruptWithMask
+from ..scoring import SupportsCorruptWithMask
 
 
 @dataclass

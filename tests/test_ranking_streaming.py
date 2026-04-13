@@ -6,7 +6,7 @@ import math
 
 import torch
 
-from kge_kernels.ranking import (
+from kge_kernels.eval import (
     StreamingRankingMetrics,
     ranking_metrics,
     ranks_from_labeled_predictions,

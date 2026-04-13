@@ -1,7 +1,6 @@
 import torch
 
-from kge_kernels.sampler import Sampler, corrupt
-from kge_kernels.utils import compute_bernoulli_probs
+from kge_kernels.scoring import Sampler, compute_bernoulli_probs, corrupt
 
 
 def test_corrupt_with_mask_supports_zero_ids():

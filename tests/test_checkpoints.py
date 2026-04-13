@@ -7,7 +7,7 @@ import os
 import torch
 from torch import nn
 
-from kge_kernels.checkpoints import (
+from kge_kernels.training.checkpoints import (
     load_checkpoint,
     model_state_dict,
     normalize_loaded_state_dict,

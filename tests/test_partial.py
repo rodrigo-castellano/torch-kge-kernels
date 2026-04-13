@@ -1,7 +1,6 @@
 import torch
 
-from kge_kernels.partial import precompute_partial_scores, score_partial_atoms
-from kge_kernels.types import KGEBackend
+from kge_kernels.scoring import KGEBackend, precompute_partial_scores, score_partial_atoms
 
 
 def _make_backend() -> KGEBackend:

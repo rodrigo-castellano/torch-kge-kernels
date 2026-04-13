@@ -5,6 +5,39 @@ All notable changes to `torch-kge-kernels` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to semantic versioning starting from 0.3.0.
 
+## [0.5.0] — 2026-04-13
+
+### Changed
+
+- **Package reorganization.** All eight root-level modules
+  (``adapter``, ``scoring``, ``partial``, ``ranking``, ``sampler``,
+  ``types``, ``utils``, ``checkpoints``) have been moved into topical
+  subpackages. The new layout:
+
+  - ``kge_kernels.scoring`` — types, corruption sampling, backend
+    dispatch, model adaptation, and partial-atom scoring (absorbs the
+    former ``adapter``, ``scoring``, ``partial``, ``sampler``,
+    ``types``, and ``utils`` modules).
+  - ``kge_kernels.eval.ranking`` — ranking metrics and
+    ``StreamingRankingMetrics`` (absorbs the former ``ranking`` module).
+  - ``kge_kernels.training.checkpoints`` — checkpoint save/load and
+    ``unwrap_model`` (absorbs the former ``checkpoints`` module).
+
+  Top-level imports (``from kge_kernels import Sampler``) continue to
+  work unchanged. Submodule-level imports (e.g. ``from kge_kernels.sampler
+  import Sampler``) must be updated to the new paths (e.g.
+  ``from kge_kernels.scoring import Sampler``).
+
+### Fixed
+
+- **``kge_score_*`` naming collision.** Backend-level aliases in the old
+  ``scoring`` module collided with model-level functions in ``adapter``.
+  The backend-level aliases have been removed; ``kge_score_triples``,
+  ``kge_score_all_tails``, and ``kge_score_all_heads`` now exist only in
+  ``scoring.adapter`` (model-aware, sigmoid-normalized).
+- **Dead ``entity_chunk`` parameter** in
+  ``adapter.precompute_partial_scores`` removed.
+
 ## [0.4.3] — 2026-04-11
 
 ### Fixed
@@ -226,6 +259,7 @@ truth for shared KGE infrastructure.
 - `kge_kernels.ranking` — `ranks_from_scores`, `ranks_from_scores_matrix`,
   `ranking_metrics`.
 
+[0.5.0]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/rodrigo-castellano/torch-kge-kernels/compare/v0.4.0...v0.4.1

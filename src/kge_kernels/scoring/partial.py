@@ -7,7 +7,7 @@ from typing import Tuple
 import torch
 from torch import Tensor
 
-from .scoring import _score_all_heads, _score_all_tails
+from .backend import _score_all_heads, _score_all_tails
 from .types import KGEBackend
 
 

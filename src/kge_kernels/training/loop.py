@@ -27,6 +27,7 @@ from torch import Tensor, nn
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
 
+from .checkpoints import unwrap_model as _unwrap
 from .config import KGETrainConfig
 
 
@@ -117,11 +118,6 @@ def wrap_model_for_training(
             model, mode=cfg.compile_mode, fullgraph=cfg.compile_fullgraph
         )
     return model
-
-
-def _unwrap(model: nn.Module) -> nn.Module:
-    inner = model.module if isinstance(model, nn.DataParallel) else model
-    return inner._orig_mod if hasattr(inner, "_orig_mod") else inner
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1,6 +1,6 @@
 import torch
 
-from kge_kernels.ranking import ranking_metrics, ranks_from_scores, ranks_from_scores_matrix
+from kge_kernels.eval import ranking_metrics, ranks_from_scores, ranks_from_scores_matrix
 
 
 def test_ranks_from_scores_average():

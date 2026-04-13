@@ -32,8 +32,20 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import torch
 from torch import Tensor, nn
 
-from ..adapter import kge_score_all_heads, kge_score_all_tails
-from ..ranking import ranking_metrics, ranks_from_scores_matrix
+from ..scoring import kge_score_all_heads, kge_score_all_tails
+from .ranking import ranking_metrics, ranks_from_scores_matrix
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    """Unwrap DataParallel and torch.compile wrappers.
+
+    Canonical definition lives in ``training.checkpoints.unwrap_model``.
+    Inlined here to avoid eagerly importing ``training/`` at package load time.
+    """
+    inner: nn.Module = model.module if isinstance(model, nn.DataParallel) else model
+    if hasattr(inner, "_orig_mod"):
+        inner = inner._orig_mod  # type: ignore[assignment]
+    return inner
 
 
 def _sampled_ranks(
@@ -73,13 +85,6 @@ def _sampled_ranks(
         dim=1, dtype=torch.float32
     )
     return greater + 1.0 + 0.5 * (equal - 1.0).clamp(min=0)
-
-
-def _unwrap_model(model: nn.Module) -> nn.Module:
-    inner: nn.Module = model.module if isinstance(model, nn.DataParallel) else model
-    if hasattr(inner, "_orig_mod"):
-        inner = inner._orig_mod  # type: ignore[assignment]
-    return inner
 
 
 def evaluate_filtered_ranking(

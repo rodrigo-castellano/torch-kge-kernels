@@ -13,9 +13,9 @@ from typing import Callable, Dict, List, Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
-from ..ranking import ranking_metrics, ranks_from_scores
-from ..types import SupportsCorruptWithMask
+from ..scoring import SupportsCorruptWithMask
 from .pool import CandidatePool
+from .ranking import ranking_metrics, ranks_from_scores
 from .results import EvalResults
 
 logger = logging.getLogger(__name__)

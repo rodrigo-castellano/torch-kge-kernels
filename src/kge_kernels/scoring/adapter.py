@@ -14,14 +14,18 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from .backend import score as _score
 from .partial import precompute_partial_scores as _precompute_partial_scores
 from .partial import score_partial_atoms
-from .scoring import score as _score
 from .types import KGEBackend
 
 
-def _unwrap_model(model: nn.Module) -> nn.Module:
-    """Unwrap DataParallel and torch.compile wrappers."""
+def _unwrap_model(model: "nn.Module") -> "nn.Module":
+    """Unwrap DataParallel and torch.compile wrappers.
+
+    Canonical definition lives in ``training.checkpoints.unwrap_model``.
+    Inlined here to avoid eagerly importing ``training/`` at package load time.
+    """
     actual = model.module if isinstance(model, nn.DataParallel) else model
     if hasattr(actual, "_orig_mod"):
         actual = actual._orig_mod
@@ -180,10 +184,8 @@ def precompute_partial_scores(
     pred_remap: Tensor,
     const_remap: Tensor,
     batch_chunk: int = 64,
-    entity_chunk: int = 2048,
 ) -> Tuple[Tensor, Tensor]:
     """Precompute partial-score tables via the model adapter."""
-    del entity_chunk
     return _precompute_partial_scores(build_backend(kge_model), pred_remap, const_remap, batch_chunk=batch_chunk)
 
 

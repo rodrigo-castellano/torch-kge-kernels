@@ -140,15 +140,7 @@ def score(
     raise ValueError(f"Unsupported score mode: {mode}")
 
 
-# Backwards-compatible aliases retained for downstream wrappers and local code.
-kge_score_triples = _score_triples
-kge_score_all_tails = _score_all_tails
-kge_score_all_heads = _score_all_heads
-kge_score_k_tails = _score_k_tails
-kge_score_k_heads = _score_k_heads
-
 
 __all__ = [
-    "KGEBackend",
     "score",
 ]
