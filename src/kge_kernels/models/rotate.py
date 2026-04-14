@@ -41,10 +41,15 @@ class RotatE(KGEModel):
         nn.init.uniform_(self.ent_re.weight, -bound, bound)
         nn.init.uniform_(self.ent_im.weight, -bound, bound)
         nn.init.uniform_(self.rel_phase.weight, -math.pi, math.pi)
-        self._project_entity_modulus()
+        self.project_entity_modulus_()
 
     @torch.no_grad()
-    def _project_entity_modulus(self) -> None:
+    def project_entity_modulus_(self) -> None:
+        """Clamp entity embeddings to the unit disk in complex space.
+
+        Called once at initialisation and optionally after each optimiser
+        step by ``train_kge`` (which checks ``hasattr(model, 'project_entity_modulus_')``).
+        """
         re = self.ent_re.weight.data
         im = self.ent_im.weight.data
         mod = torch.clamp(torch.sqrt(re * re + im * im), min=1e-6)

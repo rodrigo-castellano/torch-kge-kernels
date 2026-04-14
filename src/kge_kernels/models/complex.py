@@ -32,9 +32,8 @@ class ComplEx(KGEModel):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        bound = 1 / math.sqrt(self.half_dim)
         for emb in (self.ent_re, self.ent_im, self.rel_re, self.rel_im):
-            nn.init.uniform_(emb.weight, -bound, bound)
+            nn.init.uniform_(emb.weight, -0.05, 0.05)
 
     def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         h_re, h_im = self.ent_re(h), self.ent_im(h)
