@@ -28,6 +28,7 @@ def evaluate_ranking(
     eval_batch_size: int = 0,
     show_progress: bool = False,
     progress_label: str = "Evaluation",
+    corruption_scheme: str = "both",
 ) -> Dict[str, float]:
     """Thin wrapper around :class:`Evaluator` for exhaustive filtered ranking.
 
@@ -43,6 +44,7 @@ def evaluate_ranking(
         tail_filter=tail_filter,
         head_domain=head_domain,
         tail_domain=tail_domain,
+        corruption_scheme=corruption_scheme,
         batch_size=chunk_size,
         seed=seed,
         device=device,

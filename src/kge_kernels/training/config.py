@@ -100,6 +100,7 @@ class TrainConfig:
     valid_eval_queries: int = 0
     report_train_mrr: bool = True
     eval_num_corruptions: int = 100
+    corruption_scheme: str = "both"  # "head", "tail", or "both"
 
 
 # Backward-compat alias so existing ``from kge_kernels.training import

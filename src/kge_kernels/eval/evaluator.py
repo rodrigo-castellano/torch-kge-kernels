@@ -213,17 +213,19 @@ class Evaluator:
                 heads = all_heads[chunk_start:chunk_end]
                 tails = all_tails[chunk_start:chunk_end]
 
-                # Score all tails for (h, r) and all heads for (r, t)
-                tail_scores = self._score_all_tails(actual_model, heads, r_tensor)
-                _apply_masks(tail_scores, heads, r_tensor, self.tail_filter, tails, t_domain)
+                chunk_ranks: List[Tensor] = []
 
-                head_scores = self._score_all_heads(actual_model, r_tensor, tails)
-                _apply_masks(head_scores, r_tensor, tails, self.head_filter, heads, h_domain)
+                if self.corruption_scheme in ("tail", "both"):
+                    tail_scores = self._score_all_tails(actual_model, heads, r_tensor)
+                    _apply_masks(tail_scores, heads, r_tensor, self.tail_filter, tails, t_domain)
+                    chunk_ranks.append(compute_ranks(tail_scores, tails))
 
-                tail_ranks = compute_ranks(tail_scores, tails)
-                head_ranks = compute_ranks(head_scores, heads)
+                if self.corruption_scheme in ("head", "both"):
+                    head_scores = self._score_all_heads(actual_model, r_tensor, tails)
+                    _apply_masks(head_scores, r_tensor, tails, self.head_filter, heads, h_domain)
+                    chunk_ranks.append(compute_ranks(head_scores, heads))
 
-                all_ranks_list.append(torch.cat([tail_ranks, head_ranks]))
+                all_ranks_list.append(torch.cat(chunk_ranks))
 
             processed += len(rel_triples)
             if show_progress and (processed >= len(triples_list) or processed - last_report >= report_every):

@@ -305,6 +305,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             tail_domain=tail_domain,
             eval_num_corruptions=cfg.eval_num_corruptions,
             seed=cfg.seed + epoch,
+            corruption_scheme=cfg.corruption_scheme,
         )
         valid_eval_time = time.perf_counter() - valid_eval_start
         current_valid_mrr = float(valid_metrics["MRR"])
@@ -393,6 +394,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                     head_filter, tail_filter, device, cfg.eval_chunk_size,
                     head_domain=head_domain, tail_domain=tail_domain,
                     eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
+                    corruption_scheme=cfg.corruption_scheme,
                 ),
                 metrics, metric_logs,
             )
@@ -406,6 +408,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 head_filter, tail_filter, device, cfg.eval_chunk_size,
                 head_domain=head_domain, tail_domain=tail_domain,
                 eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
+                corruption_scheme=cfg.corruption_scheme,
             ),
             metrics, metric_logs,
         )
@@ -420,6 +423,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 head_domain=head_domain, tail_domain=tail_domain,
                 eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
                 show_progress=True, progress_label="Test eval",
+                corruption_scheme=cfg.corruption_scheme,
             ),
             metrics, metric_logs,
         )
