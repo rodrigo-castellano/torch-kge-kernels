@@ -319,17 +319,20 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             n_batches = 0
             for batch in dataloader:
                 batch = batch.to(device, non_blocking=True)
-                # Fresh negatives each batch, filtered
-                neg, _ = sampler.corrupt_with_mask(
+                # Fresh negatives each batch, filtered (mask out known positives)
+                neg, valid_mask = sampler.corrupt_with_mask(
                     batch, num_negatives=cfg.neg_ratio,
                     mode=corrupt_mode, filter=True, unique=False,
                 )
-                neg = neg.reshape(-1, 3)
-                # Complete query group: score pos + neg together
-                all_items = torch.cat([batch, neg], dim=0)
+                # Only keep valid corruptions (where mask is True)
+                neg_flat = neg.reshape(-1, 3)
+                mask_flat = valid_mask.reshape(-1)
+                valid_neg = neg_flat[mask_flat]
+                # Complete query group: score pos + valid neg together
+                all_items = torch.cat([batch, valid_neg], dim=0)
                 labels = torch.cat([
                     torch.ones(batch.shape[0], device=device),
-                    torch.zeros(neg.shape[0], device=device),
+                    torch.zeros(valid_neg.shape[0], device=device),
                 ])
                 optimizer.zero_grad(set_to_none=True)
                 scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
@@ -383,7 +386,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         def sample_negatives(batch: Tensor) -> Tensor:
             neg_rht, _ = sampler.corrupt_with_mask(
                 batch, num_negatives=cfg.neg_ratio,
-                mode=corrupt_mode, filter=True, unique=False,
+                mode=corrupt_mode, filter=False, unique=False,
             )
             return neg_rht.reshape(-1, 3)
 
