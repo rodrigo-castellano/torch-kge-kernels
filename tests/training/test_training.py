@@ -190,7 +190,7 @@ def test_train_kge_early_stop_via_callback():
 
     epochs_seen = []
 
-    def on_epoch_end(epoch, avg_loss, _model):
+    def on_epoch_end(epoch, avg_loss, _model, _epoch_time):
         epochs_seen.append(epoch)
         return epoch == 2  # stop after epoch 2
 

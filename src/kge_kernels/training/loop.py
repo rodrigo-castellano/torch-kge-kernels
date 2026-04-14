@@ -125,13 +125,14 @@ def wrap_model_for_training(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-OnEpochEnd = Callable[[int, float, nn.Module], bool]
+OnEpochEnd = Callable[[int, float, nn.Module, float], bool]
 """Callback invoked after each epoch.
 
 Args:
     epoch: 1-based epoch index.
     avg_loss: Mean training loss across the epoch.
     model: The training model (still in training mode).
+    epoch_time: Wall-clock seconds for the epoch.
 
 Return ``True`` to stop training early (e.g. for early stopping),
 ``False`` to continue. ``None`` is treated as ``False``.
@@ -182,7 +183,8 @@ def train_kge(
             ``torch.amp.GradScaler("cuda", enabled=cfg.amp)`` is created).
         device: Inference device. Defaults to the first parameter's
             device.
-        on_epoch_end: Optional callback for validation / early stopping.
+        on_epoch_end: Optional callback ``(epoch, avg_loss, model, epoch_time)``
+            for validation / early stopping.
 
     Returns:
         ``List[float]`` of per-epoch mean losses (partial list if the
@@ -232,10 +234,10 @@ def train_kge(
 
         avg_loss = running / max(1, n_batches)
         epoch_losses.append(avg_loss)
-        _ = time.perf_counter() - epoch_start  # epoch time available to callers via wallclock
+        epoch_time = time.perf_counter() - epoch_start
 
         if on_epoch_end is not None:
-            should_stop = on_epoch_end(epoch, avg_loss, model)
+            should_stop = on_epoch_end(epoch, avg_loss, model, epoch_time)
             if should_stop:
                 break
 

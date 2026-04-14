@@ -98,8 +98,8 @@ def main() -> None:
         neg[~corrupt_head, 2] = rnd_entities[~corrupt_head]
         return neg
 
-    def on_epoch_end(epoch: int, avg_loss: float, _model: torch.nn.Module) -> bool:
-        print(f"  epoch {epoch}: loss={avg_loss:.4f}")
+    def on_epoch_end(epoch: int, avg_loss: float, _model: torch.nn.Module, epoch_time: float) -> bool:
+        print(f"  epoch {epoch}: loss={avg_loss:.4f} time={epoch_time:.2f}s")
         return False  # never stop early
 
     print("Training...")
