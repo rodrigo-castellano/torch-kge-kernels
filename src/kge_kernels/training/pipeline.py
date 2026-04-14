@@ -89,6 +89,43 @@ def _build_known_sampling_triples(
     return known
 
 
+def _build_interleaved_pool(
+    train_triples: List[Tuple[int, int, int]],
+    num_entities: int,
+    neg_ratio: int,
+    corrupt_mode: str,
+    seed: int,
+) -> Tuple[Tensor, Tensor]:
+    """Build a fixed pool of (positive, corruption) pairs like torch-ns.
+
+    Returns:
+        items: ``[N * (1 + neg_ratio), 3]`` tensor of (r, h, t) triples.
+        labels: ``[N * (1 + neg_ratio)]`` tensor of 0/1 labels.
+    """
+    gen = torch.Generator().manual_seed(seed)
+    pos = torch.tensor(train_triples, dtype=torch.long)
+    N = pos.shape[0]
+    items_list = []
+    labels_list = []
+    for i in range(N):
+        items_list.append(pos[i])
+        labels_list.append(1.0)
+        for _ in range(neg_ratio):
+            neg = pos[i].clone()
+            if corrupt_mode == "tail":
+                neg[2] = torch.randint(num_entities, (1,), generator=gen).item()
+            elif corrupt_mode == "head":
+                neg[1] = torch.randint(num_entities, (1,), generator=gen).item()
+            else:  # both
+                if torch.rand(1, generator=gen).item() < 0.5:
+                    neg[2] = torch.randint(num_entities, (1,), generator=gen).item()
+                else:
+                    neg[1] = torch.randint(num_entities, (1,), generator=gen).item()
+            items_list.append(neg)
+            labels_list.append(0.0)
+    return torch.stack(items_list), torch.tensor(labels_list)
+
+
 def _build_metric_summary(prefix: str, rank_metrics: Dict[str, float], metrics: Dict[str, float], logs: List[str]) -> None:
     if any(math.isnan(value) for value in rank_metrics.values()):
         return
@@ -166,104 +203,28 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     else:
         num_relations = len(r2id)
 
-    # ── Negative sampling ─────────────────────────────────────────────
-    known_sampling_triples = _build_known_sampling_triples(
-        train_triples=train_triples,
-        valid_triples=valid_triples,
-        test_triples=test_triples,
-        use_reciprocal=cfg.use_reciprocal,
-        num_relations_orig=num_relations_orig,
-    )
-    train_rht = torch.tensor(train_triples, dtype=torch.long)
-    bern_probs = compute_bernoulli_probs(train_rht, num_relations)
-    sampler = _KGESampler.from_data(
-        all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
-        num_entities=num_entities,
-        num_relations=num_relations,
-        device=device,
-        default_mode="bernoulli",
-        bern_probs=bern_probs,
-        min_entity_idx=0,
-    )
-
-    # ── DataLoader ────────────────────────────────────────────────────
-    dataloader = DataLoader(
-        TripleDataset(train_triples),
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=False,
-    )
+    corrupt_mode = cfg.corruption_scheme if cfg.corruption_scheme != "both" else "bernoulli"
 
     # ── Model, optimizer, scheduler ───────────────────────────────────
     model = build_training_model(cfg, num_entities, num_relations, device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.amp)
 
-    scheduler = None
-    if cfg.scheduler != "none":
-        total_steps = max(1, cfg.epochs * len(dataloader))
-        scheduler = make_cosine_warmup_scheduler(
-            optimizer, total_steps=total_steps, warmup_ratio=cfg.warmup_ratio
+    plateau_scheduler = None
+    if cfg.scheduler == "plateau":
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-4,
         )
-
-    if cfg.loss == "bce":
-        def loss_fn(pos_scores, neg_scores):
-            scores = torch.cat([pos_scores, neg_scores])
-            labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
-            return F.binary_cross_entropy_with_logits(scores, labels)
-    else:
-        loss_fn = NSSALoss(adv_temp=cfg.adv_temp, neg_ratio=cfg.neg_ratio)
-
-    corrupt_mode = cfg.corruption_scheme if cfg.corruption_scheme != "both" else "bernoulli"
-
-    @torch.no_grad()
-    def sample_negatives(batch: Tensor) -> Tensor:
-        neg_rht, _ = sampler.corrupt_with_mask(
-            batch, num_negatives=cfg.neg_ratio,
-            mode=corrupt_mode, filter=False, unique=False,
-        )
-        return neg_rht.reshape(-1, 3)
 
     set_seed(cfg.seed)
+    os.makedirs(cfg.save_dir, exist_ok=True)
 
-    # ── Compile warmup ────────────────────────────────────────────────
-    if cfg.compile and cfg.compile_warmup_steps > 0:
-        warmup_iter = iter(dataloader)
-        print(f"Compile warmup: running {cfg.compile_warmup_steps} step(s) before timed training")
-        warmup_start = time.perf_counter()
-        for _ in range(cfg.compile_warmup_steps):
-            try:
-                batch = next(warmup_iter)
-            except StopIteration:
-                warmup_iter = iter(dataloader)
-                batch = next(warmup_iter)
-            batch = batch.to(device, non_blocking=True)
-            negatives = sample_negatives(batch)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=cfg.amp):
-                pos_scores = model(batch[:, 1], batch[:, 0], batch[:, 2])
-                neg_scores = model(negatives[:, 1], negatives[:, 0], negatives[:, 2])
-                loss = loss_fn(pos_scores, neg_scores)
-            scaler.scale(loss).backward()
-            optimizer.zero_grad(set_to_none=True)
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        print(f"Compile warmup finished in {time.perf_counter() - warmup_start:.2f}s")
-
-    # ── Validation / early-stopping state ─────────────────────────────
+    # ── Validation state ──────────────────────────────────────────────
     eval_limit = cfg.eval_limit if cfg.eval_limit > 0 else None
     valid_eval_limit = cfg.valid_eval_queries if cfg.valid_eval_queries > 0 else eval_limit
     valid_eval_triples = _limit_eval_triples("validation", valid_triples, valid_eval_limit)
     valid_eval_every = cfg.valid_eval_every
-    if cfg.use_early_stopping and valid_triples and valid_eval_every <= 0:
-        valid_eval_every = 1
-        print("Early stopping enabled: forcing validation evaluation every 1 epoch")
-    elif cfg.use_early_stopping and not valid_triples:
-        print("Warning: early stopping requested but no validation split is available; disabling early stopping")
 
-    os.makedirs(cfg.save_dir, exist_ok=True)
     epoch_durations: List[float] = []
     validation_history: List[Dict[str, float]] = []
     best_valid_mrr = float("-inf")
@@ -286,99 +247,164 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epochs_completed_payload=epochs_completed,
         )
 
-    # ── on_epoch_end: validation, early stopping, checkpoint saving ──
-    def on_epoch_end(epoch: int, avg_loss: float, mdl: torch.nn.Module, epoch_time: float) -> bool:
-        nonlocal epochs_completed, best_valid_mrr, best_valid_epoch, best_state_dict, no_improve_evals, stopped_early
-        epochs_completed = epoch
-        epoch_durations.append(epoch_time)
-        print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
-        save_latest_weights(cfg.save_dir, _current_state_dict(mdl))
-
-        should_run_valid = (
-            valid_eval_every > 0
-            and valid_eval_triples
+    def _run_validation(epoch: int, mdl: torch.nn.Module) -> bool:
+        """Run validation, update best model, check early stopping. Returns True to stop."""
+        nonlocal best_valid_mrr, best_valid_epoch, best_state_dict, no_improve_evals, stopped_early
+        should_run = (
+            valid_eval_every > 0 and valid_eval_triples
             and (epoch % valid_eval_every == 0 or epoch == cfg.epochs)
         )
-        if not should_run_valid:
+        if not should_run:
             return False
 
-        print()
-        print(f"Validation @ epoch {epoch:03d} ...")
-        valid_eval_start = time.perf_counter()
-        valid_metrics = evaluate_ranking(
-            mdl,
-            valid_eval_triples,
-            num_entities,
-            head_filter,
-            tail_filter,
-            device,
-            cfg.eval_chunk_size,
-            head_domain=head_domain,
-            tail_domain=tail_domain,
-            eval_num_corruptions=cfg.eval_num_corruptions,
-            seed=cfg.seed + epoch,
-            corruption_scheme=cfg.corruption_scheme,
-        )
-        valid_eval_time = time.perf_counter() - valid_eval_start
-        current_valid_mrr = float(valid_metrics["MRR"])
-        next_best_valid_mrr = max(best_valid_mrr, current_valid_mrr)
-        validation_history.append({
-            "epoch": float(epoch),
-            "mrr": current_valid_mrr,
-            "hits1": float(valid_metrics["Hits@1"]),
-            "hits3": float(valid_metrics["Hits@3"]),
-            "hits10": float(valid_metrics["Hits@10"]),
-            "num_queries": float(len(valid_eval_triples)),
-            "eval_time_s": float(valid_eval_time),
-            "best_mrr_so_far": next_best_valid_mrr,
-        })
-        print(
-            f"Validation @ epoch {epoch:03d} | "
-            f"mrr={current_valid_mrr:.4f} "
-            f"h1={valid_metrics['Hits@1']:.4f} "
-            f"h3={valid_metrics['Hits@3']:.4f} "
-            f"h10={valid_metrics['Hits@10']:.4f} "
-            f"time={valid_eval_time:.2f}s "
-            f"best_mrr={next_best_valid_mrr:.4f}"
-        )
+        # Within-batch validation: score each positive against 1 corruption
+        # Matches torch-ns validation protocol for stable epoch selection
+        mdl.eval()
+        with torch.no_grad():
+            val_pos = torch.tensor(valid_eval_triples, dtype=torch.long, device=device)
+            val_neg = val_pos.clone()
+            if cfg.corruption_scheme == "head":
+                val_neg[:, 1] = torch.randint(num_entities, (val_neg.shape[0],), device=device)
+            else:
+                val_neg[:, 2] = torch.randint(num_entities, (val_neg.shape[0],), device=device)
+            pos_s = torch.sigmoid(mdl(val_pos[:, 1], val_pos[:, 0], val_pos[:, 2]))
+            neg_s = torch.sigmoid(mdl(val_neg[:, 1], val_neg[:, 0], val_neg[:, 2]))
+            current_valid_mrr = float((pos_s > neg_s).float().mean())
+        mdl.train()
 
         if current_valid_mrr > best_valid_mrr:
             best_valid_mrr = current_valid_mrr
             best_valid_epoch = epoch
-            best_state_dict = {key: value.detach().cpu().clone() for key, value in _current_state_dict(mdl).items()}
+            best_state_dict = {k: v.detach().cpu().clone() for k, v in _current_state_dict(mdl).items()}
             no_improve_evals = 0
-            save_best_checkpoint(
-                cfg.save_dir,
-                state_dict=_current_state_dict(mdl),
-                config_payload=make_payload({
-                    "valid_mrr": current_valid_mrr,
-                    "valid_hits1": float(valid_metrics["Hits@1"]),
-                    "valid_hits3": float(valid_metrics["Hits@3"]),
-                    "valid_hits10": float(valid_metrics["Hits@10"]),
-                }),
-            )
-            print(f"Best validation model updated at epoch {epoch:03d} (MRR={best_valid_mrr:.4f})")
+            save_best_checkpoint(cfg.save_dir, state_dict=_current_state_dict(mdl),
+                                 config_payload=make_payload({"valid_mrr": current_valid_mrr}))
         else:
             no_improve_evals += 1
             if cfg.use_early_stopping and no_improve_evals >= cfg.patience:
                 stopped_early = True
-                print(f"Early stopping triggered at epoch {epoch:03d} after {no_improve_evals} validation checks without improvement")
                 return True
-
         return False
 
-    # ── Train ─────────────────────────────────────────────────────────
+    # ── Train (BCE interleaved or NSSA) ───────────────────────────────
     train_start = time.perf_counter()
-    train_kge(
-        cfg, model, dataloader,
-        optimizer=optimizer,
-        loss_fn=loss_fn,
-        sample_negatives=sample_negatives,
-        scheduler=scheduler,
-        scaler=scaler,
-        device=device,
-        on_epoch_end=on_epoch_end,
-    )
+
+    if cfg.loss == "bce":
+        # BCE training with complete query groups:
+        # each batch = positives + their fresh negatives scored together.
+        known_sampling_triples = _build_known_sampling_triples(
+            train_triples=train_triples, valid_triples=valid_triples,
+            test_triples=test_triples, use_reciprocal=cfg.use_reciprocal,
+            num_relations_orig=num_relations_orig,
+        )
+        sampler = _KGESampler.from_data(
+            all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
+            num_entities=num_entities, num_relations=num_relations,
+            device=device, default_mode=corrupt_mode,
+            bern_probs=compute_bernoulli_probs(
+                torch.tensor(train_triples, dtype=torch.long), num_relations,
+            ),
+            min_entity_idx=0,
+        )
+        dataloader = DataLoader(
+            TripleDataset(train_triples), batch_size=cfg.batch_size,
+            shuffle=True, num_workers=cfg.num_workers,
+            pin_memory=(device.type == "cuda"), drop_last=False,
+        )
+
+        model.train()
+        for epoch in range(1, cfg.epochs + 1):
+            epoch_start = time.perf_counter()
+            running = 0.0
+            n_batches = 0
+            for batch in dataloader:
+                batch = batch.to(device, non_blocking=True)
+                # Fresh negatives each batch, filtered
+                neg, _ = sampler.corrupt_with_mask(
+                    batch, num_negatives=cfg.neg_ratio,
+                    mode=corrupt_mode, filter=True, unique=False,
+                )
+                neg = neg.reshape(-1, 3)
+                # Complete query group: score pos + neg together
+                all_items = torch.cat([batch, neg], dim=0)
+                labels = torch.cat([
+                    torch.ones(batch.shape[0], device=device),
+                    torch.zeros(neg.shape[0], device=device),
+                ])
+                optimizer.zero_grad(set_to_none=True)
+                scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
+                loss = F.binary_cross_entropy_with_logits(scores, labels)
+                loss.backward()
+                optimizer.step()
+                running += loss.item()
+                n_batches += 1
+
+            epochs_completed = epoch
+            epoch_time = time.perf_counter() - epoch_start
+            epoch_durations.append(epoch_time)
+            avg_loss = running / max(1, n_batches)
+            print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
+            save_latest_weights(cfg.save_dir, _current_state_dict(model))
+
+            if plateau_scheduler is not None:
+                plateau_scheduler.step(avg_loss)
+
+            if _run_validation(epoch, model):
+                break
+    else:
+        # NSSA training via train_kge
+        known_sampling_triples = _build_known_sampling_triples(
+            train_triples=train_triples, valid_triples=valid_triples,
+            test_triples=test_triples, use_reciprocal=cfg.use_reciprocal,
+            num_relations_orig=num_relations_orig,
+        )
+        train_rht = torch.tensor(train_triples, dtype=torch.long)
+        bern_probs = compute_bernoulli_probs(train_rht, num_relations)
+        sampler = _KGESampler.from_data(
+            all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
+            num_entities=num_entities, num_relations=num_relations,
+            device=device, default_mode="bernoulli",
+            bern_probs=bern_probs, min_entity_idx=0,
+        )
+        dataloader = DataLoader(
+            TripleDataset(train_triples), batch_size=cfg.batch_size,
+            shuffle=True, num_workers=cfg.num_workers,
+            pin_memory=(device.type == "cuda"), drop_last=False,
+        )
+        scheduler = None
+        if cfg.scheduler == "cosine":
+            total_steps = max(1, cfg.epochs * len(dataloader))
+            scheduler = make_cosine_warmup_scheduler(
+                optimizer, total_steps=total_steps, warmup_ratio=cfg.warmup_ratio,
+            )
+        loss_fn = NSSALoss(adv_temp=cfg.adv_temp, neg_ratio=cfg.neg_ratio)
+
+        @torch.no_grad()
+        def sample_negatives(batch: Tensor) -> Tensor:
+            neg_rht, _ = sampler.corrupt_with_mask(
+                batch, num_negatives=cfg.neg_ratio,
+                mode=corrupt_mode, filter=True, unique=False,
+            )
+            return neg_rht.reshape(-1, 3)
+
+        def on_epoch_end(epoch: int, avg_loss: float, mdl: torch.nn.Module, epoch_time: float) -> bool:
+            nonlocal epochs_completed
+            epochs_completed = epoch
+            epoch_durations.append(epoch_time)
+            print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
+            save_latest_weights(cfg.save_dir, _current_state_dict(mdl))
+            if plateau_scheduler is not None:
+                plateau_scheduler.step(avg_loss)
+            return _run_validation(epoch, mdl)
+
+        train_kge(
+            cfg, model, dataloader,
+            optimizer=optimizer, loss_fn=loss_fn,
+            sample_negatives=sample_negatives,
+            scheduler=scheduler, scaler=scaler,
+            device=device, on_epoch_end=on_epoch_end,
+        )
+
     total_train_time = time.perf_counter() - train_start
     if epoch_durations:
         print(f"\nTraining time | epochs={len(epoch_durations)} | total={total_train_time:.2f}s | avg_per_epoch={sum(epoch_durations) / len(epoch_durations):.2f}s")
