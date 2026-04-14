@@ -94,36 +94,34 @@ def _build_interleaved_pool(
     num_entities: int,
     neg_ratio: int,
     corrupt_mode: str,
-    seed: int,
+    sampler: "_KGESampler",
 ) -> Tuple[Tensor, Tensor]:
-    """Build a fixed pool of (positive, corruption) pairs like torch-ns.
+    """Build a fixed pool of (positive, filtered corruption) pairs.
+
+    Uses the sampler with ``filter=True`` to exclude known positives.
 
     Returns:
-        items: ``[N * (1 + neg_ratio), 3]`` tensor of (r, h, t) triples.
-        labels: ``[N * (1 + neg_ratio)]`` tensor of 0/1 labels.
+        items: ``[~N * (1 + neg_ratio), 3]`` tensor of (r, h, t) triples.
+        labels: ``[~N * (1 + neg_ratio)]`` tensor of 0/1 labels.
     """
-    gen = torch.Generator().manual_seed(seed)
-    pos = torch.tensor(train_triples, dtype=torch.long)
+    pos = torch.tensor(train_triples, dtype=torch.long, device=sampler.device)
+    neg, valid_mask = sampler.corrupt_with_mask(
+        pos, num_negatives=neg_ratio, mode=corrupt_mode,
+        filter=True, unique=False,
+    )
+    # Interleave: [pos0, neg0_0, ..., neg0_K, pos1, neg1_0, ...]
     N = pos.shape[0]
-    items_list = []
-    labels_list = []
+    K = neg.shape[1]  # neg_ratio
+    items_list: List[Tensor] = []
+    labels_list: List[float] = []
     for i in range(N):
         items_list.append(pos[i])
         labels_list.append(1.0)
-        for _ in range(neg_ratio):
-            neg = pos[i].clone()
-            if corrupt_mode == "tail":
-                neg[2] = torch.randint(num_entities, (1,), generator=gen).item()
-            elif corrupt_mode == "head":
-                neg[1] = torch.randint(num_entities, (1,), generator=gen).item()
-            else:  # both
-                if torch.rand(1, generator=gen).item() < 0.5:
-                    neg[2] = torch.randint(num_entities, (1,), generator=gen).item()
-                else:
-                    neg[1] = torch.randint(num_entities, (1,), generator=gen).item()
-            items_list.append(neg)
-            labels_list.append(0.0)
-    return torch.stack(items_list), torch.tensor(labels_list)
+        for k in range(K):
+            if valid_mask[i, k]:
+                items_list.append(neg[i, k])
+                labels_list.append(0.0)
+    return torch.stack(items_list), torch.tensor(labels_list, device=sampler.device)
 
 
 def _build_metric_summary(prefix: str, rank_metrics: Dict[str, float], metrics: Dict[str, float], logs: List[str]) -> None:
@@ -194,7 +192,26 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     num_entities = len(e2id)
     num_relations_orig = len(r2id)
     head_filter, tail_filter = build_filter_maps(train_triples, valid_triples, test_triples)
-    use_domain_eval = bool(cfg.dataset and "countries" in cfg.dataset.lower())
+
+    # Domain-restricted evaluation and corruption
+    domain2idx: Dict[str, list] = {}
+    entity2domain: Dict[int, str] = {}
+    domain_path = cfg.domain_file
+    if domain_path is None and cfg.dataset:
+        candidate = os.path.join(cfg.data_root, cfg.dataset, "domain2constants.txt")
+        if os.path.isfile(candidate):
+            domain_path = candidate
+    if domain_path and os.path.isfile(domain_path):
+        with open(domain_path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    domain_name = parts[0]
+                    members = [e2id[c] for c in parts[1:] if c in e2id]
+                    domain2idx[domain_name] = members
+                    for eid in members:
+                        entity2domain[eid] = domain_name
+    use_domain_eval = bool(domain2idx)
     head_domain, tail_domain = (build_relation_domains(train_triples + valid_triples + test_triples) if use_domain_eval else (None, None))
 
     if cfg.use_reciprocal:
@@ -257,20 +274,14 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         if not should_run:
             return False
 
-        # Within-batch validation: score each positive against 1 corruption
-        # Matches torch-ns validation protocol for stable epoch selection
-        mdl.eval()
-        with torch.no_grad():
-            val_pos = torch.tensor(valid_eval_triples, dtype=torch.long, device=device)
-            val_neg = val_pos.clone()
-            if cfg.corruption_scheme == "head":
-                val_neg[:, 1] = torch.randint(num_entities, (val_neg.shape[0],), device=device)
-            else:
-                val_neg[:, 2] = torch.randint(num_entities, (val_neg.shape[0],), device=device)
-            pos_s = torch.sigmoid(mdl(val_pos[:, 1], val_pos[:, 0], val_pos[:, 2]))
-            neg_s = torch.sigmoid(mdl(val_neg[:, 1], val_neg[:, 0], val_neg[:, 2]))
-            current_valid_mrr = float((pos_s > neg_s).float().mean())
-        mdl.train()
+        # Exhaustive filtered ranking on validation set
+        valid_metrics = evaluate_ranking(
+            mdl, valid_eval_triples, num_entities,
+            head_filter, tail_filter, device, cfg.eval_chunk_size,
+            head_domain=head_domain, tail_domain=tail_domain,
+            corruption_scheme=cfg.corruption_scheme,
+        )
+        current_valid_mrr = float(valid_metrics["MRR"])
 
         if current_valid_mrr > best_valid_mrr:
             best_valid_mrr = current_valid_mrr
@@ -305,7 +316,20 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 torch.tensor(train_triples, dtype=torch.long), num_relations,
             ),
             min_entity_idx=0,
+            domain2idx=domain2idx or None,
+            entity2domain=entity2domain or None,
         )
+
+        # Pre-compute or fresh negatives
+        precomp_neg = None
+        precomp_labels = None
+        if cfg.precompute_negatives:
+            pool_items, pool_labels = _build_interleaved_pool(
+                train_triples, num_entities, cfg.neg_ratio, corrupt_mode, sampler,
+            )
+            precomp_neg = pool_items
+            precomp_labels = pool_labels
+
         dataloader = DataLoader(
             TripleDataset(train_triples), batch_size=cfg.batch_size,
             shuffle=True, num_workers=cfg.num_workers,
@@ -317,30 +341,41 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epoch_start = time.perf_counter()
             running = 0.0
             n_batches = 0
-            for batch in dataloader:
-                batch = batch.to(device, non_blocking=True)
-                # Fresh negatives each batch, filtered (mask out known positives)
-                neg, valid_mask = sampler.corrupt_with_mask(
-                    batch, num_negatives=cfg.neg_ratio,
-                    mode=corrupt_mode, filter=True, unique=False,
-                )
-                # Only keep valid corruptions (where mask is True)
-                neg_flat = neg.reshape(-1, 3)
-                mask_flat = valid_mask.reshape(-1)
-                valid_neg = neg_flat[mask_flat]
-                # Complete query group: score pos + valid neg together
-                all_items = torch.cat([batch, valid_neg], dim=0)
-                labels = torch.cat([
-                    torch.ones(batch.shape[0], device=device),
-                    torch.zeros(valid_neg.shape[0], device=device),
-                ])
-                optimizer.zero_grad(set_to_none=True)
-                scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
-                loss = F.binary_cross_entropy_with_logits(scores, labels)
-                loss.backward()
-                optimizer.step()
-                running += loss.item()
-                n_batches += 1
+
+            if cfg.precompute_negatives:
+                # Serve pre-computed pool in fixed-size chunks
+                for i in range(0, precomp_neg.shape[0], cfg.batch_size):
+                    batch = precomp_neg[i:i + cfg.batch_size]
+                    labels = precomp_labels[i:i + cfg.batch_size]
+                    optimizer.zero_grad(set_to_none=True)
+                    scores = model(batch[:, 1], batch[:, 0], batch[:, 2])
+                    loss = F.binary_cross_entropy_with_logits(scores, labels)
+                    loss.backward()
+                    optimizer.step()
+                    running += loss.item()
+                    n_batches += 1
+            else:
+                for batch in dataloader:
+                    batch = batch.to(device, non_blocking=True)
+                    neg, valid_mask = sampler.corrupt_with_mask(
+                        batch, num_negatives=cfg.neg_ratio,
+                        mode=corrupt_mode, filter=True, unique=False,
+                    )
+                    neg_flat = neg.reshape(-1, 3)
+                    mask_flat = valid_mask.reshape(-1)
+                    valid_neg = neg_flat[mask_flat]
+                    all_items = torch.cat([batch, valid_neg], dim=0)
+                    labels = torch.cat([
+                        torch.ones(batch.shape[0], device=device),
+                        torch.zeros(valid_neg.shape[0], device=device),
+                    ])
+                    optimizer.zero_grad(set_to_none=True)
+                    scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
+                    loss = F.binary_cross_entropy_with_logits(scores, labels)
+                    loss.backward()
+                    optimizer.step()
+                    running += loss.item()
+                    n_batches += 1
 
             epochs_completed = epoch
             epoch_time = time.perf_counter() - epoch_start
@@ -368,6 +403,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             num_entities=num_entities, num_relations=num_relations,
             device=device, default_mode="bernoulli",
             bern_probs=bern_probs, min_entity_idx=0,
+            domain2idx=domain2idx or None,
+            entity2domain=entity2domain or None,
         )
         dataloader = DataLoader(
             TripleDataset(train_triples), batch_size=cfg.batch_size,

@@ -42,6 +42,7 @@ class TrainConfig:
     test_path: str | None = None
     valid_split: str = "valid.txt"
     test_split: str = "test.txt"
+    domain_file: str | None = None  # e.g. "domain2constants.txt" for typed corruption
 
     # -- Model --
     model: str = "RotatE"
@@ -70,6 +71,7 @@ class TrainConfig:
     neg_ratio: int = 1
     adv_temp: float = 0.0  # 0 = uniform averaging, >0 = self-adversarial
     use_reciprocal: bool = False
+    precompute_negatives: bool = True  # pre-compute once (fast convergence, needs validation)
 
     # -- Scheduler --
     scheduler: str = "cosine"  # "cosine" or "none"
