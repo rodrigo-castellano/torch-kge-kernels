@@ -10,6 +10,7 @@ from .base import KGEModel
 from .complex import ComplEx
 from .conve import ConvE
 from .distmult import DistMult
+from .factory import build_model, build_training_model
 from .mode import ModE
 from .rotate import RotatE
 from .transe import TransE
@@ -24,4 +25,6 @@ __all__ = [
     "RotatE",
     "TransE",
     "TuckER",
+    "build_model",
+    "build_training_model",
 ]

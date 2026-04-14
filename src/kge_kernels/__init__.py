@@ -37,8 +37,11 @@ from .data import (
     build_relation_domains,
     detect_triple_format,
     encode_split_triples,
+    load_dataset_split,
     load_triples,
     load_triples_with_mappings,
+    resolve_split_path,
+    resolve_train_path,
 )
 
 # Evaluation (includes ranking metrics)
@@ -48,6 +51,8 @@ from .eval import (
     Evaluator,
     StreamingRankingMetrics,
     compute_ranks,
+    evaluate_checkpoint,
+    evaluate_ranking,
     ranking_metrics,
     rrf,
     zscore_fusion,
@@ -122,7 +127,7 @@ from .losses import (
     build_loss,
 )
 
-# Raw KGE nn.Module classes
+# Raw KGE nn.Module classes + factory
 from .models import (
     ComplEx,
     ConvE,
@@ -132,6 +137,8 @@ from .models import (
     RotatE,
     TransE,
     TuckER,
+    build_model,
+    build_training_model,
 )
 
 # Scoring pipeline (adapter, sampler, partial, types, utils)
@@ -156,6 +163,8 @@ __all__ = [
     "Evaluator",
     "StreamingRankingMetrics",
     "compute_ranks",
+    "evaluate_checkpoint",
+    "evaluate_ranking",
     "ranking_metrics",
     "rrf",
     "zscore_fusion",
@@ -197,8 +206,11 @@ __all__ = [
     "build_relation_domains",
     "detect_triple_format",
     "encode_split_triples",
+    "load_dataset_split",
     "load_triples",
     "load_triples_with_mappings",
+    "resolve_split_path",
+    "resolve_train_path",
     # Framework primitives
     "AtomRepr",
     "BeamSelect",
@@ -238,7 +250,7 @@ __all__ = [
     "TrajRepr",
     "build_scorer",
     "search_and_score",
-    # KGE models
+    # KGE models + factory
     "ComplEx",
     "ConvE",
     "DistMult",
@@ -247,4 +259,6 @@ __all__ = [
     "RotatE",
     "TransE",
     "TuckER",
+    "build_model",
+    "build_training_model",
 ]

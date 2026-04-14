@@ -1,6 +1,7 @@
 """Evaluation framework: unified evaluator, ranking metrics, corruption pools,
-and rank fusion."""
+rank fusion, and checkpoint evaluation."""
 
+from .checkpoint import evaluate_checkpoint, evaluate_ranking
 from .evaluator import Evaluator, FusionFn, ScorerFn
 from .fusion import rrf, zscore_fusion
 from .pool import CandidatePool
@@ -19,6 +20,8 @@ __all__ = [
     "ScorerFn",
     "StreamingRankingMetrics",
     "compute_ranks",
+    "evaluate_checkpoint",
+    "evaluate_ranking",
     "ranking_metrics",
     "rrf",
     "zscore_fusion",
