@@ -16,6 +16,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 
@@ -28,16 +29,17 @@ from ..data import (
 )
 from ..data.paths import resolve_split_path, resolve_train_path
 from ..eval.checkpoint import evaluate_ranking
-import torch.nn.functional as F
-
 from ..losses import NSSALoss
 from ..models.factory import build_training_model
-from ..scoring import Sampler as _KGESampler, compute_bernoulli_probs
+from ..scoring import Sampler as _KGESampler
+from ..scoring import compute_bernoulli_probs
 from .checkpoints import (
     build_config_payload,
     save_best_checkpoint,
     save_final_checkpoint,
     save_latest_weights,
+)
+from .checkpoints import (
     unwrap_model as _unwrap,
 )
 from .config import TrainArtifacts, TrainConfig
@@ -214,11 +216,13 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     else:
         loss_fn = NSSALoss(adv_temp=cfg.adv_temp, neg_ratio=cfg.neg_ratio)
 
+    corrupt_mode = cfg.corruption_scheme if cfg.corruption_scheme != "both" else "bernoulli"
+
     @torch.no_grad()
     def sample_negatives(batch: Tensor) -> Tensor:
         neg_rht, _ = sampler.corrupt_with_mask(
             batch, num_negatives=cfg.neg_ratio,
-            mode="bernoulli", filter=False, unique=False,
+            mode=corrupt_mode, filter=False, unique=False,
         )
         return neg_rht.reshape(-1, 3)
 
