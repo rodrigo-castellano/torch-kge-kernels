@@ -68,6 +68,23 @@ class KGEModel(nn.Module):
             return self.score_all_tails(h, r)
         return self.score_all_heads(r, t)
 
+    def embed_entities(self, indices: Tensor) -> Tensor:
+        """Return the full entity representation for the given indices.
+
+        For models with a single entity embedding table (TransE, DistMult,
+        ModE, TuckER): returns ``entity_embeddings(indices)``.
+        For models with split real/imaginary tables (ComplEx, RotatE):
+        returns ``cat(ent_re(indices), ent_im(indices), dim=-1)``.
+
+        Override in subclasses with non-standard embedding layout.
+        """
+        if hasattr(self, "entity_embeddings"):
+            return self.entity_embeddings(indices)
+        if hasattr(self, "ent_re") and hasattr(self, "ent_im"):
+            import torch
+            return torch.cat([self.ent_re(indices), self.ent_im(indices)], dim=-1)
+        raise NotImplementedError("Subclass must implement embed_entities or have entity_embeddings / ent_re+ent_im")
+
     def forward(
         self,
         h: Optional[Tensor],
