@@ -63,6 +63,9 @@ class TrainConfig:
     weight_decay: float = 1e-6
     grad_clip: float = 2.0
 
+    # -- Loss --
+    loss: str = "nssa"  # "nssa" or "bce"
+
     # -- Negative sampling --
     neg_ratio: int = 1
     adv_temp: float = 0.0  # 0 = uniform averaging, >0 = self-adversarial

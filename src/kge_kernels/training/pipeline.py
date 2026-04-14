@@ -28,6 +28,8 @@ from ..data import (
 )
 from ..data.paths import resolve_split_path, resolve_train_path
 from ..eval.checkpoint import evaluate_ranking
+import torch.nn.functional as F
+
 from ..losses import NSSALoss
 from ..models.factory import build_training_model
 from ..scoring import Sampler as _KGESampler, compute_bernoulli_probs
@@ -204,7 +206,13 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             optimizer, total_steps=total_steps, warmup_ratio=cfg.warmup_ratio
         )
 
-    loss_fn = NSSALoss(adv_temp=cfg.adv_temp, neg_ratio=cfg.neg_ratio)
+    if cfg.loss == "bce":
+        def loss_fn(pos_scores, neg_scores):
+            scores = torch.cat([pos_scores, neg_scores])
+            labels = torch.cat([torch.ones_like(pos_scores), torch.zeros_like(neg_scores)])
+            return F.binary_cross_entropy_with_logits(scores, labels)
+    else:
+        loss_fn = NSSALoss(adv_temp=cfg.adv_temp, neg_ratio=cfg.neg_ratio)
 
     @torch.no_grad()
     def sample_negatives(batch: Tensor) -> Tensor:
