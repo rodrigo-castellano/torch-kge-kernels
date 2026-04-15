@@ -100,6 +100,60 @@ class RotatE(KGEModel):
             all_hr_re, all_hr_im, t_re.unsqueeze(1), t_im.unsqueeze(1)
         )
 
+    def score_all_tails_dchunked(self, h: Tensor, r: Tensor, d_chunk: int = 64) -> Tensor:
+        """Same as score_all_tails but chunks over half_dim to cap peak memory.
+
+        Peak intermediate is ``[K, E, d_chunk]`` rather than ``[K, E, half_dim]``.
+        Exact result because ``_dist`` is a sum over the D axis (L1: elementwise
+        abs + sum; L2: per-dim sqrt + sum), both of which are additive per chunk.
+        The Python for-loop over ``d_chunk`` slices unrolls at ``torch.compile``
+        trace time when ``d_chunk`` is a compile-time constant, so this stays
+        CUDA-graph-safe in the caller's compiled closure.
+        """
+        hr_re, hr_im = self._hr(h, r)  # [K, H]
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        K = hr_re.shape[0]
+        E = all_re_full.shape[0]
+        H = self.half_dim
+        dist = torch.zeros(K, E, device=hr_re.device, dtype=hr_re.dtype)
+        for d_start in range(0, H, d_chunk):
+            d_end = min(d_start + d_chunk, H)
+            diff_re = hr_re[:, d_start:d_end].unsqueeze(1) - all_re_full[:, d_start:d_end].unsqueeze(0)
+            diff_im = hr_im[:, d_start:d_end].unsqueeze(1) - all_im_full[:, d_start:d_end].unsqueeze(0)
+            if self.p == 1:
+                dist = dist + diff_re.abs().sum(dim=-1) + diff_im.abs().sum(dim=-1)
+            else:
+                dist = dist + torch.sqrt(diff_re * diff_re + diff_im * diff_im + 1e-9).sum(dim=-1)
+        return self.gamma - dist
+
+    def score_all_heads_dchunked(self, r: Tensor, t: Tensor, d_chunk: int = 64) -> Tensor:
+        """Same as score_all_heads but chunks over half_dim. See
+        :meth:`score_all_tails_dchunked` for the rationale."""
+        t_re, t_im = self._split_ent(t)  # [K, H]
+        phase = torch.remainder(self.rel_phase(r), 2 * math.pi)  # [K, H]
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        K = t_re.shape[0]
+        E = all_re_full.shape[0]
+        H = self.half_dim
+        dist = torch.zeros(K, E, device=t_re.device, dtype=t_re.dtype)
+        for d_start in range(0, H, d_chunk):
+            d_end = min(d_start + d_chunk, H)
+            c = torch.cos(phase[:, d_start:d_end]).unsqueeze(1)  # [K, 1, chunk]
+            s = torch.sin(phase[:, d_start:d_end]).unsqueeze(1)  # [K, 1, chunk]
+            all_re_c = all_re_full[:, d_start:d_end].unsqueeze(0)  # [1, E, chunk]
+            all_im_c = all_im_full[:, d_start:d_end].unsqueeze(0)  # [1, E, chunk]
+            hr_re_c = all_re_c * c - all_im_c * s  # [K, E, chunk]
+            hr_im_c = all_re_c * s + all_im_c * c  # [K, E, chunk]
+            diff_re = hr_re_c - t_re[:, d_start:d_end].unsqueeze(1)
+            diff_im = hr_im_c - t_im[:, d_start:d_end].unsqueeze(1)
+            if self.p == 1:
+                dist = dist + diff_re.abs().sum(dim=-1) + diff_im.abs().sum(dim=-1)
+            else:
+                dist = dist + torch.sqrt(diff_re * diff_re + diff_im * diff_im + 1e-9).sum(dim=-1)
+        return self.gamma - dist
+
     def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         """Fused RotatE feature: concatenated (rotated h - t) real/imag."""
         hr_re, hr_im = self._hr(h, r)

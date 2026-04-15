@@ -117,6 +117,34 @@ def kge_score_all_heads(model: nn.Module, r: Tensor, t: Tensor) -> Tensor:
     return _score_all_heads_sigmoid(model, r, t)
 
 
+def kge_score_all_tails_dchunked(
+    model: nn.Module, h: Tensor, r: Tensor, d_chunk: int = 64
+) -> Tensor:
+    """Chunk-over-D exhaustive tail scoring with sigmoid normalization.
+
+    Falls back to :func:`kge_score_all_tails` for models without a native
+    ``score_all_tails_dchunked`` implementation.
+    """
+    actual = _unwrap_model(model)
+    if hasattr(actual, "score_all_tails_dchunked"):
+        return torch.sigmoid(actual.score_all_tails_dchunked(h, r, d_chunk=d_chunk))
+    return _score_all_tails_sigmoid(actual, h, r)
+
+
+def kge_score_all_heads_dchunked(
+    model: nn.Module, r: Tensor, t: Tensor, d_chunk: int = 64
+) -> Tensor:
+    """Chunk-over-D exhaustive head scoring with sigmoid normalization.
+
+    Falls back to :func:`kge_score_all_heads` for models without a native
+    ``score_all_heads_dchunked`` implementation.
+    """
+    actual = _unwrap_model(model)
+    if hasattr(actual, "score_all_heads_dchunked"):
+        return torch.sigmoid(actual.score_all_heads_dchunked(r, t, d_chunk=d_chunk))
+    return _score_all_heads_sigmoid(actual, r, t)
+
+
 def precompute_partial_scores(
     kge_model: nn.Module,
     pred_remap: Tensor,

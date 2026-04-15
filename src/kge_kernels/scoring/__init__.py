@@ -3,7 +3,9 @@
 from .adapter import (
     build_backend,
     kge_score_all_heads,
+    kge_score_all_heads_dchunked,
     kge_score_all_tails,
+    kge_score_all_tails_dchunked,
     kge_score_triples,
 )
 from .adapter import (
@@ -41,7 +43,9 @@ __all__ = [
     # Adapter
     "build_backend",
     "kge_score_all_heads",
+    "kge_score_all_heads_dchunked",
     "kge_score_all_tails",
+    "kge_score_all_tails_dchunked",
     "kge_score_triples",
     "precompute_partial_scores",
     "precompute_partial_scores_from_model",

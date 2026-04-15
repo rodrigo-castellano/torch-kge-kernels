@@ -130,6 +130,25 @@ def test_score_dispatch_both_none_raises():
         model.score(None, torch.tensor([0]), None)
 
 
+@pytest.mark.parametrize("p_norm,dim,d_chunk", [(1, 16, 4), (1, 16, 5), (2, 16, 4), (1, 32, 7)])
+def test_rotate_dchunked_matches_direct(p_norm, dim, d_chunk):
+    torch.manual_seed(0)
+    model = RotatE(num_entities=11, num_relations=5, dim=dim, p_norm=p_norm)
+    h = torch.tensor([0, 3, 7, 10])
+    r = torch.tensor([0, 2, 4, 1])
+    t = torch.tensor([1, 5, 9, 0])
+
+    direct_tails = model.score_all_tails(h, r)
+    chunked_tails = model.score_all_tails_dchunked(h, r, d_chunk=d_chunk)
+    assert chunked_tails.shape == direct_tails.shape
+    assert torch.allclose(chunked_tails, direct_tails, atol=1e-5, rtol=1e-5)
+
+    direct_heads = model.score_all_heads(r, t)
+    chunked_heads = model.score_all_heads_dchunked(r, t, d_chunk=d_chunk)
+    assert chunked_heads.shape == direct_heads.shape
+    assert torch.allclose(chunked_heads, direct_heads, atol=1e-5, rtol=1e-5)
+
+
 def test_forward_delegates_to_score():
     torch.manual_seed(0)
     model = TransE(num_entities=5, num_relations=3, dim=4)
