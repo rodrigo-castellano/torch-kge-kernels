@@ -32,6 +32,7 @@ from .transforms import (
     build_filter_maps,
     build_relation_domains,
     build_relation_domains_from_file,
+    load_domain_file,
 )
 
 __all__ = [
@@ -43,6 +44,7 @@ __all__ = [
     "detect_triple_format",
     "encode_split_triples",
     "load_dataset_split",
+    "load_domain_file",
     "load_triples",
     "load_triples_with_mappings",
     "resolve_split_path",

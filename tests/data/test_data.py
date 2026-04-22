@@ -10,6 +10,7 @@ from kge_kernels.data import (
     build_relation_domains,
     detect_triple_format,
     encode_split_triples,
+    load_domain_file,
     load_triples,
     load_triples_with_mappings,
 )
@@ -168,3 +169,52 @@ def test_build_relation_domains():
     assert tail_domain[0] == {2, 4, 7}
     assert head_domain[1] == {5}
     assert tail_domain[1] == {6}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# load_domain_file
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_load_domain_file_basic(tmp_path):
+    p = tmp_path / "domain.txt"
+    p.write_text("person alice bob carol\nplace paris tokyo\n")
+    e2id = {"alice": 0, "bob": 1, "carol": 2, "paris": 10, "tokyo": 11}
+    d2i, e2d = load_domain_file(str(p), e2id)
+    assert d2i == {"person": [0, 1, 2], "place": [10, 11]}
+    assert e2d == {0: "person", 1: "person", 2: "person", 10: "place", 11: "place"}
+
+
+def test_load_domain_file_skips_unknown_entities(tmp_path):
+    p = tmp_path / "domain.txt"
+    p.write_text("person alice unknown_entity bob\n")
+    e2id = {"alice": 0, "bob": 1}
+    d2i, e2d = load_domain_file(str(p), e2id)
+    assert d2i == {"person": [0, 1]}
+    assert e2d == {0: "person", 1: "person"}
+
+
+def test_load_domain_file_skips_empty_domains(tmp_path):
+    p = tmp_path / "domain.txt"
+    # domain "other" has only unknown entities — must be skipped entirely
+    p.write_text("person alice bob\nother x y z\n")
+    e2id = {"alice": 0, "bob": 1}
+    d2i, e2d = load_domain_file(str(p), e2id)
+    assert "other" not in d2i
+    assert d2i == {"person": [0, 1]}
+
+
+def test_load_domain_file_missing_path_returns_empty(tmp_path):
+    d2i, e2d = load_domain_file(str(tmp_path / "does_not_exist.txt"), {})
+    assert d2i == {}
+    assert e2d == {}
+
+
+def test_load_domain_file_entity_keeps_first_domain(tmp_path):
+    # If an entity appears in multiple domains, entity2domain keeps the first.
+    p = tmp_path / "domain.txt"
+    p.write_text("person alice\nfriend alice\n")
+    e2id = {"alice": 0}
+    d2i, e2d = load_domain_file(str(p), e2id)
+    assert d2i == {"person": [0], "friend": [0]}
+    assert e2d == {0: "person"}  # first-wins

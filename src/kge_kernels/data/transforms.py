@@ -1,8 +1,46 @@
 """Triple-set transforms: reciprocal augmentation, filter maps, domains."""
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Dict, List, Sequence, Set, Tuple
+
+
+def load_domain_file(
+    path: str,
+    entity2id: Dict[str, int],
+) -> Tuple[Dict[str, List[int]], Dict[int, str]]:
+    """Parse a ``domain_name entity1 entity2 ...`` file into dicts.
+
+    Each line lists a domain name followed by entity names belonging to
+    it. Unknown entities (not in ``entity2id``) are silently skipped so
+    callers can pass a vocabulary that's a subset of the file's entities.
+
+    Returns ``(domain2idx, entity2domain)``:
+      - ``domain2idx``: domain name → list of entity ids in that domain.
+      - ``entity2domain``: entity id → name of the first domain it
+        appears in (stable under overlap).
+
+    If ``path`` does not exist the function returns empty dicts. Callers
+    that require the file to exist should check before calling.
+    """
+    domain2idx: Dict[str, List[int]] = {}
+    entity2domain: Dict[int, str] = {}
+    if not os.path.isfile(path):
+        return domain2idx, entity2domain
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            domain_name = parts[0]
+            members = [entity2id[c] for c in parts[1:] if c in entity2id]
+            if not members:
+                continue
+            domain2idx[domain_name] = members
+            for eid in members:
+                entity2domain.setdefault(eid, domain_name)
+    return domain2idx, entity2domain
 
 
 def add_reciprocal_triples(
@@ -107,4 +145,5 @@ __all__ = [
     "build_filter_maps",
     "build_relation_domains",
     "build_relation_domains_from_file",
+    "load_domain_file",
 ]

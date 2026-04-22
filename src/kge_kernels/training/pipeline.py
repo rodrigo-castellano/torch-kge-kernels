@@ -26,6 +26,7 @@ from ..data import (
     build_relation_domains,
     build_relation_domains_from_file,
     encode_split_triples,
+    load_domain_file,
     load_triples_with_mappings,
 )
 from ..data.paths import resolve_split_path, resolve_train_path
@@ -34,6 +35,7 @@ from ..losses import NSSALoss
 from ..models.factory import build_training_model
 from ..scoring import Sampler as _KGESampler
 from ..scoring import compute_bernoulli_probs
+from .batching import iterate_epoch_batches
 from .checkpoints import (
     build_config_payload,
     save_best_checkpoint,
@@ -209,23 +211,14 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     head_filter, tail_filter = build_filter_maps(train_triples, valid_triples, test_triples)
 
     # Domain-restricted evaluation and corruption
-    domain2idx: Dict[str, list] = {}
-    entity2domain: Dict[int, str] = {}
     domain_path = cfg.domain_file
     if domain_path is None and cfg.dataset:
         candidate = os.path.join(cfg.data_root, cfg.dataset, "domain2constants.txt")
         if os.path.isfile(candidate):
             domain_path = candidate
-    if domain_path and os.path.isfile(domain_path):
-        with open(domain_path, encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    domain_name = parts[0]
-                    members = [e2id[c] for c in parts[1:] if c in e2id]
-                    domain2idx[domain_name] = members
-                    for eid in members:
-                        entity2domain[eid] = domain_name
+    domain2idx, entity2domain = (
+        load_domain_file(domain_path, e2id) if domain_path else ({}, {})
+    )
     use_domain_eval = bool(domain2idx)
     if use_domain_eval:
         # Use the full domain-file memberships so that eval ranks against
@@ -374,7 +367,6 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         # Pre-allocate training triples on device for bare-tensor loop
         # (no DataLoader / Python iteration overhead).
         train_pos = torch.tensor(train_triples, dtype=torch.long, device=device)
-        N_train = train_pos.shape[0]
         # Corruption modes for training
         if cfg.corruption_scheme == "both":
             _train_corrupt_modes = ["head", "tail"]
@@ -395,32 +387,16 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         for epoch in range(1, cfg.epochs + 1):
             epoch_start = time.perf_counter()
 
-            # Pre-compute all negatives for this epoch (fresh each epoch).
-            all_negs: list[Tensor] = []
-            all_valids: list[Tensor] = []
-            for mode in _train_corrupt_modes:
-                neg, valid = sampler.corrupt_with_mask(
-                    train_pos, num_negatives=cfg.neg_ratio,
-                    mode=mode, filter=True, unique=False,
-                )
-                all_negs.append(neg)
-                all_valids.append(valid)
-            neg_epoch = torch.cat(all_negs, dim=1)      # [N, K*modes, 3]
-            valid_epoch = torch.cat(all_valids, dim=1)   # [N, K*modes]
-
-            # Shuffle training order
-            perm = torch.randperm(N_train, device=device)
-
             running = 0.0
             n_batches = 0
-            for start in range(0, N_train, cfg.batch_size):
-                end = min(start + cfg.batch_size, N_train)
-                idx = perm[start:end]
-                B = len(idx)
-
-                pos = train_pos[idx]                  # [B, 3]
-                neg_batch = neg_epoch[idx]             # [B, K*modes, 3]
-                mask_batch = valid_epoch[idx]          # [B, K*modes]
+            for pos, neg_batch, mask_batch in iterate_epoch_batches(
+                train_pos, sampler,
+                batch_size=cfg.batch_size,
+                num_negatives=cfg.neg_ratio,
+                corrupt_modes=_train_corrupt_modes,
+                filter=True, unique=False,
+            ):
+                B = pos.shape[0]
                 neg_valid = neg_batch[mask_batch]      # [M, 3]
 
                 all_items = torch.cat([pos, neg_valid], dim=0)
