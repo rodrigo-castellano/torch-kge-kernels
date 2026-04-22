@@ -65,8 +65,46 @@ def build_relation_domains(
     return dict(head_domain), dict(tail_domain)
 
 
+def build_relation_domains_from_file(
+    triples: Sequence[Tuple[int, int, int]],
+    entity2domain: Dict[int, str],
+    domain2idx: Dict[str, List[int]],
+) -> Tuple[Dict[int, Set[int]], Dict[int, Set[int]]]:
+    """Build per-relation domain sets using the domain-file memberships.
+
+    Unlike :func:`build_relation_domains`, which only includes entities
+    *observed* in a given position, this function looks up the domain of
+    each position's entities and returns **all** entities belonging to
+    that domain.  This matches the evaluation protocol of ns-old's
+    ``_IndexedCorruptionAdapter``, which draws exhaustive corruption
+    candidates from the full domain file pool.
+
+    Falls back to observed entities for relations whose entities have no
+    domain mapping.
+    """
+    head_domain: Dict[int, Set[int]] = {}
+    tail_domain: Dict[int, Set[int]] = {}
+    for r, h, t in triples:
+        if r not in head_domain:
+            h_dom = entity2domain.get(h)
+            if h_dom is not None and h_dom in domain2idx:
+                head_domain[r] = set(domain2idx[h_dom])
+            else:
+                head_domain[r] = set()
+            head_domain[r].add(h)
+        if r not in tail_domain:
+            t_dom = entity2domain.get(t)
+            if t_dom is not None and t_dom in domain2idx:
+                tail_domain[r] = set(domain2idx[t_dom])
+            else:
+                tail_domain[r] = set()
+            tail_domain[r].add(t)
+    return head_domain, tail_domain
+
+
 __all__ = [
     "add_reciprocal_triples",
     "build_filter_maps",
     "build_relation_domains",
+    "build_relation_domains_from_file",
 ]

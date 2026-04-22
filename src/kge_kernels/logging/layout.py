@@ -12,17 +12,48 @@ from pathlib import Path
 class RunPaths:
     """Concrete filesystem layout for a single run."""
 
+    experiment_root: Path
     root: Path
-    config_dir: Path
-    logs_dir: Path
-    model_dir: Path
     artifacts_dir: Path
-    family_report_dir: Path
     registry_root: Path
+    model_filename: str = "model.safetensors"
+    report_filename: str = "report.md"
 
     @property
     def manifest_path(self) -> Path:
         return self.root / "manifest.json"
+
+    @property
+    def config_path(self) -> Path:
+        return self.root / "config.json"
+
+    @property
+    def stdout_path(self) -> Path:
+        return self.root / "stdout.log"
+
+    @property
+    def events_path(self) -> Path:
+        return self.root / "events.jsonl"
+
+    @property
+    def metrics_path(self) -> Path:
+        return self.root / "metrics.json"
+
+    @property
+    def model_path(self) -> Path:
+        return self.root / self.model_filename
+
+    @property
+    def model_info_path(self) -> Path:
+        return self.root / "model_info.json"
+
+    @property
+    def campaign_path(self) -> Path:
+        return self.experiment_root / "campaign.json"
+
+    @property
+    def report_path(self) -> Path:
+        return self.experiment_root / self.report_filename
 
 
 def sanitize_slug(value: str) -> str:
@@ -31,28 +62,34 @@ def sanitize_slug(value: str) -> str:
     return collapsed.strip("-._") or "run"
 
 
-def build_run_id(signature: str, seed: int) -> tuple[str, str, str]:
-    """Return a stable run id, date component, and ISO start time."""
+def build_run_id(signature: str, seed: int) -> tuple[str, str]:
+    """Return a stable run id and ISO start time."""
     now = datetime.now(timezone.utc)
-    day = now.strftime("%Y-%m-%d")
     ts = now.strftime("%Y%m%d-%H%M%S")
     run_id = f"{ts}_{sanitize_slug(signature)}_s{seed}"
-    return run_id, day, now.isoformat()
+    return run_id, now.isoformat()
 
 
-def build_run_paths(output_root: str, family: str, run_id: str, day: str) -> RunPaths:
+def build_run_paths(
+    output_root: str,
+    family: str,
+    run_id: str,
+    *,
+    model_filename: str = "model.safetensors",
+    report_filename: str = "report.md",
+) -> RunPaths:
     """Create the canonical path layout for a run."""
     output_root_path = Path(output_root).expanduser()
     family_slug = sanitize_slug(family)
-    root = output_root_path / "runs" / family_slug / day / run_id
+    experiment_root = output_root_path / "runs" / family_slug
+    root = experiment_root / run_id
     return RunPaths(
+        experiment_root=experiment_root,
         root=root,
-        config_dir=root / "config",
-        logs_dir=root / "logs",
-        model_dir=root / "model",
         artifacts_dir=root / "artifacts",
-        family_report_dir=output_root_path / "reports" / family_slug / day,
         registry_root=output_root_path / "registry",
+        model_filename=sanitize_slug(model_filename),
+        report_filename=sanitize_slug(report_filename),
     )
 
 

@@ -48,7 +48,7 @@ class TrainConfig:
     model: str = "RotatE"
     dim: int = 1024
     gamma: float = 12.0
-    p: int = 1
+    p: int = 2
     relation_dim: int | None = None
     dropout: float = 0.0
     input_dropout: float = 0.2

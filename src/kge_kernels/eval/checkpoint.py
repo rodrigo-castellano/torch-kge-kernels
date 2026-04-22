@@ -29,21 +29,25 @@ def evaluate_ranking(
     show_progress: bool = False,
     progress_label: str = "Evaluation",
     corruption_scheme: str = "both",
+    sampler=None,
 ) -> Dict[str, float]:
-    """Thin wrapper around :class:`Evaluator` for exhaustive filtered ranking.
+    """Thin wrapper around :class:`Evaluator` for filtered ranking.
 
-    ``eval_batch_size`` and ``progress_label`` are accepted for backward
-    compatibility but not used.
+    ``eval_num_corruptions`` controls sampling: ``0`` = exhaustive (rank
+    against every entity), ``>0`` = sampled ranking against that many
+    corruptions per query (requires ``sampler``). ``eval_batch_size`` and
+    ``progress_label`` are accepted for backward compatibility but not used.
     """
     del eval_batch_size, progress_label
     evaluator = Evaluator(
         model,
         num_entities,
-        num_corruptions=0,
+        num_corruptions=eval_num_corruptions,
         head_filter=head_filter,
         tail_filter=tail_filter,
         head_domain=head_domain,
         tail_domain=tail_domain,
+        sampler=sampler,
         corruption_scheme=corruption_scheme,
         batch_size=chunk_size,
         seed=seed,

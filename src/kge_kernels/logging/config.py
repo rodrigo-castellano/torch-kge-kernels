@@ -28,7 +28,7 @@ class ModelConfig:
 
 @dataclass
 class RegistryConfig:
-    """Promotion settings for the minimal model registry."""
+    """Manual promotion settings for the minimal model registry."""
 
     enabled: bool = False
     promote_on_success: bool = False

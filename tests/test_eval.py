@@ -154,6 +154,67 @@ def test_evaluator_exhaustive_mode():
     assert 0.0 <= results["MRR"] <= 1.0
 
 
+def test_evaluate_ranking_honors_num_corruptions():
+    """evaluate_ranking with eval_num_corruptions > 0 must use the sampled
+    path (not exhaustive). Regression test for a bug where the param was
+    accepted but silently ignored — the Evaluator was always constructed
+    with num_corruptions=0."""
+    from kge_kernels.eval.checkpoint import evaluate_ranking
+
+    model = _FakeModel(num_entities=20)
+    sampler = _make_sampler(num_entities=20)
+
+    # Build minimal filter maps
+    triples = [(0, 1, 2), (1, 3, 4), (2, 5, 6)]
+    from kge_kernels.data import build_filter_maps
+    head_filter, tail_filter = build_filter_maps(triples)
+
+    test_triples = [(0, 1, 2)]
+
+    # With eval_num_corruptions=0 (exhaustive): rank against all 20 entities
+    metrics_exhaustive = evaluate_ranking(
+        model, test_triples, num_entities=20,
+        head_filter=head_filter, tail_filter=tail_filter,
+        device=torch.device("cpu"),
+        eval_num_corruptions=0,
+        corruption_scheme="tail",
+    )
+
+    # With eval_num_corruptions=5 (sampled): rank against 5 corruptions
+    # Requires a sampler; without one, should raise ValueError
+    try:
+        evaluate_ranking(
+            model, test_triples, num_entities=20,
+            head_filter=head_filter, tail_filter=tail_filter,
+            device=torch.device("cpu"),
+            eval_num_corruptions=5,
+            corruption_scheme="tail",
+            sampler=None,
+        )
+        assert False, "Should have raised ValueError for sampled eval without sampler"
+    except ValueError:
+        pass  # expected
+
+    # With sampler provided, sampled eval should succeed and differ from exhaustive
+    metrics_sampled = evaluate_ranking(
+        model, test_triples, num_entities=20,
+        head_filter=head_filter, tail_filter=tail_filter,
+        device=torch.device("cpu"),
+        eval_num_corruptions=5,
+        corruption_scheme="tail",
+        sampler=sampler,
+    )
+    assert "MRR" in metrics_sampled
+    assert metrics_sampled["MRR"] > 0
+    # Sampled (5 competitors) should give equal or better MRR than
+    # exhaustive (19 competitors) — fewer competitors = easier ranking.
+    # Not guaranteed per-query, but on this deterministic model it holds.
+    assert metrics_sampled["MRR"] >= metrics_exhaustive["MRR"] - 0.01, (
+        f"Sampled MRR {metrics_sampled['MRR']:.3f} unexpectedly below "
+        f"exhaustive {metrics_exhaustive['MRR']:.3f}"
+    )
+
+
 def test_eval_results_to_dict():
     """EvalResults.to_dict returns serializable dict."""
     r = EvalResults(

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import csv
+import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 @dataclass(frozen=True)
@@ -93,28 +94,44 @@ def load_triples(path: str, format_hint: str = "auto") -> List[TripleExample]:
 def load_triples_with_mappings(
     path: str,
     format_hint: str = "auto",
+    *,
+    extra_paths: Sequence[str] = (),
 ) -> Tuple[List[Tuple[int, int, int]], Dict[str, int], Dict[str, int]]:
-    """Load triples and assign ``entity2id`` / ``relation2id`` on the fly.
+    """Load triples and assign ``entity2id`` / ``relation2id``.
+
+    When *extra_paths* is provided, entities and relations from all files
+    are collected first and sorted alphabetically before assigning IDs.
+    This matches torch-ns's ``read_ontology`` ordering, ensuring the same
+    entity gets the same embedding index for the same seed.
 
     Returns ``(triples, entity2id, relation2id)`` where triples are
-    ``(relation_id, head_id, tail_id)`` tuples.
+    ``(relation_id, head_id, tail_id)`` tuples (only from *path*, not
+    the extra files).
     """
     triples = load_triples(path, format_hint)
-    entity2id: Dict[str, int] = {}
-    relation2id: Dict[str, int] = {}
-    next_e = 0
-    next_r = 0
+
+    if extra_paths:
+        # Collect ALL entities/relations from all files, sort alphabetically.
+        all_triples = list(triples)
+        for ep in extra_paths:
+            if ep and os.path.isfile(ep):
+                all_triples.extend(load_triples(ep, format_hint))
+        all_entities = sorted({t.head for t in all_triples} | {t.tail for t in all_triples})
+        all_relations = sorted({t.relation for t in all_triples})
+        entity2id = {e: i for i, e in enumerate(all_entities)}
+        relation2id = {r: i for i, r in enumerate(all_relations)}
+    else:
+        entity2id = {}
+        relation2id = {}
+        for triple in triples:
+            for name in (triple.head, triple.tail):
+                if name not in entity2id:
+                    entity2id[name] = len(entity2id)
+            if triple.relation not in relation2id:
+                relation2id[triple.relation] = len(relation2id)
+
     triple_ids: List[Tuple[int, int, int]] = []
     for triple in triples:
-        if triple.head not in entity2id:
-            entity2id[triple.head] = next_e
-            next_e += 1
-        if triple.tail not in entity2id:
-            entity2id[triple.tail] = next_e
-            next_e += 1
-        if triple.relation not in relation2id:
-            relation2id[triple.relation] = next_r
-            next_r += 1
         triple_ids.append(
             (
                 relation2id[triple.relation],

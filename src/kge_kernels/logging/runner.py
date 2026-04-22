@@ -42,8 +42,14 @@ def run_experiment(raw_config: Any, spec: ExperimentSpec) -> Mapping[str, Any]:
     family = spec.family(config)
     signature = spec.signature(config)
     seed = _seed_from_config(config)
-    run_id, day, started_at = build_run_id(signature=signature, seed=seed)
-    paths = build_run_paths(logging_cfg.output.output_root, family=family, run_id=run_id, day=day)
+    run_id, started_at = build_run_id(signature=signature, seed=seed)
+    paths = build_run_paths(
+        logging_cfg.output.output_root,
+        family=family,
+        run_id=run_id,
+        model_filename=logging_cfg.model.filename,
+        report_filename=logging_cfg.report.filename,
+    )
     ctx = RunContext(
         logging=logging_cfg,
         family=family,
@@ -59,11 +65,6 @@ def run_experiment(raw_config: Any, spec: ExperimentSpec) -> Mapping[str, Any]:
         ctx.log_event("run_started")
         with ctx.stdout_capture():
             summary = dict(spec.run(ctx, config))
-        if logging_cfg.registry.enabled and logging_cfg.registry.promote_on_success:
-            promoted = ctx.promote_model()
-            if promoted is not None:
-                ctx.log_event("model_promoted", registry_path=str(promoted))
-                summary.setdefault("registry_version_path", str(promoted))
         ctx.log_event("run_completed")
         ctx.finish(status="completed", final_metrics=summary)
         return summary

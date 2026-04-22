@@ -24,6 +24,7 @@ from ..data import (
     add_reciprocal_triples,
     build_filter_maps,
     build_relation_domains,
+    build_relation_domains_from_file,
     encode_split_triples,
     load_triples_with_mappings,
 )
@@ -157,8 +158,22 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
 
     # ── Data loading ──────────────────────────────────────────────────
     train_file = resolve_train_path(cfg.train_path, cfg.dataset, cfg.data_root, cfg.train_split)
+    # Resolve valid/test paths upfront so entity/relation IDs are sorted
+    # alphabetically across all splits (matching torch-ns's read_ontology).
+    _valid_p = resolve_split_path(
+        split_name="valid", explicit_path=cfg.valid_path,
+        dataset=cfg.dataset, data_root=cfg.data_root,
+        split_filename=cfg.valid_split,
+    )
+    _test_p = resolve_split_path(
+        split_name="test", explicit_path=cfg.test_path,
+        dataset=cfg.dataset, data_root=cfg.data_root,
+        split_filename=cfg.test_split,
+    )
     print(f"Loading triples from {train_file} ...")
-    train_triples, e2id, r2id = load_triples_with_mappings(train_file)
+    train_triples, e2id, r2id = load_triples_with_mappings(
+        train_file, extra_paths=[p for p in (_valid_p, _test_p) if p],
+    )
     if not train_triples:
         raise ValueError("No triples found for training")
     print(f"#entities={len(e2id):,}, #relations={len(r2id):,}, #train triples={len(train_triples):,}")
@@ -212,7 +227,17 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                     for eid in members:
                         entity2domain[eid] = domain_name
     use_domain_eval = bool(domain2idx)
-    head_domain, tail_domain = (build_relation_domains(train_triples + valid_triples + test_triples) if use_domain_eval else (None, None))
+    if use_domain_eval:
+        # Use the full domain-file memberships so that eval ranks against
+        # ALL entities declared in domain2constants.txt, not just those
+        # observed in the data.  This matches ns-old's _IndexedCorruptionAdapter
+        # which samples from the full domain pool.
+        head_domain, tail_domain = build_relation_domains_from_file(
+            train_triples + valid_triples + test_triples,
+            entity2domain, domain2idx,
+        )
+    else:
+        head_domain, tail_domain = None, None
 
     if cfg.use_reciprocal:
         train_triples, r2id, num_relations = add_reciprocal_triples(train_triples, r2id, inv_suffix="__inv")
@@ -220,11 +245,19 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     else:
         num_relations = len(r2id)
 
-    corrupt_mode = cfg.corruption_scheme if cfg.corruption_scheme != "both" else "bernoulli"
+    # corruption_scheme names the PREDICTION direction (which entity to rank
+    # at eval time). Training must corrupt that SAME column so the model
+    # learns to distinguish the true entity from corrupted ones.
+    # The Sampler's mode names which column to REPLACE, so they match 1:1.
+    _scheme_to_mode = {"tail": "head", "head": "tail", "both": "bernoulli"}
+    corrupt_mode = _scheme_to_mode.get(cfg.corruption_scheme, "bernoulli")
+
+    # ── Deterministic initialization ────────────────────────────────
+    set_seed(cfg.seed)
 
     # ── Model, optimizer, scheduler ───────────────────────────────────
     model = build_training_model(cfg, num_entities, num_relations, device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay, eps=1e-7)
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.amp)
 
     plateau_scheduler = None
@@ -233,7 +266,6 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-4,
         )
 
-    set_seed(cfg.seed)
     os.makedirs(cfg.save_dir, exist_ok=True)
 
     # ── Validation state ──────────────────────────────────────────────
@@ -264,6 +296,16 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epochs_completed_payload=epochs_completed,
         )
 
+    def _exhaustive_valid_mrr(mdl: torch.nn.Module, valid_t: List[Tuple[int, int, int]]) -> float:
+        """Exhaustive filtered validation MRR."""
+        valid_metrics = evaluate_ranking(
+            mdl, valid_t, num_entities,
+            head_filter, tail_filter, device, cfg.eval_chunk_size,
+            head_domain=head_domain, tail_domain=tail_domain,
+            corruption_scheme=cfg.corruption_scheme,
+        )
+        return float(valid_metrics["MRR"])
+
     def _run_validation(epoch: int, mdl: torch.nn.Module) -> bool:
         """Run validation, update best model, check early stopping. Returns True to stop."""
         nonlocal best_valid_mrr, best_valid_epoch, best_state_dict, no_improve_evals, stopped_early
@@ -274,14 +316,17 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         if not should_run:
             return False
 
-        # Exhaustive filtered ranking on validation set
-        valid_metrics = evaluate_ranking(
-            mdl, valid_eval_triples, num_entities,
-            head_filter, tail_filter, device, cfg.eval_chunk_size,
-            head_domain=head_domain, tail_domain=tail_domain,
-            corruption_scheme=cfg.corruption_scheme,
-        )
-        current_valid_mrr = float(valid_metrics["MRR"])
+        if cfg.loss == "bce" and use_domain_eval:
+            current_valid_mrr = _exhaustive_valid_mrr(mdl, valid_eval_triples)
+        else:
+            # Exhaustive filtered ranking
+            valid_metrics = evaluate_ranking(
+                mdl, valid_eval_triples, num_entities,
+                head_filter, tail_filter, device, cfg.eval_chunk_size,
+                head_domain=head_domain, tail_domain=tail_domain,
+                corruption_scheme=cfg.corruption_scheme,
+            )
+            current_valid_mrr = float(valid_metrics["MRR"])
 
         if current_valid_mrr > best_valid_mrr:
             best_valid_mrr = current_valid_mrr
@@ -301,13 +346,21 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     train_start = time.perf_counter()
 
     if cfg.loss == "bce":
-        # BCE training with complete query groups:
-        # each batch = positives + their fresh negatives scored together.
+        # BCE training with complete query groups.
         known_sampling_triples = _build_known_sampling_triples(
             train_triples=train_triples, valid_triples=valid_triples,
             test_triples=test_triples, use_reciprocal=cfg.use_reciprocal,
             num_relations_orig=num_relations_orig,
         )
+        # Training sampler: NO domain restriction.  ns-old's
+        # _IndexedCorruptionAdapter *does* domain-restrict training
+        # negatives, but tkk uses BCE-with-logits whose gradient signal
+        # stays strong even for extreme logits.  Combined with a tiny
+        # domain pool (e.g. 5 entities for ablation/countries "regions")
+        # this collapses training — the model overfits the handful of
+        # same-domain negatives but never learns to rank unseen entities.
+        # Domain restriction is applied only at eval time (head_domain /
+        # tail_domain in the Evaluator).
         sampler = _KGESampler.from_data(
             all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
             num_entities=num_entities, num_relations=num_relations,
@@ -316,66 +369,74 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 torch.tensor(train_triples, dtype=torch.long), num_relations,
             ),
             min_entity_idx=0,
-            domain2idx=domain2idx or None,
-            entity2domain=entity2domain or None,
         )
 
-        # Pre-compute or fresh negatives
-        precomp_neg = None
-        precomp_labels = None
-        if cfg.precompute_negatives:
-            pool_items, pool_labels = _build_interleaved_pool(
-                train_triples, num_entities, cfg.neg_ratio, corrupt_mode, sampler,
-            )
-            precomp_neg = pool_items
-            precomp_labels = pool_labels
+        # Pre-allocate training triples on device for bare-tensor loop
+        # (no DataLoader / Python iteration overhead).
+        train_pos = torch.tensor(train_triples, dtype=torch.long, device=device)
+        N_train = train_pos.shape[0]
+        # Corruption modes for training
+        if cfg.corruption_scheme == "both":
+            _train_corrupt_modes = ["head", "tail"]
+        else:
+            _train_corrupt_modes = [corrupt_mode]
 
-        dataloader = DataLoader(
-            TripleDataset(train_triples), batch_size=cfg.batch_size,
-            shuffle=True, num_workers=cfg.num_workers,
-            pin_memory=(device.type == "cuda"), drop_last=False,
-        )
+        # RotatE needs sigmoid+BCE (matching ns-old's output_layer which
+        # applies sigmoid inside the model).  BCE_with_logits is numerically
+        # equivalent but the different gradient scale prevents RotatE from
+        # learning on large KGs (wn18rr).  ComplEx works with either.
+        _use_sigmoid = cfg.model.lower() == "rotate"
+        def _bce_fn(scores: Tensor, labels: Tensor) -> Tensor:
+            if _use_sigmoid:
+                return F.binary_cross_entropy(torch.sigmoid(scores), labels)
+            return F.binary_cross_entropy_with_logits(scores, labels)
 
         model.train()
         for epoch in range(1, cfg.epochs + 1):
             epoch_start = time.perf_counter()
+
+            # Pre-compute all negatives for this epoch (fresh each epoch).
+            all_negs: list[Tensor] = []
+            all_valids: list[Tensor] = []
+            for mode in _train_corrupt_modes:
+                neg, valid = sampler.corrupt_with_mask(
+                    train_pos, num_negatives=cfg.neg_ratio,
+                    mode=mode, filter=True, unique=False,
+                )
+                all_negs.append(neg)
+                all_valids.append(valid)
+            neg_epoch = torch.cat(all_negs, dim=1)      # [N, K*modes, 3]
+            valid_epoch = torch.cat(all_valids, dim=1)   # [N, K*modes]
+
+            # Shuffle training order
+            perm = torch.randperm(N_train, device=device)
+
             running = 0.0
             n_batches = 0
+            for start in range(0, N_train, cfg.batch_size):
+                end = min(start + cfg.batch_size, N_train)
+                idx = perm[start:end]
+                B = len(idx)
 
-            if cfg.precompute_negatives:
-                # Serve pre-computed pool in fixed-size chunks
-                for i in range(0, precomp_neg.shape[0], cfg.batch_size):
-                    batch = precomp_neg[i:i + cfg.batch_size]
-                    labels = precomp_labels[i:i + cfg.batch_size]
-                    optimizer.zero_grad(set_to_none=True)
-                    scores = model(batch[:, 1], batch[:, 0], batch[:, 2])
-                    loss = F.binary_cross_entropy_with_logits(scores, labels)
-                    loss.backward()
-                    optimizer.step()
-                    running += loss.item()
-                    n_batches += 1
-            else:
-                for batch in dataloader:
-                    batch = batch.to(device, non_blocking=True)
-                    neg, valid_mask = sampler.corrupt_with_mask(
-                        batch, num_negatives=cfg.neg_ratio,
-                        mode=corrupt_mode, filter=True, unique=False,
-                    )
-                    neg_flat = neg.reshape(-1, 3)
-                    mask_flat = valid_mask.reshape(-1)
-                    valid_neg = neg_flat[mask_flat]
-                    all_items = torch.cat([batch, valid_neg], dim=0)
-                    labels = torch.cat([
-                        torch.ones(batch.shape[0], device=device),
-                        torch.zeros(valid_neg.shape[0], device=device),
-                    ])
-                    optimizer.zero_grad(set_to_none=True)
-                    scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
-                    loss = F.binary_cross_entropy_with_logits(scores, labels)
-                    loss.backward()
-                    optimizer.step()
-                    running += loss.item()
-                    n_batches += 1
+                pos = train_pos[idx]                  # [B, 3]
+                neg_batch = neg_epoch[idx]             # [B, K*modes, 3]
+                mask_batch = valid_epoch[idx]          # [B, K*modes]
+                neg_valid = neg_batch[mask_batch]      # [M, 3]
+
+                all_items = torch.cat([pos, neg_valid], dim=0)
+                labels = torch.cat([
+                    torch.ones(B, device=device),
+                    torch.zeros(neg_valid.shape[0], device=device),
+                ])
+                optimizer.zero_grad(set_to_none=True)
+                scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
+                loss = _bce_fn(scores, labels)
+                loss.backward()
+                if cfg.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                optimizer.step()
+                running += loss.item()
+                n_batches += 1
 
             epochs_completed = epoch
             epoch_time = time.perf_counter() - epoch_start
@@ -396,13 +457,14 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             test_triples=test_triples, use_reciprocal=cfg.use_reciprocal,
             num_relations_orig=num_relations_orig,
         )
-        train_rht = torch.tensor(train_triples, dtype=torch.long)
-        bern_probs = compute_bernoulli_probs(train_rht, num_relations)
         sampler = _KGESampler.from_data(
             all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
             num_entities=num_entities, num_relations=num_relations,
             device=device, default_mode="bernoulli",
-            bern_probs=bern_probs, min_entity_idx=0,
+            bern_probs=compute_bernoulli_probs(
+                torch.tensor(train_triples, dtype=torch.long), num_relations,
+            ),
+            min_entity_idx=0,
             domain2idx=domain2idx or None,
             entity2domain=entity2domain or None,
         )
@@ -473,6 +535,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                     head_domain=head_domain, tail_domain=tail_domain,
                     eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
                     corruption_scheme=cfg.corruption_scheme,
+                    sampler=sampler if cfg.eval_num_corruptions > 0 else None,
                 ),
                 metrics, metric_logs,
             )
@@ -487,6 +550,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 head_domain=head_domain, tail_domain=tail_domain,
                 eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
                 corruption_scheme=cfg.corruption_scheme,
+                sampler=sampler if cfg.eval_num_corruptions > 0 else None,
             ),
             metrics, metric_logs,
         )
@@ -502,6 +566,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
                 show_progress=True, progress_label="Test eval",
                 corruption_scheme=cfg.corruption_scheme,
+                sampler=sampler if cfg.eval_num_corruptions > 0 else None,
             ),
             metrics, metric_logs,
         )

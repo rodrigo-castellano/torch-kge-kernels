@@ -242,14 +242,15 @@ class Evaluator:
         return ranking_metrics(torch.cat(all_ranks_list))
 
     def _score_all_tails(self, model: nn.Module, h: Tensor, r: Tensor) -> Tensor:
-        """Score all entities as tails for (h, r) pairs."""
+        """Score all entities as tails for (h, r) pairs. Returns raw logits
+        — sigmoid would saturate to 1.0 for high-magnitude scores and
+        introduce artificial ties that collapse Hits@1."""
         if r.dim() == 0:
             r = r.expand(h.shape[0])
         if hasattr(model, "score"):
-            return torch.sigmoid(model.score(h, r, None))
+            return model.score(h, r, None)
         if hasattr(model, "score_all_tails"):
-            return torch.sigmoid(model.score_all_tails(h, r))
-        # Fallback: expand to [B, E] via score_triples
+            return model.score_all_tails(h, r)
         B = h.shape[0]
         E = self.num_entities
         all_t = torch.arange(E, device=h.device).unsqueeze(0).expand(B, -1)
@@ -257,16 +258,17 @@ class Evaluator:
         r_exp = r.expand(B * E) if r.dim() == 0 else r.unsqueeze(1).expand(B, E).reshape(-1)
         t_exp = all_t.reshape(-1)
         raw = model.score_triples(h_exp, r_exp, t_exp) if hasattr(model, "score_triples") else model.score_atoms(r_exp, h_exp, t_exp)
-        return torch.sigmoid(raw).view(B, E)
+        return raw.view(B, E)
 
     def _score_all_heads(self, model: nn.Module, r: Tensor, t: Tensor) -> Tensor:
-        """Score all entities as heads for (r, t) pairs."""
+        """Score all entities as heads for (r, t) pairs. See ``_score_all_tails``
+        for why we return raw logits rather than sigmoid probabilities."""
         if r.dim() == 0:
             r = r.expand(t.shape[0])
         if hasattr(model, "score"):
-            return torch.sigmoid(model.score(None, r, t))
+            return model.score(None, r, t)
         if hasattr(model, "score_all_heads"):
-            return torch.sigmoid(model.score_all_heads(r, t))
+            return model.score_all_heads(r, t)
         B = t.shape[0]
         E = self.num_entities
         all_h = torch.arange(E, device=t.device).unsqueeze(0).expand(B, -1)
@@ -274,14 +276,104 @@ class Evaluator:
         r_exp = r.expand(B * E) if r.dim() == 0 else r.unsqueeze(1).expand(B, E).reshape(-1)
         t_exp = t.unsqueeze(1).expand(B, E).reshape(-1)
         raw = model.score_triples(h_exp, r_exp, t_exp) if hasattr(model, "score_triples") else model.score_atoms(r_exp, h_exp, t_exp)
-        return torch.sigmoid(raw).view(B, E)
+        return raw.view(B, E)
 
     # ------------------------------------------------------------------
     # Sampled evaluation (corruption-pool based)
     # ------------------------------------------------------------------
 
     def _evaluate_sampled(self, test_triples: Tensor) -> Dict[str, float]:
-        """Rank against K sampled corruptions."""
+        """Rank against K sampled corruptions using matrix-multiply scoring.
+
+        Instead of building per-query corruption pools and scoring each
+        triple individually, compute the full ``[B, E]`` score matrix via
+        ``score_all_tails`` / ``score_all_heads``, then sample K entities
+        per query and rank the true entity among them.  This is orders of
+        magnitude faster for small-to-medium entity counts.
+        """
+        assert self.sampler is not None
+        actual_model = _unwrap_model(self.model)
+        has_matmul = hasattr(actual_model, "score_all_tails") or hasattr(actual_model, "score")
+
+        if not has_matmul:
+            return self._evaluate_sampled_pool(test_triples)
+
+        N = test_triples.shape[0]
+        K = self.num_corruptions
+        corruption_modes: Sequence[str] = (
+            ("head", "tail") if self.corruption_scheme == "both" else (self.corruption_scheme,)
+        )
+        tie_gen = torch.Generator(device=self.device).manual_seed(self.seed)
+
+        triples_list = [(int(r), int(h), int(t)) for r, h, t in test_triples.tolist()]
+        by_relation: Dict[int, List[Tuple[int, int, int]]] = defaultdict(list)
+        for r, h, t in triples_list:
+            by_relation[r].append((r, h, t))
+
+        training_mode = self.model.training
+        self.model.eval()
+
+        all_ranks_list: List[Tensor] = []
+        dim = getattr(actual_model, "dim", 512)
+        max_chunk = max(1, min(512, (4 * 1024**3) // max(1, self.num_entities * dim * 4)))
+
+        for r, rel_triples in by_relation.items():
+            all_heads = torch.tensor([h for _, h, _ in rel_triples], dtype=torch.long, device=self.device)
+            all_tails = torch.tensor([t for _, _, t in rel_triples], dtype=torch.long, device=self.device)
+            r_tensor = torch.tensor(r, dtype=torch.long, device=self.device)
+
+            for chunk_start in range(0, len(rel_triples), max_chunk):
+                chunk_end = min(chunk_start + max_chunk, len(rel_triples))
+                heads = all_heads[chunk_start:chunk_end]
+                tails = all_tails[chunk_start:chunk_end]
+                B = heads.shape[0]
+
+                for mode in corruption_modes:
+                    if mode == "tail":
+                        full_scores = self._score_all_tails(actual_model, heads, r_tensor)
+                        true_ents = tails
+                        filter_map = self.tail_filter
+                        filter_idx1, filter_idx2 = heads, r_tensor
+                    else:
+                        full_scores = self._score_all_heads(actual_model, r_tensor, tails)
+                        true_ents = heads
+                        filter_map = self.head_filter
+                        filter_idx1, filter_idx2 = r_tensor, tails
+
+                    # Sample K corruption entities per query
+                    pos_triples = torch.stack([
+                        r_tensor.expand(B), heads, tails
+                    ], dim=1)
+                    neg, valid_mask = self.sampler.corrupt_with_mask(
+                        pos_triples, num_negatives=K, mode=mode,
+                        device=self.device, filter=True, unique=False,
+                    )
+                    # neg: [B, K, 3] — extract the corrupted entity column
+                    corrupt_col = 1 if mode == "head" else 2
+                    sampled_ents = neg[:, :, corrupt_col]  # [B, K]
+
+                    # Build score matrix: col 0 = true, cols 1..K = corruptions
+                    true_scores = full_scores[torch.arange(B, device=self.device), true_ents].unsqueeze(1)
+                    corr_scores = full_scores.gather(1, sampled_ents.clamp(0, self.num_entities - 1))
+                    pool_scores = torch.cat([true_scores, corr_scores], dim=1)  # [B, 1+K]
+
+                    valid = torch.ones(B, 1 + K, dtype=torch.bool, device=self.device)
+                    valid[:, 1:] = valid_mask
+
+                    true_idx = torch.zeros(B, dtype=torch.long, device=self.device)
+                    ranks = compute_ranks(pool_scores, true_idx, valid_mask=valid,
+                                          tie_handling="random", generator=tie_gen)
+                    all_ranks_list.append(ranks)
+
+        if training_mode:
+            self.model.train()
+
+        if not all_ranks_list:
+            return {"MRR": 0.0, "Hits@1": 0.0, "Hits@3": 0.0, "Hits@10": 0.0}
+        return ranking_metrics(torch.cat(all_ranks_list))
+
+    def _evaluate_sampled_pool(self, test_triples: Tensor) -> Dict[str, float]:
+        """Legacy pool-based sampled eval for models without matmul scoring."""
         assert self.sampler is not None
         N = test_triples.shape[0]
         corruption_modes: Sequence[str] = (
@@ -328,7 +420,6 @@ class Evaluator:
 
                 for mode_name, mode_scores in mode_scores_dict.items():
                     scores_2d = mode_scores.view(pool_obj.K, pool_obj.CQ).t()
-                    # True item is always at column 0 (CandidatePool convention)
                     true_idx = torch.zeros(pool_obj.CQ, dtype=torch.long, device=self.device)
                     valid = torch.ones_like(scores_2d, dtype=torch.bool)
                     valid[:, 1:] = pool_obj.valid_mask[:, 1:]
@@ -339,7 +430,6 @@ class Evaluator:
                     all_ranks.setdefault(key, []).append(ranks)
                 offset += P
 
-        # Aggregate across modes
         if nm > 1:
             mode_names = set()
             for key in all_ranks:

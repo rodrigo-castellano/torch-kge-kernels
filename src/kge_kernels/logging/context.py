@@ -97,18 +97,14 @@ class RunContext:
         self._saved_model_info: dict[str, Any] | None = None
 
         for directory in (
+            self.paths.experiment_root,
             self.paths.root,
-            self.paths.config_dir,
-            self.paths.logs_dir,
-            self.paths.model_dir,
             self.paths.artifacts_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        if self.logging.report.enabled:
-            self.paths.family_report_dir.mkdir(parents=True, exist_ok=True)
-
-        self._write_json(self.paths.config_dir / "resolved.json", _normalize_json(resolved_config))
+        self._update_campaign_metadata()
+        self._write_json(self.paths.config_path, _normalize_json(resolved_config))
         self._write_manifest(status="running")
 
     def _write_json(self, path: Path, payload: Any) -> None:
@@ -148,6 +144,7 @@ class RunContext:
         manifest = {
             "run": {
                 "id": self.run_id,
+                "experiment_name": self.family,
                 "family": self.family,
                 "signature": self.signature,
                 "seed": self.seed,
@@ -157,14 +154,38 @@ class RunContext:
                 "error": error,
             },
             "paths": {
+                "experiment_root": str(self.paths.experiment_root),
                 "run_root": str(self.paths.root),
-                "family_report_dir": str(self.paths.family_report_dir),
                 "model_path": str(self._saved_model_path) if self._saved_model_path else None,
             },
             "model": _normalize_json(self._saved_model_info) if self._saved_model_info is not None else None,
             "final_metrics": _normalize_json(final_metrics) if final_metrics is not None else None,
         }
         self._write_json(self.paths.manifest_path, manifest)
+
+    def _update_campaign_metadata(self, *, writer: Optional[str] = None) -> None:
+        created_at = datetime.now(timezone.utc).isoformat()
+        path = self.paths.campaign_path
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+        else:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("name", self.family)
+        payload.setdefault("created_at", created_at)
+        run_ids = payload.get("run_ids")
+        if not isinstance(run_ids, list):
+            run_ids = []
+        if self.run_id not in run_ids:
+            run_ids.append(self.run_id)
+        payload["run_ids"] = run_ids
+        if writer is not None:
+            payload["writer"] = writer
+        self._write_json(path, payload)
 
     def _canonical_metric_split(self, split: Optional[str]) -> str:
         if split is None:
@@ -182,8 +203,7 @@ class RunContext:
         if not self.logging.output.save_stdout:
             yield
             return
-        log_path = self.paths.logs_dir / "stdout.log"
-        with log_path.open("a", encoding="utf-8", buffering=1) as handle:
+        with self.paths.stdout_path.open("a", encoding="utf-8", buffering=1) as handle:
             tee_out = _TeeStream(sys.stdout, handle)
             tee_err = _TeeStream(sys.stderr, handle)
             with redirect_stdout(tee_out), redirect_stderr(tee_err):
@@ -194,7 +214,7 @@ class RunContext:
         if not self.logging.output.save_events:
             return
         self._append_jsonl(
-            self.paths.logs_dir / "events.jsonl",
+            self.paths.events_path,
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "event": name,
@@ -212,8 +232,7 @@ class RunContext:
         }
         if step is not None:
             entry["step"] = int(step)
-        metrics_path = self.paths.logs_dir / "metrics.json"
-        self._append_grouped_metric_row(metrics_path, entry, split=split)
+        self._append_grouped_metric_row(self.paths.metrics_path, entry, split=split)
 
     def save_model(
         self,
@@ -222,67 +241,56 @@ class RunContext:
         saved_as: Optional[str] = None,
         metric_name: Optional[str] = None,
         metric_value: Optional[float] = None,
+        global_step: Optional[int] = None,
+        extra_metadata: Optional[Mapping[str, Any]] = None,
     ) -> Optional[Path]:
         """Persist the single model artifact for this run."""
         if self.logging.model.mode == "none":
             return None
-        model_path = self.paths.model_dir / self.logging.model.filename
+        model_path = self.paths.model_path
         serializer(model_path)
         self._saved_model_path = model_path
-        self._saved_model_info = {
-            "saved_as": saved_as or self.logging.model.mode,
+        model_info = {
+            "save_mode": saved_as or self.logging.model.mode,
             "metric_name": metric_name,
             "metric_value": metric_value,
+            "global_step": int(global_step) if global_step is not None else None,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
         }
+        if extra_metadata:
+            model_info.update(_normalize_json(dict(extra_metadata)))
+        self._saved_model_info = model_info
+        self._write_json(self.paths.model_info_path, self._saved_model_info)
         return model_path
 
     def write_report(self, content: str, *, metadata: Optional[Mapping[str, Any]] = None) -> Optional[Path]:
-        """Create the optional family-level human or agent report."""
+        """Create the optional experiment-level human or agent report."""
         if not self.logging.report.enabled:
             return None
-        report_path = self.paths.family_report_dir / self.logging.report.filename
+        report_path = self.paths.report_path
         report_path.write_text(content.rstrip() + "\n", encoding="utf-8")
-        meta_payload = {
-            "writer": self.logging.report.writer,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "run_id": self.run_id,
-            "family": self.family,
-        }
-        if metadata:
-            meta_payload.update(metadata)
-        self._write_json(self.paths.family_report_dir / "report_meta.json", meta_payload)
+        writer = self.logging.report.writer
+        if metadata and metadata.get("writer"):
+            writer = str(metadata["writer"])
+        self._update_campaign_metadata(writer=writer)
         return report_path
 
     def promote_model(self, *, model_name: Optional[str] = None) -> Optional[Path]:
-        """Copy the current run model into the minimal versioned registry."""
+        """Copy the current run bundle into the mirrored registry."""
         if not self.logging.registry.enabled or self._saved_model_path is None:
             return None
-        name = sanitize_slug(model_name or self.logging.registry.model_name or self.signature)
-        model_root = self.paths.registry_root / name
-        model_root.mkdir(parents=True, exist_ok=True)
-
-        existing = sorted(
-            p for p in model_root.iterdir()
-            if p.is_dir() and p.name.startswith("v") and p.name[1:].isdigit()
-        )
-        next_version = len(existing) + 1
-        version_dir = model_root / f"v{next_version:03d}"
-        version_dir.mkdir(parents=True, exist_ok=False)
-
-        shutil.copy2(self._saved_model_path, version_dir / self.logging.model.filename)
-        shutil.copy2(self.paths.config_dir / "resolved.json", version_dir / "config.json")
-        metrics_path = self.paths.logs_dir / "metrics.json"
-        stdout_path = self.paths.logs_dir / "stdout.log"
-        if metrics_path.exists():
-            shutil.copy2(metrics_path, version_dir / "metrics.json")
-        if stdout_path.exists():
-            shutil.copy2(stdout_path, version_dir / "stdout.log")
+        experiment_name = sanitize_slug(self.family)
+        version_dir = self.paths.registry_root / experiment_name / self.run_id
+        version_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(self.paths.root, version_dir, dirs_exist_ok=True)
         provenance = {
+            "registry_name": model_name or self.logging.registry.model_name,
+            "source_run_path": str(self.paths.root),
             "source_run_id": self.run_id,
             "source_signature": self.signature,
             "promoted_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._write_json(version_dir / "provenance.json", provenance)
+        self._write_json(version_dir / "promotion.json", provenance)
         return version_dir
 
     def finish(self, *, status: str, final_metrics: Mapping[str, Any], error: Optional[str] = None) -> None:
