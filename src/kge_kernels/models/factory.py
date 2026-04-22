@@ -13,7 +13,7 @@ from torch import nn
 from .complex import ComplEx
 from .conve import ConvE
 from .distmult import DistMult
-from .rotate import RotatE
+from .rotate import RotatE, RotatENS
 from .transe import TransE
 from .tucker import TuckER
 
@@ -37,6 +37,8 @@ def build_model(
     name = name.lower()
     if name == "rotate":
         return RotatE(num_entities, num_relations, dim=dim, gamma=gamma, p_norm=p_norm)
+    if name == "rotate_ns":
+        return RotatENS(num_entities, num_relations, dim=dim, gamma=gamma, p_norm=p_norm)
     if name == "complex":
         return ComplEx(num_entities, num_relations, dim=dim)
     if name == "tucker":
