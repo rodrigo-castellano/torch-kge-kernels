@@ -25,6 +25,7 @@ import math
 import torch
 from torch import Tensor, nn
 
+from . import ops
 from .base import KGEModel
 
 
@@ -74,16 +75,23 @@ class RotatE(KGEModel):
         im.mul_(factor)
 
     def _split_ent(self, idx: Tensor):
-        emb = self.entity_embeddings(idx)
-        return emb[..., :self.half_dim], emb[..., self.half_dim:]
+        return ops.complex_split(self.entity_embeddings(idx))
 
     def _hr(self, h: Tensor, r: Tensor):
-        h_re, h_im = self._split_ent(h)
+        # Legacy RotatE stores raw phases in ``[-π, π]``; wrap to
+        # ``[0, 2π]`` before rotation so the downstream cos/sin match
+        # the pre-wrap convention existing checkpoints trained under.
         phase = torch.remainder(self.rel_phase(r), 2 * math.pi)
-        c, s = torch.cos(phase), torch.sin(phase)
-        return h_re * c - h_im * s, h_re * s + h_im * c
+        return ops.rotate_apply(self.entity_embeddings(h), phase, norm_factor=1.0)
 
     def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
+        """Legacy-RotatE distance: per-component-sum-after-per-pair-sqrt.
+
+        Kept as-is (rather than switching to :func:`ops.complex_dist`)
+        because this variant is the one used by existing tkk
+        checkpoints. ``RotatENS`` uses the Euclidean variant via
+        :func:`ops.complex_dist`.
+        """
         if self.p == 1:
             return ((a_re - b_re).abs() + (a_im - b_im).abs()).sum(dim=-1)
         return torch.sqrt(((a_re - b_re) ** 2 + (a_im - b_im) ** 2) + 1e-9).sum(dim=-1)
@@ -234,25 +242,17 @@ class RotatENS(KGEModel):
         im.mul_(factor)
 
     def _split_ent(self, idx: Tensor):
-        emb = self.entity_embeddings(idx)
-        return emb[..., :self.half_dim], emb[..., self.half_dim:]
+        return ops.complex_split(self.entity_embeddings(idx))
 
     def _hr(self, h: Tensor, r: Tensor):
-        h_re, h_im = self._split_ent(h)
-        phase = self.rel_embeddings(r) * self.norm_factor
-        c, s = torch.cos(phase), torch.sin(phase)
-        return h_re * c - h_im * s, h_re * s + h_im * c
+        return ops.rotate_apply(
+            self.entity_embeddings(h),
+            self.rel_embeddings(r),
+            norm_factor=self.norm_factor,
+        )
 
     def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
-        if self.p == 1:
-            return ((a_re - b_re).abs() + (a_im - b_im).abs()).sum(dim=-1)
-        # L2: Euclidean norm = sqrt(sum(diff²)), matching ns-old RotatE
-        return torch.sqrt(
-            torch.clamp(
-                ((a_re - b_re) ** 2 + (a_im - b_im) ** 2).sum(dim=-1),
-                min=1e-9,
-            )
-        )
+        return ops.complex_dist(a_re - b_re, a_im - b_im, p=self.p)
 
     def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         hr_re, hr_im = self._hr(h, r)

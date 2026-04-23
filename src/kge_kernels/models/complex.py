@@ -7,12 +7,17 @@ of size ``dim/2`` so that downstream MLPs see a fixed-width feature).
 Embeddings are stored as single interleaved ``[re | im]`` tensors
 (matching torch-ns's proven layout) so that Adam's per-parameter
 adaptive statistics cover the full complex vector.
+
+The arithmetic lives in :mod:`kge_kernels.models.ops` and is shared
+with DpRL's pre-embedded atom embedders — keeping one source of truth
+for the complex Hermitian product.
 """
 from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
 
+from . import ops
 from .base import KGEModel
 
 
@@ -35,61 +40,49 @@ class ComplEx(KGEModel):
         nn.init.uniform_(self.entity_embeddings.weight, -0.05, 0.05)
         nn.init.uniform_(self.relation_embeddings.weight, -0.05, 0.05)
 
-    def _split_ent(self, idx: Tensor):
-        emb = self.entity_embeddings(idx)
-        return emb[..., :self.half_dim], emb[..., self.half_dim:]
-
-    def _split_rel(self, idx: Tensor):
-        emb = self.relation_embeddings(idx)
-        return emb[..., :self.half_dim], emb[..., self.half_dim:]
-
     def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        h_re, h_im = self._split_ent(h)
-        r_re, r_im = self._split_rel(r)
-        t_re, t_im = self._split_ent(t)
-        s = h_re * r_re * t_re + h_im * r_re * t_im + h_re * r_im * t_im - h_im * r_im * t_re
-        return s.sum(dim=-1)
+        return ops.complex_hermitian_real_vec(
+            self.entity_embeddings(h),
+            self.relation_embeddings(r),
+            self.entity_embeddings(t),
+        ).sum(dim=-1)
 
     def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        h_re, h_im = self._split_ent(h)
-        r_re, r_im = self._split_rel(r)
+        h_re, h_im = ops.complex_split(self.entity_embeddings(h))
+        r_re, r_im = ops.complex_split(self.relation_embeddings(r))
         all_re = self.entity_embeddings.weight[:, :self.half_dim]
         all_im = self.entity_embeddings.weight[:, self.half_dim:]
-        hr_re_re = h_re * r_re
-        hr_im_re = h_im * r_re
-        hr_re_im = h_re * r_im
-        hr_im_im = h_im * r_im
         return (
-            hr_re_re @ all_re.T
-            + hr_im_re @ all_im.T
-            + hr_re_im @ all_im.T
-            - hr_im_im @ all_re.T
+            (h_re * r_re) @ all_re.T
+            + (h_im * r_re) @ all_im.T
+            + (h_re * r_im) @ all_im.T
+            - (h_im * r_im) @ all_re.T
         )
 
     def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
-        t_re, t_im = self._split_ent(t)
-        r_re, r_im = self._split_rel(r)
+        t_re, t_im = ops.complex_split(self.entity_embeddings(t))
+        r_re, r_im = ops.complex_split(self.relation_embeddings(r))
         all_re = self.entity_embeddings.weight[:, :self.half_dim]
         all_im = self.entity_embeddings.weight[:, self.half_dim:]
-        rt_re_re = r_re * t_re
-        rt_re_im = r_re * t_im
-        rt_im_im = r_im * t_im
-        rt_im_re = r_im * t_re
         return (
-            rt_re_re @ all_re.T
-            + rt_re_im @ all_im.T
-            + rt_im_im @ all_re.T
-            - rt_im_re @ all_im.T
+            (r_re * t_re) @ all_re.T
+            + (r_re * t_im) @ all_im.T
+            + (r_im * t_im) @ all_re.T
+            - (r_im * t_re) @ all_im.T
         )
 
     def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        """Fused real-component ComplEx feature."""
-        h_re, h_im = self._split_ent(h)
-        r_re, r_im = self._split_rel(r)
-        t_re, t_im = self._split_ent(t)
-        real = h_re * r_re * t_re + h_im * r_re * t_im + h_re * r_im * t_im - h_im * r_im * t_re
-        imag = h_re * r_re * t_im - h_im * r_re * t_re + h_re * r_im * t_re + h_im * r_im * t_im
-        return torch.cat([real, imag], dim=-1)
+        """Fused real+imag ComplEx feature (concatenated)."""
+        h_emb = self.entity_embeddings(h)
+        r_emb = self.relation_embeddings(r)
+        t_emb = self.entity_embeddings(t)
+        return torch.cat(
+            [
+                ops.complex_hermitian_real_vec(h_emb, r_emb, t_emb),
+                ops.complex_hermitian_imag_vec(h_emb, r_emb, t_emb),
+            ],
+            dim=-1,
+        )
 
 
 __all__ = ["ComplEx"]
