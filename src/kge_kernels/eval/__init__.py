@@ -11,15 +11,27 @@ from .ranking import (
     ranking_metrics,
 )
 from .results import EvalResults
+from .unified import (
+    CandidateProvider,
+    Mode,
+    ScoresModel,
+    clear_eval_cache,
+    evaluate,
+)
 
 __all__ = [
     "CandidatePool",
+    "CandidateProvider",
     "EvalResults",
     "Evaluator",
     "FusionFn",
+    "Mode",
     "ScorerFn",
+    "ScoresModel",
     "StreamingRankingMetrics",
+    "clear_eval_cache",
     "compute_ranks",
+    "evaluate",
     "evaluate_checkpoint",
     "evaluate_ranking",
     "ranking_metrics",

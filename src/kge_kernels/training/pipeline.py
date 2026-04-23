@@ -289,8 +289,44 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epochs_completed_payload=epochs_completed,
         )
 
+    # ``_eval_sampler`` is set by the BCE branch below after the training
+    # sampler is built. When set, ``_run_validation`` routes through the
+    # unified compiled ``evaluate()`` path (static buffers + per-model
+    # compile cache). Otherwise it falls back to ``evaluate_ranking``.
+    _eval_sampler = [None]  # boxed so inner function can see the assignment
+
+    def _unified_valid_mrr(mdl: torch.nn.Module,
+                           valid_t: List[Tuple[int, int, int]]) -> float:
+        """Validation MRR via unified.evaluate (compiled static-buffer path).
+
+        Uses the model's own ``recommended_eval_batch_size`` — the model
+        knows its per-batch memory profile (matmul-style for ComplEx /
+        DistMult, ``[B, E, H]`` broadcast for RotatE). The legacy
+        ``cfg.eval_chunk_size`` is only a lower bound; the model's
+        recommendation is the cap.
+        """
+        from ..eval.unified import CandidateProvider, evaluate
+        sampler = _eval_sampler[0]
+        triples_tensor = torch.tensor(valid_t, dtype=torch.long, device=device)
+        eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None
+        provider = CandidateProvider(
+            sampler, num_entities=num_entities,
+            k=eval_negs if eval_negs else None,
+        )
+        scheme_map = {"tail": "tail", "head": "head", "both": "both"}
+        recommended_B = mdl.recommended_eval_batch_size(num_entities) \
+            if hasattr(mdl, "recommended_eval_batch_size") else 256
+        metrics = evaluate(
+            mdl, triples_tensor, provider,
+            scheme=scheme_map.get(cfg.corruption_scheme, "both"),
+            batch_size=recommended_B,
+            seed=0, device=device, compile=True,
+            tie_handling="average",
+        )
+        return float(metrics["MRR"])
+
     def _exhaustive_valid_mrr(mdl: torch.nn.Module, valid_t: List[Tuple[int, int, int]]) -> float:
-        """Exhaustive filtered validation MRR."""
+        """Exhaustive filtered validation MRR (legacy path, used when no sampler)."""
         valid_metrics = evaluate_ranking(
             mdl, valid_t, num_entities,
             head_filter, tail_filter, device, cfg.eval_chunk_size,
@@ -309,7 +345,16 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         if not should_run:
             return False
 
-        if cfg.loss == "bce" and use_domain_eval:
+        if _eval_sampler[0] is not None and not use_domain_eval:
+            # Fast path: shared compiled evaluator with static buffers —
+            # same code ns uses. Per-epoch val hits are amortised by the
+            # cached compiled scorer on the model. Skipped when
+            # ``use_domain_eval`` is set because the training sampler has
+            # no domain info and domain-aware datasets (ablation_d3,
+            # countries_s3) need head/tail domain-restricted candidate
+            # pools for the correct MRR.
+            current_valid_mrr = _unified_valid_mrr(mdl, valid_eval_triples)
+        elif cfg.loss == "bce" and use_domain_eval:
             current_valid_mrr = _exhaustive_valid_mrr(mdl, valid_eval_triples)
         else:
             # Exhaustive filtered ranking
@@ -363,6 +408,11 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             ),
             min_entity_idx=0,
         )
+        # Hand the sampler to the validation closure so per-epoch val goes
+        # through the compiled unified evaluator. The sampler's filter
+        # hashes were built from train ∪ valid ∪ test positives, so known
+        # positives are correctly excluded from the candidate pool.
+        _eval_sampler[0] = sampler
 
         # Pre-allocate training triples on device for bare-tensor loop
         # (no DataLoader / Python iteration overhead).
@@ -373,51 +423,29 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         else:
             _train_corrupt_modes = [corrupt_mode]
 
-        # RotatE needs sigmoid+BCE (matching ns-old's output_layer which
-        # applies sigmoid inside the model).  BCE_with_logits is numerically
-        # equivalent but the different gradient scale prevents RotatE from
-        # learning on large KGs (wn18rr).  ComplEx works with either.
-        _use_sigmoid = cfg.model.lower() == "rotate"
-        def _bce_fn(scores: Tensor, labels: Tensor) -> Tensor:
-            if _use_sigmoid:
-                return F.binary_cross_entropy(torch.sigmoid(scores), labels)
-            return F.binary_cross_entropy_with_logits(scores, labels)
+        # Sigmoid-vs-logits is now baked into each model's
+        # ``_train_loss_is_from_logits`` class flag (RotatE sets it False
+        # because its raw scores saturate BCE_with_logits on large KGs;
+        # ComplEx / DistMult / TransE / ... all use from_logits).
+        # ``model.train_step`` consults this flag.
+        from .epoch import train_epoch as _train_epoch
 
         model.train()
         for epoch in range(1, cfg.epochs + 1):
             epoch_start = time.perf_counter()
-
-            running = 0.0
-            n_batches = 0
-            for pos, neg_batch, mask_batch in iterate_epoch_batches(
-                train_pos, sampler,
+            losses = _train_epoch(
+                model, sampler, optimizer, train_pos,
                 batch_size=cfg.batch_size,
                 num_negatives=cfg.neg_ratio,
                 corrupt_modes=_train_corrupt_modes,
-                filter=True, unique=False,
-            ):
-                B = pos.shape[0]
-                neg_valid = neg_batch[mask_batch]      # [M, 3]
-
-                all_items = torch.cat([pos, neg_valid], dim=0)
-                labels = torch.cat([
-                    torch.ones(B, device=device),
-                    torch.zeros(neg_valid.shape[0], device=device),
-                ])
-                optimizer.zero_grad(set_to_none=True)
-                scores = model(all_items[:, 1], all_items[:, 0], all_items[:, 2])
-                loss = _bce_fn(scores, labels)
-                loss.backward()
-                if cfg.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-                optimizer.step()
-                running += loss.item()
-                n_batches += 1
-
+                grad_clip=cfg.grad_clip,
+                filter_negatives=True, unique_negatives=False,
+                compile=getattr(cfg, "compile", False),
+            )
+            avg_loss = losses["loss"]
             epochs_completed = epoch
             epoch_time = time.perf_counter() - epoch_start
             epoch_durations.append(epoch_time)
-            avg_loss = running / max(1, n_batches)
             print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
             save_latest_weights(cfg.save_dir, _current_state_dict(model))
 
@@ -496,6 +524,42 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     metrics: Dict[str, float] = {}
     metric_logs: List[str] = []
 
+    # Final train / valid / test eval. When ``_eval_sampler`` is set
+    # (BCE branch) AND the dataset isn't domain-restricted, route
+    # through the unified compiled evaluator so final metrics reuse the
+    # CUDA graphs captured during training. Domain-aware datasets
+    # (ablation_d3, countries_s3, ...) still need the legacy path: the
+    # training sampler doesn't know about head/tail domain restriction,
+    # and without it the MRR collapses (domain-restricted eval only
+    # ranks against entities that can validly fill the slot).
+    def _final_eval(split_label, triples):
+        if _eval_sampler[0] is not None and not use_domain_eval:
+            from ..eval.unified import CandidateProvider, evaluate as _u_evaluate
+            triples_t = torch.tensor(triples, dtype=torch.long, device=device)
+            eval_negs = cfg.eval_num_corruptions or None
+            provider = CandidateProvider(
+                _eval_sampler[0], num_entities=num_entities,
+                k=eval_negs if eval_negs else None,
+            )
+            scheme_map = {"tail": "tail", "head": "head", "both": "both"}
+            recommended_B = model.recommended_eval_batch_size(num_entities) \
+                if hasattr(model, "recommended_eval_batch_size") else 256
+            return _u_evaluate(
+                model, triples_t, provider,
+                scheme=scheme_map.get(cfg.corruption_scheme, "both"),
+                batch_size=recommended_B, seed=cfg.seed, device=device,
+                compile=True, tie_handling="average",
+            )
+        # Legacy fallback (NSSA branch or domain-aware eval)
+        return evaluate_ranking(
+            model, triples, num_entities,
+            head_filter, tail_filter, device, cfg.eval_chunk_size,
+            head_domain=head_domain, tail_domain=tail_domain,
+            eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
+            corruption_scheme=cfg.corruption_scheme,
+            sampler=sampler if cfg.eval_num_corruptions > 0 else None,
+        )
+
     if cfg.report_train_mrr:
         train_eval_triples = _limit_eval_triples(
             "train",
@@ -503,49 +567,18 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             eval_limit,
         )
         if train_eval_triples:
-            _build_metric_summary(
-                "train",
-                evaluate_ranking(
-                    model, train_eval_triples, num_entities,
-                    head_filter, tail_filter, device, cfg.eval_chunk_size,
-                    head_domain=head_domain, tail_domain=tail_domain,
-                    eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
-                    corruption_scheme=cfg.corruption_scheme,
-                    sampler=sampler if cfg.eval_num_corruptions > 0 else None,
-                ),
-                metrics, metric_logs,
-            )
+            _build_metric_summary("train", _final_eval("train", train_eval_triples),
+                                  metrics, metric_logs)
 
     if valid_triples and valid_eval_triples:
         print("Computing validation metrics ...")
-        _build_metric_summary(
-            "valid",
-            evaluate_ranking(
-                model, valid_eval_triples, num_entities,
-                head_filter, tail_filter, device, cfg.eval_chunk_size,
-                head_domain=head_domain, tail_domain=tail_domain,
-                eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
-                corruption_scheme=cfg.corruption_scheme,
-                sampler=sampler if cfg.eval_num_corruptions > 0 else None,
-            ),
-            metrics, metric_logs,
-        )
+        _build_metric_summary("valid", _final_eval("valid", valid_eval_triples),
+                              metrics, metric_logs)
 
     if test_triples:
         print("Computing test metrics ...")
-        _build_metric_summary(
-            "test",
-            evaluate_ranking(
-                model, test_triples, num_entities,
-                head_filter, tail_filter, device, cfg.eval_chunk_size,
-                head_domain=head_domain, tail_domain=tail_domain,
-                eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
-                show_progress=True, progress_label="Test eval",
-                corruption_scheme=cfg.corruption_scheme,
-                sampler=sampler if cfg.eval_num_corruptions > 0 else None,
-            ),
-            metrics, metric_logs,
-        )
+        _build_metric_summary("test", _final_eval("test", test_triples),
+                              metrics, metric_logs)
 
     if metric_logs:
         print("Evaluation | " + " | ".join(metric_logs))

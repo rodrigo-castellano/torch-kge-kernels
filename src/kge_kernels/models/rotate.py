@@ -29,7 +29,41 @@ from . import ops
 from .base import KGEModel
 
 
-class RotatE(KGEModel):
+class _RotateMemoryMixin:
+    """Memory-aware eval batch size for RotatE-family models.
+
+    ``score_all_tails`` / ``score_all_heads`` broadcast to a
+    ``[B, |E|, half_dim]`` intermediate — one dimension larger than
+    the default matmul-style ``[B, |E|]`` assumed by the base class.
+    Override the budget to include that factor so callers in the
+    unified eval path (ns, tkk) don't OOM on rotate-style models with
+    many entities.
+
+    On family (|E| ≈ 3k, half_dim = 100, budget 2 GB) this returns
+    B ≤ ~1700; on wn18rr (|E| ≈ 40k) it returns B ≤ ~130.
+    """
+
+    def recommended_eval_batch_size(
+        self, num_entities: int, budget_gb: float = 2.0,
+    ) -> int:
+        half_dim = getattr(self, "half_dim", None) or (self.dim // 2)
+        bytes_per_B = 4 * int(num_entities) * int(half_dim)  # [B, E, H] float32
+        budget_b = budget_gb * (1 << 30)
+        return max(8, min(2048, int(budget_b / max(bytes_per_B, 1))))
+
+
+class _RotateLossMixin:
+    """Train-step hook override for RotatE variants: sigmoid+BCE instead
+    of ``binary_cross_entropy_with_logits``. The raw RotatE score is
+    ``gamma - ||h rot r - t||`` which can be large in magnitude; fusing
+    sigmoid inside BCE saturates and zeroes the gradient for confident
+    negatives. Explicit sigmoid + BCE matches ns-old's training dynamics
+    and tkk's pipeline ``_bce_fn`` behavior for RotatE/RotatENS.
+    """
+    _train_loss_is_from_logits = False
+
+
+class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
     """RotatE knowledge graph embedding (complex rotation)."""
 
     def __init__(
@@ -185,7 +219,7 @@ class RotatE(KGEModel):
         return torch.cat([diff_re, diff_im], dim=-1)
 
 
-class RotatENS(KGEModel):
+class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
     """ns-old-aligned RotatE variant.
 
     See the module docstring for the differences from :class:`RotatE`.
@@ -222,8 +256,15 @@ class RotatENS(KGEModel):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.uniform_(self.entity_embeddings.weight,
-                         -self.embedding_range, self.embedding_range)
+        # Entity init follows the standard RotatE paper / ns-old convention
+        # (``±6/√half_dim``) rather than ``±embedding_range``. The former
+        # gives wider initial entity spread, which lets the model escape
+        # local minima on small datasets (ablation_d3, countries_s3) and
+        # matches torch-ns's ``_reinit_rotate_entity_`` override exactly
+        # — so ``ns --kge rotate`` and ``tkk model=rotate_ns`` produce
+        # bit-identical weights at the same seed.
+        entity_bound = 6.0 / math.sqrt(self.half_dim)
+        nn.init.uniform_(self.entity_embeddings.weight, -entity_bound, entity_bound)
         nn.init.uniform_(self.rel_embeddings.weight,
                          -self.embedding_range, self.embedding_range)
         self._clamp_entity_modulus()

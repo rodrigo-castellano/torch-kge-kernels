@@ -30,6 +30,7 @@ from .checkpoints import (
 )
 from .batching import iterate_epoch_batches
 from .config import KGETrainConfig, TrainArtifacts, TrainConfig
+from .epoch import clear_train_cache, train_epoch
 from .loop import (
     OnEpochEnd,
     TripleDataset,
@@ -48,9 +49,11 @@ __all__ = [
     # Inner loop
     "OnEpochEnd",
     "TripleDataset",
+    "clear_train_cache",
     "iterate_epoch_batches",
     "make_cosine_warmup_scheduler",
     "set_seed",
+    "train_epoch",
     "train_kge",
     "wrap_model_for_training",
     # Full pipeline
