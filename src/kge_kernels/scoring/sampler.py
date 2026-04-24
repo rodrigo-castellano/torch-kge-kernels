@@ -386,6 +386,32 @@ class Sampler:
 
         return self._postprocess(neg, batch_size, k, do_filter=filter, do_unique=unique, device=device)
 
+    def corrupt(
+        self,
+        positives: LongTensor,
+        *,
+        num_negatives: Optional[int] = None,
+        mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
+        device: Optional[torch.device] = None,
+        filter: bool = True,
+        unique: bool = True,
+    ) -> LongTensor:
+        """Generate padded corruptions (drops the valid mask).
+
+        Thin convenience wrapper over :meth:`corrupt_with_mask` for callers
+        that don't need the explicit validity mask.
+        """
+        neg, _ = self.corrupt_with_mask(
+            positives,
+            num_negatives=num_negatives,
+            mode=mode,
+            device=device,
+            filter=filter,
+            unique=unique,
+        )
+        return neg
+
+
 def corrupt(
     sampler: SupportsCorruptWithMask,
     positives: LongTensor,
