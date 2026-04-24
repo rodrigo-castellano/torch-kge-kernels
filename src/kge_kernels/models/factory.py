@@ -13,6 +13,7 @@ from torch import nn
 from .complex import ComplEx
 from .conve import ConvE
 from .distmult import DistMult
+from .mode import ModE
 from .rotate import RotatE, RotatENS
 from .transe import TransE
 from .tucker import TuckER
@@ -51,6 +52,8 @@ def build_model(
         )
     if name == "transe":
         return TransE(num_entities, num_relations, dim=dim, p_norm=p_norm)
+    if name == "mode":
+        return ModE(num_entities, num_relations, dim=dim, p_norm=p_norm)
     if name == "distmult":
         return DistMult(num_entities, num_relations, dim=dim)
     if name == "conve":

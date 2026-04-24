@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -231,8 +231,90 @@ class StreamingRankingMetrics:
         return results
 
 
+# ---------------------------------------------------------------------------
+# Rank fusion (moved from fusion.py)
+# ---------------------------------------------------------------------------
+
+
+def rrf(
+    scores_dict: Dict[str, Tensor],
+    pool_k: int,
+    n_queries: int,
+    device: torch.device,
+    k: float = 60.0,
+    seed: int = 42,
+    modes: Optional[Sequence[str]] = None,
+    mode_weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Tensor]:
+    """Reciprocal Rank Fusion across scoring modes.
+
+    For each candidate, computes ``RRF = sum(w_i / (k + rank_i))`` where
+    ``rank_i`` is the candidate's 1-based rank under mode *i* within its
+    query group. Tie-breaking uses seeded float64 noise so the perturbation
+    stays observable (float32 precision ≈1.19e-7 would swallow a 1e-10 tie
+    break).
+    """
+    K = pool_k
+    CQ = n_queries
+    gen = torch.Generator(device=device).manual_seed(seed)
+
+    rrf_scores = torch.zeros(CQ, K, dtype=torch.float32, device=device)
+    arange_k = torch.arange(K, device=device).unsqueeze(0).expand(CQ, K)
+
+    items = scores_dict.items() if modes is None else ((m, scores_dict[m]) for m in modes if m in scores_dict)
+
+    for mode_name, scores_flat in items:
+        w = 1.0 if mode_weights is None else mode_weights.get(mode_name, 1.0)
+        # Reshape flat [CQ*K] → [CQ, K] (column-major pool layout)
+        scores_2d = scores_flat.view(K, CQ).t()
+
+        noise = torch.rand(CQ, K, generator=gen, device=device, dtype=torch.float64) * 1e-10
+        sorted_idx = (scores_2d.to(torch.float64) + noise).argsort(dim=1, descending=True)
+        ranks = torch.zeros_like(sorted_idx, dtype=torch.long)
+        ranks.scatter_(1, sorted_idx, arange_k + 1)
+
+        rrf_scores += w / (k + ranks.float())
+
+    # Flatten back to [CQ*K] in column-major order
+    return {"rrf": rrf_scores.t().reshape(-1)}
+
+
+def zscore_fusion(
+    scores_dict: Dict[str, Tensor],
+    pool_k: int,
+    n_queries: int,
+    device: torch.device,
+    modes: Optional[Sequence[str]] = None,
+) -> Dict[str, Tensor]:
+    """Z-score normalization + mean across scoring modes.
+
+    Each mode's scores are normalized to zero mean and unit variance within
+    each query group, then averaged.
+    """
+    K = pool_k
+    CQ = n_queries
+    fused = torch.zeros(CQ, K, dtype=torch.float32, device=device)
+    n_modes = 0
+
+    items = scores_dict.items() if modes is None else ((m, scores_dict[m]) for m in modes if m in scores_dict)
+
+    for _, scores_flat in items:
+        scores_2d = scores_flat.view(K, CQ).t()
+        mu = scores_2d.mean(dim=1, keepdim=True)
+        std = scores_2d.std(dim=1, keepdim=True).clamp(min=1e-8)
+        fused += (scores_2d - mu) / std
+        n_modes += 1
+
+    if n_modes > 0:
+        fused /= n_modes
+
+    return {"zscore": fused.t().reshape(-1)}
+
+
 __all__ = [
     "StreamingRankingMetrics",
     "compute_ranks",
     "ranking_metrics",
+    "rrf",
+    "zscore_fusion",
 ]

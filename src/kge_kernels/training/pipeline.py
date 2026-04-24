@@ -92,41 +92,6 @@ def _build_known_sampling_triples(
     return known
 
 
-def _build_interleaved_pool(
-    train_triples: List[Tuple[int, int, int]],
-    num_entities: int,
-    neg_ratio: int,
-    corrupt_mode: str,
-    sampler: "_KGESampler",
-) -> Tuple[Tensor, Tensor]:
-    """Build a fixed pool of (positive, filtered corruption) pairs.
-
-    Uses the sampler with ``filter=True`` to exclude known positives.
-
-    Returns:
-        items: ``[~N * (1 + neg_ratio), 3]`` tensor of (r, h, t) triples.
-        labels: ``[~N * (1 + neg_ratio)]`` tensor of 0/1 labels.
-    """
-    pos = torch.tensor(train_triples, dtype=torch.long, device=sampler.device)
-    neg, valid_mask = sampler.corrupt_with_mask(
-        pos, num_negatives=neg_ratio, mode=corrupt_mode,
-        filter=True, unique=False,
-    )
-    # Interleave: [pos0, neg0_0, ..., neg0_K, pos1, neg1_0, ...]
-    N = pos.shape[0]
-    K = neg.shape[1]  # neg_ratio
-    items_list: List[Tensor] = []
-    labels_list: List[float] = []
-    for i in range(N):
-        items_list.append(pos[i])
-        labels_list.append(1.0)
-        for k in range(K):
-            if valid_mask[i, k]:
-                items_list.append(neg[i, k])
-                labels_list.append(0.0)
-    return torch.stack(items_list), torch.tensor(labels_list, device=sampler.device)
-
-
 def _build_metric_summary(prefix: str, rank_metrics: Dict[str, float], metrics: Dict[str, float], logs: List[str]) -> None:
     if any(math.isnan(value) for value in rank_metrics.values()):
         return

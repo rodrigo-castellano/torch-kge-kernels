@@ -3,12 +3,13 @@ rank fusion, and checkpoint evaluation."""
 
 from .checkpoint import evaluate_checkpoint, evaluate_ranking
 from .evaluator import Evaluator, FusionFn, ScorerFn
-from .fusion import rrf, zscore_fusion
 from .pool import CandidatePool
 from .ranking import (
     StreamingRankingMetrics,
     compute_ranks,
     ranking_metrics,
+    rrf,
+    zscore_fusion,
 )
 from .results import EvalResults
 from .unified import (

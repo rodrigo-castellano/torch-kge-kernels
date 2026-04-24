@@ -9,10 +9,18 @@ Two variants share this file:
 
 * :class:`RotatENS` — ns-old-aligned variant. Relations are stored as
   raw values in ``rel_embeddings`` and multiplied by ``norm_factor =
-  π / embedding_range`` in forward; entities and relations both init
-  in ``±embedding_range`` with ``embedding_range = (γ + ε) / half_dim``.
-  The ``norm_factor`` scaling acts as a per-parameter lr multiplier for
-  relations — critical for RotatE training on large KGs (wn18rr).
+  π / embedding_range`` in forward; entities init in ``±6 / √half_dim``,
+  relations init in ``±embedding_range`` with ``embedding_range =
+  (γ + ε) / half_dim``. The ``norm_factor`` scaling acts as a
+  per-parameter lr multiplier for relations — critical for RotatE
+  training on large KGs (wn18rr).
+
+The two variants share a common base class :class:`_RotateBase` for the
+parts that are identical (entity setup, single-triple scoring, matmul-style
+``score_all_tails``, ``compose``). They diverge on relation storage,
+``_hr`` phase source, ``_dist`` numerics, ``score_all_heads`` phase
+source, and the d-chunked L2 path (RotatE does per-component sqrt then
+sum; RotatENS accumulates squared diffs and applies a single final sqrt).
 
 Embeddings are stored as single interleaved ``[re | im]`` tensors
 (matching torch-ns's proven layout) so that Adam's per-parameter
@@ -63,8 +71,14 @@ class _RotateLossMixin:
     _train_loss_is_from_logits = False
 
 
-class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
-    """RotatE knowledge graph embedding (complex rotation)."""
+class _RotateBase(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
+    """Shared RotatE plumbing.
+
+    Subclasses must set ``self.rel_*`` in their own ``__init__`` and
+    implement ``_hr`` (head rotation) and ``_dist`` (distance). Everything
+    else — entity setup, single-triple scoring, matmul-style
+    ``score_all_tails``, ``compose`` — is inherited.
+    """
 
     def __init__(
         self,
@@ -76,7 +90,7 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
     ) -> None:
         super().__init__()
         if dim % 2 != 0:
-            raise ValueError("RotatE requires even dim (real + imaginary halves)")
+            raise ValueError(f"{type(self).__name__} requires even dim (real + imaginary halves)")
         self.num_entities = num_entities
         self.num_relations = num_relations
         self.dim = dim
@@ -86,14 +100,16 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         )
         self.p = p_norm
         self.entity_embeddings = nn.Embedding(num_entities, dim)
-        self.rel_phase = nn.Embedding(num_relations, self.half_dim)
-        self.reset_parameters()
 
-    def reset_parameters(self) -> None:
-        bound = 6 / math.sqrt(self.half_dim)
-        nn.init.uniform_(self.entity_embeddings.weight, -bound, bound)
-        nn.init.uniform_(self.rel_phase.weight, -math.pi, math.pi)
-        self._clamp_entity_modulus()
+    # ---- subclass hooks ----------------------------------------------------
+
+    def _hr(self, h: Tensor, r: Tensor):
+        raise NotImplementedError
+
+    def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
+        raise NotImplementedError
+
+    # ---- shared utilities --------------------------------------------------
 
     @torch.no_grad()
     def _clamp_entity_modulus(self) -> None:
@@ -111,24 +127,7 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
     def _split_ent(self, idx: Tensor):
         return ops.complex_split(self.entity_embeddings(idx))
 
-    def _hr(self, h: Tensor, r: Tensor):
-        # Legacy RotatE stores raw phases in ``[-π, π]``; wrap to
-        # ``[0, 2π]`` before rotation so the downstream cos/sin match
-        # the pre-wrap convention existing checkpoints trained under.
-        phase = torch.remainder(self.rel_phase(r), 2 * math.pi)
-        return ops.rotate_apply(self.entity_embeddings(h), phase, norm_factor=1.0)
-
-    def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
-        """Legacy-RotatE distance: per-component-sum-after-per-pair-sqrt.
-
-        Kept as-is (rather than switching to :func:`ops.complex_dist`)
-        because this variant is the one used by existing tkk
-        checkpoints. ``RotatENS`` uses the Euclidean variant via
-        :func:`ops.complex_dist`.
-        """
-        if self.p == 1:
-            return ((a_re - b_re).abs() + (a_im - b_im).abs()).sum(dim=-1)
-        return torch.sqrt(((a_re - b_re) ** 2 + (a_im - b_im) ** 2) + 1e-9).sum(dim=-1)
+    # ---- shared scoring ----------------------------------------------------
 
     def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         hr_re, hr_im = self._hr(h, r)
@@ -143,6 +142,58 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
             hr_re.unsqueeze(1), hr_im.unsqueeze(1),
             all_re.unsqueeze(0), all_im.unsqueeze(0),
         )
+
+    def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
+        """Fused RotatE feature: concatenated (rotated h - t) real/imag."""
+        hr_re, hr_im = self._hr(h, r)
+        t_re, t_im = self._split_ent(t)
+        diff_re = hr_re - t_re
+        diff_im = hr_im - t_im
+        return torch.cat([diff_re, diff_im], dim=-1)
+
+
+class RotatE(_RotateBase):
+    """RotatE knowledge graph embedding (complex rotation).
+
+    Relations stored as wrapped phase angles (``rel_phase``); distance is
+    the legacy per-component ``Σ sqrt(re² + im²)`` for L2.
+    """
+
+    def __init__(
+        self,
+        num_entities: int,
+        num_relations: int,
+        dim: int,
+        gamma: float = 12.0,
+        p_norm: int = 1,
+    ) -> None:
+        super().__init__(num_entities, num_relations, dim, gamma=gamma, p_norm=p_norm)
+        self.rel_phase = nn.Embedding(num_relations, self.half_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        bound = 6 / math.sqrt(self.half_dim)
+        nn.init.uniform_(self.entity_embeddings.weight, -bound, bound)
+        nn.init.uniform_(self.rel_phase.weight, -math.pi, math.pi)
+        self._clamp_entity_modulus()
+
+    def _hr(self, h: Tensor, r: Tensor):
+        # Legacy RotatE stores raw phases in ``[-π, π]``; wrap to
+        # ``[0, 2π]`` before rotation so the downstream cos/sin match
+        # the pre-wrap convention existing checkpoints trained under.
+        phase = torch.remainder(self.rel_phase(r), 2 * math.pi)
+        return ops.rotate_apply(self.entity_embeddings(h), phase, norm_factor=1.0)
+
+    def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
+        """Legacy-RotatE distance: per-component-sum-after-per-pair-sqrt.
+
+        Kept as-is (rather than switching to :func:`ops.complex_dist`)
+        because this variant is the one used by existing tkk checkpoints.
+        ``RotatENS`` uses the Euclidean variant via ``ops.complex_dist``.
+        """
+        if self.p == 1:
+            return ((a_re - b_re).abs() + (a_im - b_im).abs()).sum(dim=-1)
+        return torch.sqrt(((a_re - b_re) ** 2 + (a_im - b_im) ** 2) + 1e-9).sum(dim=-1)
 
     def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
         t_re, t_im = self._split_ent(t)
@@ -162,13 +213,10 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         Peak intermediate is ``[K, E, d_chunk]`` rather than ``[K, E, half_dim]``.
         Exact result because ``_dist`` is a sum over the D axis (L1: elementwise
         abs + sum; L2: per-dim sqrt + sum), both of which are additive per chunk.
-        The Python for-loop over ``d_chunk`` slices unrolls at ``torch.compile``
-        trace time when ``d_chunk`` is a compile-time constant, so this stays
-        CUDA-graph-safe in the caller's compiled closure.
         """
-        hr_re, hr_im = self._hr(h, r)  # [K, H]
-        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
-        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        hr_re, hr_im = self._hr(h, r)
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]
         K = hr_re.shape[0]
         E = all_re_full.shape[0]
         H = self.half_dim
@@ -184,24 +232,23 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         return self.gamma - dist
 
     def score_all_heads_dchunked(self, r: Tensor, t: Tensor, d_chunk: int = 64) -> Tensor:
-        """Same as score_all_heads but chunks over half_dim. See
-        :meth:`score_all_tails_dchunked` for the rationale."""
-        t_re, t_im = self._split_ent(t)  # [K, H]
-        phase = torch.remainder(self.rel_phase(r), 2 * math.pi)  # [K, H]
-        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
-        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        """Same as score_all_heads but chunks over half_dim."""
+        t_re, t_im = self._split_ent(t)
+        phase = torch.remainder(self.rel_phase(r), 2 * math.pi)
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]
         K = t_re.shape[0]
         E = all_re_full.shape[0]
         H = self.half_dim
         dist = torch.zeros(K, E, device=t_re.device, dtype=t_re.dtype)
         for d_start in range(0, H, d_chunk):
             d_end = min(d_start + d_chunk, H)
-            c = torch.cos(phase[:, d_start:d_end]).unsqueeze(1)  # [K, 1, chunk]
-            s = torch.sin(phase[:, d_start:d_end]).unsqueeze(1)  # [K, 1, chunk]
-            all_re_c = all_re_full[:, d_start:d_end].unsqueeze(0)  # [1, E, chunk]
-            all_im_c = all_im_full[:, d_start:d_end].unsqueeze(0)  # [1, E, chunk]
-            hr_re_c = all_re_c * c - all_im_c * s  # [K, E, chunk]
-            hr_im_c = all_re_c * s + all_im_c * c  # [K, E, chunk]
+            c = torch.cos(phase[:, d_start:d_end]).unsqueeze(1)
+            s = torch.sin(phase[:, d_start:d_end]).unsqueeze(1)
+            all_re_c = all_re_full[:, d_start:d_end].unsqueeze(0)
+            all_im_c = all_im_full[:, d_start:d_end].unsqueeze(0)
+            hr_re_c = all_re_c * c - all_im_c * s
+            hr_im_c = all_re_c * s + all_im_c * c
             diff_re = hr_re_c - t_re[:, d_start:d_end].unsqueeze(1)
             diff_im = hr_im_c - t_im[:, d_start:d_end].unsqueeze(1)
             if self.p == 1:
@@ -210,19 +257,14 @@ class RotatE(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
                 dist = dist + torch.sqrt(diff_re * diff_re + diff_im * diff_im + 1e-9).sum(dim=-1)
         return self.gamma - dist
 
-    def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        """Fused RotatE feature: concatenated (rotated h - t) real/imag."""
-        hr_re, hr_im = self._hr(h, r)
-        t_re, t_im = self._split_ent(t)
-        diff_re = hr_re - t_re
-        diff_im = hr_im - t_im
-        return torch.cat([diff_re, diff_im], dim=-1)
 
-
-class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
+class RotatENS(_RotateBase):
     """ns-old-aligned RotatE variant.
 
-    See the module docstring for the differences from :class:`RotatE`.
+    Relations stored as raw values (``rel_embeddings``), scaled by
+    ``norm_factor = π / embedding_range`` in forward. The scaling acts as a
+    per-parameter lr multiplier for relations — critical for RotatE training
+    on large KGs (wn18rr). Distance is true Euclidean via ``ops.complex_dist``.
     """
 
     def __init__(
@@ -233,22 +275,7 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         gamma: float = 12.0,
         p_norm: int = 1,
     ) -> None:
-        super().__init__()
-        if dim % 2 != 0:
-            raise ValueError("RotatENS requires even dim (real + imaginary halves)")
-        self.num_entities = num_entities
-        self.num_relations = num_relations
-        self.dim = dim
-        self.half_dim = dim // 2
-        self.gamma = nn.Parameter(
-            torch.tensor(gamma, dtype=torch.get_default_dtype()), requires_grad=False
-        )
-        self.p = p_norm
-        self.entity_embeddings = nn.Embedding(num_entities, dim)
-        # Store relation embeddings as raw values and scale by norm_factor
-        # in forward, matching ns-old's RotatE convention. The norm_factor
-        # scaling acts as a per-parameter lr multiplier for relations,
-        # critical for RotatE training on large KGs (wn18rr).
+        super().__init__(num_entities, num_relations, dim, gamma=gamma, p_norm=p_norm)
         self.rel_embeddings = nn.Embedding(num_relations, self.half_dim)
         epsilon = 0.5
         self.embedding_range = (float(gamma) + epsilon) / self.half_dim
@@ -257,33 +284,15 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
 
     def reset_parameters(self) -> None:
         # Entity init follows the standard RotatE paper / ns-old convention
-        # (``±6/√half_dim``) rather than ``±embedding_range``. The former
-        # gives wider initial entity spread, which lets the model escape
-        # local minima on small datasets (ablation_d3, countries_s3) and
-        # matches torch-ns's ``_reinit_rotate_entity_`` override exactly
-        # — so ``ns --kge rotate`` and ``tkk model=rotate_ns`` produce
+        # (``±6/√half_dim``) rather than ``±embedding_range``. This matches
+        # torch-ns's ``_reinit_rotate_entity_`` override exactly — so
+        # ``ns --kge rotate`` and ``tkk model=rotate_ns`` produce
         # bit-identical weights at the same seed.
         entity_bound = 6.0 / math.sqrt(self.half_dim)
         nn.init.uniform_(self.entity_embeddings.weight, -entity_bound, entity_bound)
         nn.init.uniform_(self.rel_embeddings.weight,
                          -self.embedding_range, self.embedding_range)
         self._clamp_entity_modulus()
-
-    @torch.no_grad()
-    def _clamp_entity_modulus(self) -> None:
-        """Clamp entity embeddings to the unit disk in complex space.
-
-        Called once at initialisation to match torch-ns's init.
-        """
-        w = self.entity_embeddings.weight.data
-        re, im = w[:, :self.half_dim], w[:, self.half_dim:]
-        mod = torch.clamp(torch.sqrt(re * re + im * im), min=1e-6)
-        factor = torch.clamp(1.0 / mod, max=1.0)
-        re.mul_(factor)
-        im.mul_(factor)
-
-    def _split_ent(self, idx: Tensor):
-        return ops.complex_split(self.entity_embeddings(idx))
 
     def _hr(self, h: Tensor, r: Tensor):
         return ops.rotate_apply(
@@ -294,20 +303,6 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
 
     def _dist(self, a_re: Tensor, a_im: Tensor, b_re: Tensor, b_im: Tensor) -> Tensor:
         return ops.complex_dist(a_re - b_re, a_im - b_im, p=self.p)
-
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        hr_re, hr_im = self._hr(h, r)
-        t_re, t_im = self._split_ent(t)
-        return self.gamma - self._dist(hr_re, hr_im, t_re, t_im)
-
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        hr_re, hr_im = self._hr(h, r)
-        all_re = self.entity_embeddings.weight[:, :self.half_dim]
-        all_im = self.entity_embeddings.weight[:, self.half_dim:]
-        return self.gamma - self._dist(
-            hr_re.unsqueeze(1), hr_im.unsqueeze(1),
-            all_re.unsqueeze(0), all_im.unsqueeze(0),
-        )
 
     def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
         t_re, t_im = self._split_ent(t)
@@ -322,18 +317,16 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         )
 
     def score_all_tails_dchunked(self, h: Tensor, r: Tensor, d_chunk: int = 64) -> Tensor:
-        """Same as score_all_tails but chunks over half_dim to cap peak memory.
+        """Same as score_all_tails but chunks over half_dim.
 
-        Peak intermediate is ``[K, E, d_chunk]`` rather than ``[K, E, half_dim]``.
-        Exact result because ``_dist`` is a sum over the D axis (L1: elementwise
-        abs + sum; L2: per-dim sqrt + sum), both of which are additive per chunk.
-        The Python for-loop over ``d_chunk`` slices unrolls at ``torch.compile``
-        trace time when ``d_chunk`` is a compile-time constant, so this stays
-        CUDA-graph-safe in the caller's compiled closure.
+        Accumulates squared diffs across chunks and applies a single
+        final ``sqrt`` (the correct L2 norm). Differs from RotatE's
+        chunked path, which does per-chunk sqrt + sum (legacy-preserved
+        for checkpoint compatibility with the original RotatE variant).
         """
-        hr_re, hr_im = self._hr(h, r)  # [K, H]
-        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
-        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        hr_re, hr_im = self._hr(h, r)
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]
         K = hr_re.shape[0]
         E = all_re_full.shape[0]
         H = self.half_dim
@@ -345,7 +338,6 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
             if self.p == 1:
                 dist = dist + diff_re.abs().sum(dim=-1) + diff_im.abs().sum(dim=-1)
             else:
-                # Accumulate squared diffs; final sqrt after the loop
                 dist = dist + (diff_re * diff_re + diff_im * diff_im).sum(dim=-1)
         if self.p != 1:
             dist = torch.sqrt(torch.clamp(dist, min=1e-9))
@@ -354,10 +346,10 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
     def score_all_heads_dchunked(self, r: Tensor, t: Tensor, d_chunk: int = 64) -> Tensor:
         """Same as score_all_heads but chunks over half_dim. See
         :meth:`score_all_tails_dchunked` for the rationale."""
-        t_re, t_im = self._split_ent(t)  # [K, H]
-        phase = self.rel_embeddings(r) * self.norm_factor  # [K, H]
-        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]  # [E, H]
-        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]  # [E, H]
+        t_re, t_im = self._split_ent(t)
+        phase = self.rel_embeddings(r) * self.norm_factor
+        all_re_full = self.entity_embeddings.weight[:, :self.half_dim]
+        all_im_full = self.entity_embeddings.weight[:, self.half_dim:]
         K = t_re.shape[0]
         E = all_re_full.shape[0]
         H = self.half_dim
@@ -379,14 +371,6 @@ class RotatENS(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         if self.p != 1:
             dist = torch.sqrt(torch.clamp(dist, min=1e-9))
         return self.gamma - dist
-
-    def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        """Fused RotatE feature: concatenated (rotated h - t) real/imag."""
-        hr_re, hr_im = self._hr(h, r)
-        t_re, t_im = self._split_ent(t)
-        diff_re = hr_re - t_re
-        diff_im = hr_im - t_im
-        return torch.cat([diff_re, diff_im], dim=-1)
 
 
 __all__ = ["RotatE", "RotatENS"]
