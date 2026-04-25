@@ -164,31 +164,44 @@ def build_relation_domains_from_file(
     return head_domain, tail_domain
 
 
-def load_depth_file(path: str) -> List[int]:
-    """Parse a ``<query> <depth>`` sidecar file into a list of depths.
+def iter_queries_with_depth(path: str):
+    """Yield ``(query_string, depth)`` pairs from a sidecar file.
 
-    Used by both ns (per-test-query depth annotations for per-depth metric
-    breakdowns) and DpRL (depth filtering during proof-RL training). The
-    file format is one query per line, with the depth as the last
-    whitespace-separated token; lines without a trailing integer get
-    ``-1`` (depth unknown). Empty lines and ``%``-comment lines are
-    treated as valid query rows with depth -1 to preserve row alignment
-    with the sibling triples file.
+    The file format is one entry per line, ``<query> <depth>`` (depth as
+    the last whitespace-separated token), with empty / ``%``-comment
+    lines skipped. Lines without a trailing integer yield ``-1`` for
+    depth so callers can distinguish "annotated depth=k" from "no depth
+    given".
 
-    Returns a flat ``List[int]``, one entry per line, in file order.
+    Used by:
+    - ns's per-test-query depth metric breakdowns (which only needs the
+      flat depth list — see :func:`load_depth_file`).
+    - DpRL's ``DataHandler._load_queries_from_file`` which also needs the
+      query-string side of the pair so it can build ``Term`` objects.
     """
-    depths: List[int] = []
     with open(path) as f:
         for line in f:
-            parts = line.strip().rsplit(None, 1)
+            stripped = line.strip()
+            if not stripped or stripped.startswith("%"):
+                continue
+            parts = stripped.rsplit(None, 1)
             if len(parts) == 2:
                 try:
-                    depths.append(int(parts[1]))
+                    yield parts[0], int(parts[1])
                     continue
                 except ValueError:
                     pass
-            depths.append(-1)
-    return depths
+            yield stripped, -1
+
+
+def load_depth_file(path: str) -> List[int]:
+    """Parse a ``<query> <depth>`` sidecar into a list of depths.
+
+    Thin wrapper over :func:`iter_queries_with_depth` for callers (ns)
+    that only need the depth column. Returns a flat list aligned with
+    the file's non-empty / non-comment lines.
+    """
+    return [depth for _, depth in iter_queries_with_depth(path)]
 
 
 __all__ = [
@@ -196,6 +209,7 @@ __all__ = [
     "build_filter_maps",
     "build_relation_domains",
     "build_relation_domains_from_file",
+    "iter_queries_with_depth",
     "load_depth_file",
     "load_domain_file",
 ]
