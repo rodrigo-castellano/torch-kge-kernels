@@ -494,14 +494,14 @@ class KnowledgeBase:
         silently skipped). The tuple is then routed through
         :meth:`make_atom` so subclasses get their typed atom.
         """
-        from .loaders import _parse_atom_str
+        from .loaders import parse_atom_str
 
         atoms: List[Any] = []
         depths: List[int] = []
         for query_str, query_depth in iter_queries_with_depth(filepath):
             if depth_filter is not None and query_depth not in depth_filter:
                 continue
-            atom_tuple = _parse_atom_str(query_str)
+            atom_tuple = parse_atom_str(query_str)
             if atom_tuple is None:
                 continue
             atoms.append(self.make_atom(atom_tuple))
@@ -730,13 +730,13 @@ class KnowledgeBase:
                 # Typed list (factory-returned objects)
                 setattr(self, f"{split}_queries", queries)
                 # String-form parallel list (for materialize + filter)
-                from .loaders import _parse_atom_str
+                from .loaders import parse_atom_str
                 queries_str: List[Tuple[str, ...]] = []
                 if os.path.isfile(full_path):
                     for q_str, q_depth in iter_queries_with_depth(full_path):
                         if depth_set is not None and q_depth not in depth_set:
                             continue
-                        atom_tuple = _parse_atom_str(q_str)
+                        atom_tuple = parse_atom_str(q_str)
                         if atom_tuple is None:
                             continue
                         queries_str.append(atom_tuple)

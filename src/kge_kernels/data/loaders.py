@@ -287,14 +287,14 @@ def load_rules_file(
                 for i in range(0, len(tokens) - 1, 2):
                     var_to_domain[tokens[i]] = tokens[i + 1]
                 continue
-            spec = _parse_prolog_rule(stripped, uppercase_args=uppercase_args)
+            spec = parse_prolog_rule(stripped, uppercase_args=uppercase_args)
             if spec is not None:
                 specs.append(spec)
                 seen_rule = True
     return specs, var_to_domain
 
 
-def _parse_prolog_rule(
+def parse_prolog_rule(
     line: str, *, uppercase_args: bool = False,
 ) -> Optional[RuleSpec]:
     """Parse a single rule line into a :class:`RuleSpec`.
@@ -331,15 +331,15 @@ def _parse_prolog_rule(
         body_str, head_str = raw.split("->", 1)
     else:
         # Standalone fact: head only, empty body.
-        head = _parse_atom_str(raw, uppercase_args=uppercase_args)
+        head = parse_atom_str(raw, uppercase_args=uppercase_args)
         return RuleSpec(head=head, body=[], name=name, weight=weight) if head is not None else None
 
-    head = _parse_atom_str(head_str, uppercase_args=uppercase_args)
+    head = parse_atom_str(head_str, uppercase_args=uppercase_args)
     if head is None:
         return None
     body: List[Tuple[str, ...]] = []
     for atom_str in _split_atoms(body_str):
-        atom = _parse_atom_str(atom_str, uppercase_args=uppercase_args)
+        atom = parse_atom_str(atom_str, uppercase_args=uppercase_args)
         if atom is None:
             return None
         body.append(atom)
@@ -371,7 +371,7 @@ def _split_atoms(body_str: str) -> List[str]:
     return atoms
 
 
-def _parse_atom_str(
+def parse_atom_str(
     atom_str: str, *, uppercase_args: bool = False,
 ) -> Optional[Tuple[str, ...]]:
     """Parse ``predicate(a, b)`` → ``(predicate, a, b)``. Returns ``None`` on failure.
@@ -447,7 +447,7 @@ def load_probabilistic_facts(
                 continue
             if score_threshold is not None and score < score_threshold:
                 continue
-            atom = _parse_atom_str(parts[0])
+            atom = parse_atom_str(parts[0])
             if atom is None or atom in seen:
                 continue
             seen.add(atom)

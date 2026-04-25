@@ -32,6 +32,8 @@ from .loaders import (
     load_rules_file,
     load_triples,
     load_triples_with_mappings,
+    parse_atom_str,
+    parse_prolog_rule,
 )
 from .paths import (
     load_dataset_split,
@@ -68,6 +70,8 @@ __all__ = [
     "load_rules_file",
     "load_triples",
     "load_triples_with_mappings",
+    "parse_atom_str",
+    "parse_prolog_rule",
     "resolve_split_path",
     "resolve_train_path",
 ]
