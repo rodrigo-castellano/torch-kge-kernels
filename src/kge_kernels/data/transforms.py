@@ -3,44 +3,68 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from typing import Dict, List, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
 def load_domain_file(
     path: str,
-    entity2id: Dict[str, int],
-) -> Tuple[Dict[str, List[int]], Dict[int, str]]:
+    entity2id: Optional[Dict[str, int]] = None,
+) -> Tuple[Dict[str, List[Any]], Dict[Any, str]]:
     """Parse a ``domain_name entity1 entity2 ...`` file into dicts.
 
     Each line lists a domain name followed by entity names belonging to
-    it. Unknown entities (not in ``entity2id``) are silently skipped so
-    callers can pass a vocabulary that's a subset of the file's entities.
+    it. Lines whose first token contains ``:`` and no whitespace before
+    the colon are treated as predicate-domain mappings (``pred:head:tail``)
+    and silently skipped — that legacy format coexists with entity-domain
+    lines in some DpRL datasets.
 
-    Returns ``(domain2idx, entity2domain)``:
-      - ``domain2idx``: domain name → list of entity ids in that domain.
-      - ``entity2domain``: entity id → name of the first domain it
-        appears in (stable under overlap).
+    Two modes (selected by ``entity2id``):
 
-    If ``path`` does not exist the function returns empty dicts. Callers
-    that require the file to exist should check before calling.
+    - **Indexed mode** (``entity2id`` provided): returns
+      ``(domain2idx: dict[str, list[int]], entity2domain: dict[int, str])``.
+      Unknown entities (not in ``entity2id``) are silently skipped so
+      callers can pass a vocabulary that's a subset of the file's
+      entities. This is the path tkk's training pipeline uses.
+
+    - **String mode** (``entity2id=None``): returns
+      ``(domain2entities: dict[str, list[str]], entity2domain: dict[str, str])``
+      with raw entity names. Useful for consumers that need to read
+      domains *before* id-assignment (ns's ``KGCDataHandler``, DpRL's
+      ``DataHandler._load_domain_mapping``).
+
+    If ``path`` does not exist the function returns empty dicts in either
+    mode. Callers that require the file to exist should check before
+    calling.
     """
-    domain2idx: Dict[str, List[int]] = {}
-    entity2domain: Dict[int, str] = {}
+    domain2members: Dict[str, List[Any]] = {}
+    entity2domain: Dict[Any, str] = {}
     if not os.path.isfile(path):
-        return domain2idx, entity2domain
+        return domain2members, entity2domain
     with open(path, encoding="utf-8") as f:
         for line in f:
-            parts = line.strip().split()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip predicate domain lines like ``pred:head_dom:tail_dom``
+            # that some DpRL dataset variants emit alongside the
+            # ``domain_name entity1 ...`` lines.
+            first = stripped.split(None, 1)[0]
+            if ":" in first:
+                continue
+            parts = stripped.split()
             if len(parts) < 2:
                 continue
             domain_name = parts[0]
-            members = [entity2id[c] for c in parts[1:] if c in entity2id]
+            if entity2id is None:
+                members: List[Any] = list(parts[1:])
+            else:
+                members = [entity2id[c] for c in parts[1:] if c in entity2id]
             if not members:
                 continue
-            domain2idx[domain_name] = members
-            for eid in members:
-                entity2domain.setdefault(eid, domain_name)
-    return domain2idx, entity2domain
+            domain2members[domain_name] = members
+            for member in members:
+                entity2domain.setdefault(member, domain_name)
+    return domain2members, entity2domain
 
 
 def add_reciprocal_triples(

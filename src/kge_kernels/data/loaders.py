@@ -37,9 +37,15 @@ def _normalize_token(token: str) -> str:
     return token.strip().strip("'\"").strip()
 
 
-def _parse_prolog_fact(line: str) -> Optional[TripleExample]:
+def _parse_prolog_fact(line: str, *, permissive: bool = False) -> Optional[TripleExample]:
     raw = line.strip()
-    if not raw or raw.startswith("#"):
+    # Empty / comment lines. ``%`` is the standard Prolog comment marker;
+    # ``#`` is added so files written in either convention parse cleanly.
+    if not raw or raw.startswith("#") or raw.startswith("%"):
+        return None
+    # Permissive mode: skip Prolog rule lines (``head :- body``) and
+    # meta-predicates that DpRL Prolog datasets mix into fact files.
+    if permissive and (":-" in raw or "findall" in raw):
         return None
     if raw.endswith("."):
         raw = raw[:-1]
@@ -49,6 +55,8 @@ def _parse_prolog_fact(line: str) -> Optional[TripleExample]:
     args = remainder.split(")", 1)[0]
     terms = [_normalize_token(a) for a in args.split(",") if a.strip()]
     if len(terms) != 2:
+        if permissive:
+            return None
         raise ValueError(f"Expected binary predicate, got '{line.strip()}'")
     return TripleExample(
         head=terms[0], relation=_normalize_token(predicate), tail=terms[1]
@@ -56,7 +64,7 @@ def _parse_prolog_fact(line: str) -> Optional[TripleExample]:
 
 
 def _iter_triples_from_file(
-    path: str, format_hint: str = "auto"
+    path: str, format_hint: str = "auto", *, permissive: bool = False,
 ) -> Iterable[TripleExample]:
     if format_hint == "auto":
         format_hint = "unknown"
@@ -69,7 +77,7 @@ def _iter_triples_from_file(
     if format_hint == "prolog":
         with open(path, "r", encoding="utf-8") as handle:
             for line in handle:
-                triple = _parse_prolog_fact(line)
+                triple = _parse_prolog_fact(line, permissive=permissive)
                 if triple is not None:
                     yield triple
         return
@@ -86,9 +94,16 @@ def _iter_triples_from_file(
             )
 
 
-def load_triples(path: str, format_hint: str = "auto") -> List[TripleExample]:
-    """Load all triples from a file."""
-    return list(_iter_triples_from_file(path, format_hint=format_hint))
+def load_triples(
+    path: str, format_hint: str = "auto", *, permissive: bool = False,
+) -> List[TripleExample]:
+    """Load all triples from a file.
+
+    ``permissive=True`` (Prolog only): skip rule lines (``:-``),
+    meta-predicates (``findall``), and non-binary atoms instead of raising.
+    Use this for DpRL-style Prolog files where facts and rules cohabit.
+    """
+    return list(_iter_triples_from_file(path, format_hint=format_hint, permissive=permissive))
 
 
 def load_triples_with_mappings(
