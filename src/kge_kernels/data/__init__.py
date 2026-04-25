@@ -23,11 +23,13 @@ control:
 """
 from __future__ import annotations
 
-from .handler import KGEDatasetHandler
+from .handler import KGEDatasetHandler, MaterializedSplit
 from .loaders import (
     TripleExample,
     detect_triple_format,
     encode_split_triples,
+    load_probabilistic_facts,
+    load_rules_file,
     load_triples,
     load_triples_with_mappings,
 )
@@ -41,6 +43,7 @@ from .transforms import (
     build_filter_maps,
     build_relation_domains,
     build_relation_domains_from_file,
+    filter_queries_by_predicates,
     iter_queries_with_depth,
     load_depth_file,
     load_domain_file,
@@ -48,6 +51,7 @@ from .transforms import (
 
 __all__ = [
     "KGEDatasetHandler",
+    "MaterializedSplit",
     "TripleExample",
     "add_reciprocal_triples",
     "build_filter_maps",
@@ -55,10 +59,13 @@ __all__ = [
     "build_relation_domains_from_file",
     "detect_triple_format",
     "encode_split_triples",
+    "filter_queries_by_predicates",
     "iter_queries_with_depth",
     "load_dataset_split",
     "load_depth_file",
     "load_domain_file",
+    "load_probabilistic_facts",
+    "load_rules_file",
     "load_triples",
     "load_triples_with_mappings",
     "resolve_split_path",

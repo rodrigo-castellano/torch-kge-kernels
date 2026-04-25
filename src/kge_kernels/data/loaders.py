@@ -221,10 +221,212 @@ def encode_split_triples(
     return encoded
 
 
+def load_rules_file(
+    path: str, *, uppercase_args: bool = False,
+) -> List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]]:
+    """Parse a Prolog ``rules.txt`` into ``[(head_tuple, [body_tuple, ...])]``.
+
+    Each rule is ``head :- body1, body2, ...``. Atoms are written as
+    ``predicate(arg1, arg2)`` and arguments are usually variables (uppercase
+    by Prolog convention) referenced across head and body. Empty lines and
+    ``%``-prefixed comments are skipped; lines that fail to parse are
+    silently skipped (matches the legacy DpRL loader's permissive behavior).
+
+    Args:
+        path: Path to a Prolog rule file.
+        uppercase_args: If True, uppercase every atom argument. Used to
+            match SB3-parity behavior where rule variables were always
+            uppercased even if the source file mixed cases.
+
+    Returns:
+        A list of rules; each rule is ``(head, body)`` where ``head`` is a
+        ``(predicate, *args)`` tuple and ``body`` is a list of such tuples.
+    """
+    rules: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = []
+    if not os.path.isfile(path):
+        return rules
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("%"):
+                continue
+            head_body = _parse_prolog_rule(stripped, uppercase_args=uppercase_args)
+            if head_body is not None:
+                rules.append(head_body)
+    return rules
+
+
+def _parse_prolog_rule(
+    line: str, *, uppercase_args: bool = False,
+) -> Optional[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]]:
+    """Parse a single rule line into ``(head_tuple, body_list)``.
+
+    Supports the three formats found across our datasets:
+
+    - ``head :- body, body, ...`` (standard Prolog).
+    - ``body, body, ... -> head`` (DPL / ProbLog "left-to-right").
+    - ``<rule_id>:<weight>:body, body, ... -> head`` (probabilistic
+      family/countries format; the prefix is stripped before parsing).
+
+    Returns ``None`` for malformed lines so callers can skip them.
+    """
+    raw = line.strip()
+    if raw.endswith("."):
+        raw = raw[:-1]
+
+    # Strip a probabilistic-rule prefix like ``r3:0.72:`` if present.
+    # Heuristic: ``rN:NUM:`` at the start, where N is a digit run and NUM
+    # is float-or-int. The first colon must be before any '(' (rule prefix
+    # never appears inside an atom).
+    if raw.startswith("r"):
+        first_colon = raw.find(":")
+        first_paren = raw.find("(")
+        if first_colon != -1 and (first_paren == -1 or first_colon < first_paren):
+            parts = raw.split(":", 2)
+            if len(parts) >= 3 and parts[0][1:].isdigit():
+                try:
+                    float(parts[1])
+                    raw = parts[2].strip()
+                except ValueError:
+                    pass
+
+    # Format dispatch.
+    if ":-" in raw:
+        head_str, body_str = raw.split(":-", 1)
+    elif "->" in raw:
+        body_str, head_str = raw.split("->", 1)
+    else:
+        # Standalone fact: head only, empty body.
+        head = _parse_atom_str(raw, uppercase_args=uppercase_args)
+        return (head, []) if head is not None else None
+
+    head = _parse_atom_str(head_str, uppercase_args=uppercase_args)
+    if head is None:
+        return None
+    body: List[Tuple[str, ...]] = []
+    for atom_str in _split_atoms(body_str):
+        atom = _parse_atom_str(atom_str, uppercase_args=uppercase_args)
+        if atom is None:
+            return None
+        body.append(atom)
+    return head, body
+
+
+def _split_atoms(body_str: str) -> List[str]:
+    """Split a Prolog rule body on commas that are NOT inside parens."""
+    atoms: List[str] = []
+    depth = 0
+    current = []
+    for ch in body_str:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            atom = "".join(current).strip()
+            if atom:
+                atoms.append(atom)
+            current = []
+        else:
+            current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        atoms.append(tail)
+    return atoms
+
+
+def _parse_atom_str(
+    atom_str: str, *, uppercase_args: bool = False,
+) -> Optional[Tuple[str, ...]]:
+    """Parse ``predicate(a, b)`` → ``(predicate, a, b)``. Returns ``None`` on failure.
+
+    Robust to a trailing ``.`` (Prolog statement terminator), which appears
+    on standalone fact / query lines like ``aunt(1, 2).``.
+    """
+    raw = atom_str.strip()
+    if raw.endswith("."):
+        raw = raw[:-1].rstrip()
+    if "(" not in raw or not raw.endswith(")"):
+        return None
+    predicate, remainder = raw.split("(", 1)
+    args_str = remainder[:-1]  # drop trailing ')'
+    args = [_normalize_token(a) for a in args_str.split(",") if a.strip()]
+    if uppercase_args:
+        args = [a.upper() for a in args]
+    return (_normalize_token(predicate), *args)
+
+
+def load_probabilistic_facts(
+    path: str,
+    *,
+    topk_limit: Optional[int] = None,
+    score_threshold: Optional[float] = None,
+) -> List[Tuple[str, ...]]:
+    """Parse a ``<fact_repr> <score> [<rank>]`` file into atom tuples.
+
+    Each non-comment line is ``fact score [rank]`` with whitespace
+    separators. ``fact_repr`` is parsed via the same per-atom format as
+    rule heads (``predicate(arg1, arg2)``). Empty / ``#``-comment lines
+    are skipped. Lines that fail to parse — missing score, malformed
+    fact, etc. — are silently skipped.
+
+    Args:
+        path: Path to the probabilistic-facts file.
+        topk_limit: Drop facts whose ``rank`` exceeds this. Negative or
+            ``None`` means no rank cap.
+        score_threshold: Drop facts with ``score < threshold``. ``None``
+            means no threshold.
+
+    Returns:
+        Deduplicated list of ``(predicate, *args)`` tuples in input order.
+    """
+    out: List[Tuple[str, ...]] = []
+    if not os.path.isfile(path):
+        return out
+    seen: Set[Tuple[str, ...]] = set()
+    with open(path, "r", encoding="ascii") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            try:
+                score = float(parts[1])
+            except ValueError:
+                continue
+            rank = None
+            if len(parts) >= 3:
+                try:
+                    rank = int(parts[2])
+                except ValueError:
+                    rank = None
+            if (
+                topk_limit is not None
+                and topk_limit >= 0
+                and rank is not None
+                and rank > topk_limit
+            ):
+                continue
+            if score_threshold is not None and score < score_threshold:
+                continue
+            atom = _parse_atom_str(parts[0])
+            if atom is None or atom in seen:
+                continue
+            seen.add(atom)
+            out.append(atom)
+    return out
+
+
 __all__ = [
     "TripleExample",
     "detect_triple_format",
     "encode_split_triples",
+    "load_probabilistic_facts",
+    "load_rules_file",
     "load_triples",
     "load_triples_with_mappings",
 ]

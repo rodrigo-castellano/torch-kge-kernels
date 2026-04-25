@@ -194,6 +194,34 @@ def iter_queries_with_depth(path: str):
             yield stripped, -1
 
 
+def filter_queries_by_predicates(
+    query_tuples: Sequence[Tuple[str, ...]],
+    allowed_predicates: Set[str],
+) -> Tuple[List[Tuple[str, ...]], List[int]]:
+    """Keep only queries whose predicate is in ``allowed_predicates``.
+
+    Used by rule-based filtering: queries whose head predicate doesn't
+    match any rule head are unsolvable for a proof-based reasoner, so
+    they're dropped before training. The function is content-agnostic —
+    callers decide what set of predicates to allow.
+
+    Returns:
+        ``(filtered_queries, kept_indices)`` where ``kept_indices`` lists
+        the positions in the original sequence that survived filtering, in
+        order. Callers can use it to re-align parallel arrays (depths,
+        labels, etc.) without re-iterating.
+    """
+    filtered: List[Tuple[str, ...]] = []
+    kept_indices: List[int] = []
+    for i, q in enumerate(query_tuples):
+        if not q:
+            continue
+        if q[0] in allowed_predicates:
+            filtered.append(q)
+            kept_indices.append(i)
+    return filtered, kept_indices
+
+
 def load_depth_file(path: str) -> List[int]:
     """Parse a ``<query> <depth>`` sidecar into a list of depths.
 
@@ -209,6 +237,7 @@ __all__ = [
     "build_filter_maps",
     "build_relation_domains",
     "build_relation_domains_from_file",
+    "filter_queries_by_predicates",
     "iter_queries_with_depth",
     "load_depth_file",
     "load_domain_file",

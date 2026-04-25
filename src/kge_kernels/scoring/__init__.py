@@ -11,6 +11,7 @@ from .adapter import (
 from .adapter import (
     precompute_partial_scores as precompute_partial_scores_from_model,
 )
+from .helpers import corrupt_to_lists, corrupt_with_topup
 from .partial import LazyPartialScorer, precompute_partial_scores, score_partial_atoms
 from .sampler import Sampler, corrupt
 from .types import (
@@ -40,6 +41,9 @@ __all__ = [
     # Sampler
     "Sampler",
     "corrupt",
+    # Helpers
+    "corrupt_to_lists",
+    "corrupt_with_topup",
     # Adapter
     "build_backend",
     "kge_score_all_heads",

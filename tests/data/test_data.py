@@ -10,7 +10,10 @@ from kge_kernels.data import (
     build_relation_domains,
     detect_triple_format,
     encode_split_triples,
+    filter_queries_by_predicates,
     load_domain_file,
+    load_probabilistic_facts,
+    load_rules_file,
     load_triples,
     load_triples_with_mappings,
 )
@@ -218,3 +221,166 @@ def test_load_domain_file_entity_keeps_first_domain(tmp_path):
     d2i, e2d = load_domain_file(str(p), e2id)
     assert d2i == {"person": [0], "friend": [0]}
     assert e2d == {0: "person"}  # first-wins
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# load_rules_file
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_load_rules_file_parses_horn_clauses(tmp_path):
+    p = tmp_path / "rules.txt"
+    p.write_text(
+        "% comment\n"
+        "ancestor(X, Y) :- parent(X, Y).\n"
+        "ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).\n"
+        "\n"
+    )
+    rules = load_rules_file(str(p))
+    assert len(rules) == 2
+    head1, body1 = rules[0]
+    assert head1 == ("ancestor", "X", "Y")
+    assert body1 == [("parent", "X", "Y")]
+    head2, body2 = rules[1]
+    assert head2 == ("ancestor", "X", "Z")
+    assert body2 == [("parent", "X", "Y"), ("ancestor", "Y", "Z")]
+
+
+def test_load_rules_file_uppercase_args(tmp_path):
+    p = tmp_path / "rules.txt"
+    p.write_text("ancestor(x, y) :- parent(x, y).\n")
+    rules = load_rules_file(str(p), uppercase_args=True)
+    head, body = rules[0]
+    assert head == ("ancestor", "X", "Y")
+    assert body == [("parent", "X", "Y")]
+
+
+def test_load_rules_file_arrow_format(tmp_path):
+    """`body, body -> head` direction (DPL / ProbLog convention)."""
+    p = tmp_path / "rules.txt"
+    p.write_text("parent(X, Y), parent(Y, Z) -> grandparent(X, Z)\n")
+    rules = load_rules_file(str(p))
+    head, body = rules[0]
+    assert head == ("grandparent", "X", "Z")
+    assert body == [("parent", "X", "Y"), ("parent", "Y", "Z")]
+
+
+def test_load_rules_file_probabilistic_prefix(tmp_path):
+    """Strip the `rN:weight:` rule prefix used by family / countries."""
+    p = tmp_path / "rules.txt"
+    p.write_text(
+        "r0:0.747:brother(a,h), mother(b,h) -> son(a,b)\n"
+        "r1:1:locatedInCS(X,W), locatedInSR(W,Z) -> locatedInCR(X,Z)\n"
+    )
+    rules = load_rules_file(str(p), uppercase_args=True)
+    assert len(rules) == 2
+    head1, body1 = rules[0]
+    assert head1 == ("son", "A", "B")
+    assert body1 == [("brother", "A", "H"), ("mother", "B", "H")]
+    head2, body2 = rules[1]
+    assert head2 == ("locatedInCR", "X", "Z")
+
+
+def test_load_rules_file_standalone_fact(tmp_path):
+    """A line with no `:-` and no `->` parses as head + empty body."""
+    p = tmp_path / "rules.txt"
+    p.write_text("base_fact(a, b)\n")
+    rules = load_rules_file(str(p))
+    assert rules == [(("base_fact", "a", "b"), [])]
+
+
+def test_load_rules_file_skips_malformed_silently(tmp_path):
+    p = tmp_path / "rules.txt"
+    p.write_text("not_a_rule\nancestor(X, Y) :- parent(X, Y).\nbroken :-\n")
+    rules = load_rules_file(str(p))
+    assert len(rules) == 1
+
+
+def test_load_rules_file_missing_returns_empty(tmp_path):
+    assert load_rules_file(str(tmp_path / "nope.txt")) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# load_probabilistic_facts
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_load_probabilistic_facts_basic(tmp_path):
+    p = tmp_path / "kge_top.txt"
+    p.write_text(
+        "# header\n"
+        "father(alice,bob) 0.95 1\n"
+        "mother(alice,carol) 0.80 2\n"
+        "\n"
+    )
+    facts = load_probabilistic_facts(str(p))
+    assert facts == [
+        ("father", "alice", "bob"),
+        ("mother", "alice", "carol"),
+    ]
+
+
+def test_load_probabilistic_facts_topk_filter(tmp_path):
+    p = tmp_path / "kge_top.txt"
+    p.write_text(
+        "father(alice,bob) 0.95 1\n"
+        "father(alice,carol) 0.50 5\n"
+    )
+    facts = load_probabilistic_facts(str(p), topk_limit=3)
+    assert facts == [("father", "alice", "bob")]
+
+
+def test_load_probabilistic_facts_score_threshold(tmp_path):
+    p = tmp_path / "kge_top.txt"
+    p.write_text(
+        "father(alice,bob) 0.95\n"
+        "father(alice,carol) 0.30\n"
+    )
+    facts = load_probabilistic_facts(str(p), score_threshold=0.5)
+    assert facts == [("father", "alice", "bob")]
+
+
+def test_load_probabilistic_facts_dedupes(tmp_path):
+    p = tmp_path / "kge_top.txt"
+    p.write_text(
+        "father(alice,bob) 0.95\n"
+        "father(alice,bob) 0.80\n"
+    )
+    facts = load_probabilistic_facts(str(p))
+    assert facts == [("father", "alice", "bob")]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# filter_queries_by_predicates
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_filter_queries_by_predicates_keeps_matching():
+    queries = [
+        ("father", "alice", "bob"),
+        ("mother", "alice", "carol"),
+        ("father", "carol", "dave"),
+        ("sibling", "bob", "carol"),
+    ]
+    allowed = {"father", "sibling"}
+    filtered, kept = filter_queries_by_predicates(queries, allowed)
+    assert filtered == [
+        ("father", "alice", "bob"),
+        ("father", "carol", "dave"),
+        ("sibling", "bob", "carol"),
+    ]
+    assert kept == [0, 2, 3]
+
+
+def test_filter_queries_by_predicates_empty_allow_drops_all():
+    queries = [("father", "alice", "bob")]
+    filtered, kept = filter_queries_by_predicates(queries, set())
+    assert filtered == []
+    assert kept == []
+
+
+def test_filter_queries_by_predicates_skips_empty_tuples():
+    queries = [(), ("father", "alice", "bob")]
+    filtered, kept = filter_queries_by_predicates(queries, {"father"})
+    assert filtered == [("father", "alice", "bob")]
+    assert kept == [1]

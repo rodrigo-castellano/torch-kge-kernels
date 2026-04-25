@@ -1,4 +1,6 @@
-"""Shared dataset handler base class for KGE consumers.
+"""Shared dataset handler base class for KGE consumers — and the
+generic split-tensor bundle :class:`MaterializedSplit` consumers use to
+represent one materialized split.
 
 The same canonical KGE dataset shape — train / valid / test / facts file
 quartet, plus an optional ``domain2constants.txt`` — feeds tkk standalone
@@ -34,17 +36,46 @@ from dataclasses import dataclass, field
 from os.path import join
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import torch
+
 from .loaders import (
     TripleExample,
     encode_split_triples,
+    load_probabilistic_facts as _load_probabilistic_facts_file,
+    load_rules_file,
     load_triples,
     load_triples_with_mappings,
 )
 from .transforms import (
     build_filter_maps,
     build_relation_domains_from_file,
+    filter_queries_by_predicates,
+    iter_queries_with_depth,
     load_domain_file,
 )
+
+
+@dataclass
+class MaterializedSplit:
+    """Generic tensor bundle for one materialized dataset split.
+
+    The shape of ``queries`` is consumer-dependent:
+
+    - SL (ns / tkk): ``[N, 3]`` — single ``(r, h, t)`` triples.
+    - RL (DpRL): ``[N, L, max_arity + 1]`` — proof-state padded, with
+      ``L`` atom slots per query and ``max_arity + 1`` columns
+      (predicate id + argument ids).
+
+    ``labels`` and ``depths`` are always ``[N]``. ``depths`` is ``-1`` for
+    queries without a depth annotation.
+    """
+
+    queries: torch.LongTensor
+    labels: torch.LongTensor
+    depths: torch.LongTensor
+
+    def __len__(self) -> int:
+        return int(self.queries.shape[0])
 
 
 @dataclass
@@ -292,7 +323,250 @@ class KGEDatasetHandler:
                     self.entity2domain_idx, self.domain2idx,
                 )
 
+    # ---- factory hooks (subclass overrides for typed objects) ---------
+
+    def make_atom(self, atom_tuple: Tuple[str, ...]) -> Any:
+        """Convert a ``(predicate, *args)`` tuple to a typed atom.
+
+        Default: returns the tuple unchanged. Subclasses override to
+        construct their domain-specific atom type — e.g. DpRL returns a
+        ``Term(predicate, args)``.
+        """
+        return atom_tuple
+
+    def make_rule(self, head: Any, body: List[Any]) -> Any:
+        """Combine a head atom + body atoms into a typed rule.
+
+        Default: returns ``(head, body)``. Subclasses override to construct
+        their domain-specific rule type.
+        """
+        return (head, body)
+
+    # ---- generic loaders that compose primitives + factory hooks ------
+
+    def load_facts(
+        self,
+        *,
+        filepath: Optional[str] = None,
+        skip_predicate_prefixes: Tuple[str, ...] = (),
+    ) -> List[Any]:
+        """Convert background facts to typed atoms via :meth:`make_atom`.
+
+        With no ``filepath``: pulls from ``self.known`` (already loaded
+        by :meth:`_load_dataset`). With explicit ``filepath``: re-parses
+        that file via :func:`load_triples` (Prolog, permissive). Triples
+        whose relation starts with any prefix in ``skip_predicate_prefixes``
+        are dropped — useful for dataset-specific preamble lines like
+        DpRL's ``one_step``.
+        """
+        if filepath is None:
+            triples = self.known
+        else:
+            triples = load_triples(filepath, format_hint="prolog", permissive=True)
+        out: List[Any] = []
+        for triple in triples:
+            if any(triple.relation.startswith(p) for p in skip_predicate_prefixes):
+                continue
+            out.append(self.make_atom((triple.relation, triple.head, triple.tail)))
+        return out
+
+    def load_rules(
+        self,
+        filepath: str,
+        *,
+        uppercase_args: bool = False,
+    ) -> List[Any]:
+        """Load rules and convert via :meth:`make_atom` + :meth:`make_rule`.
+
+        File parsing — Prolog ``:-`` and ``->`` formats, optional
+        ``rN:weight:`` prefix, atom tokenization — lives in
+        :func:`load_rules_file`. The factory hooks decide the typed
+        output: default ``(head_tuple, body_list)`` tuple; DpRL returns
+        ``Rule(Term, [Term, ...])``.
+        """
+        out: List[Any] = []
+        for head_tuple, body_list in load_rules_file(filepath, uppercase_args=uppercase_args):
+            head = self.make_atom(head_tuple)
+            body = [self.make_atom(b) for b in body_list]
+            out.append(self.make_rule(head, body))
+        return out
+
+    def load_queries_with_depth(
+        self,
+        filepath: str,
+        *,
+        limit: Optional[int] = None,
+        depth_filter: Optional[Set[int]] = None,
+    ) -> Tuple[List[Any], List[int]]:
+        """Load queries with depth annotations; return ``(atoms, depths)``.
+
+        Wraps :func:`iter_queries_with_depth` (line iterator) and applies
+        the depth filter and atom-count limit. Each query string is
+        parsed into a ``(predicate, *args)`` tuple via the same atom
+        parser used by rule loading (lines that fail to parse are
+        silently skipped). The tuple is then routed through
+        :meth:`make_atom` so subclasses get their typed atom.
+        """
+        from .loaders import _parse_atom_str
+
+        atoms: List[Any] = []
+        depths: List[int] = []
+        for query_str, query_depth in iter_queries_with_depth(filepath):
+            if depth_filter is not None and query_depth not in depth_filter:
+                continue
+            atom_tuple = _parse_atom_str(query_str)
+            if atom_tuple is None:
+                continue
+            atoms.append(self.make_atom(atom_tuple))
+            depths.append(query_depth)
+            if limit is not None and len(atoms) >= limit:
+                break
+        return atoms, depths
+
+    def load_probabilistic_facts(
+        self,
+        dataset_name: str,
+        *,
+        base_dir: str,
+        patterns: Optional[List[str]] = None,
+        topk_limit: Optional[int] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[Any]:
+        """Discover the probabilistic-facts file for ``dataset_name`` and load it.
+
+        Searches ``base_dir`` for the first file that matches one of
+        ``patterns`` (defaulting to a few common conventions). Returns an
+        empty list if no file is found. Atom tuples from
+        :func:`load_probabilistic_facts` are passed through
+        :meth:`make_atom`.
+        """
+        if patterns is None:
+            patterns = [
+                f"soft_top_{dataset_name}.txt",
+                f"kge_top_{dataset_name}_facts.txt",
+                f"kge_top5_{dataset_name}_facts.txt",
+                f"kge_top_{dataset_name}.txt",
+            ]
+        path = next(
+            (
+                os.path.join(base_dir, p)
+                for p in patterns
+                if os.path.isfile(os.path.join(base_dir, p))
+            ),
+            None,
+        )
+        if path is None:
+            return []
+        tuples = _load_probabilistic_facts_file(
+            path, topk_limit=topk_limit, score_threshold=score_threshold,
+        )
+        return [self.make_atom(t) for t in tuples]
+
+    def filter_queries_by_rule_heads(
+        self,
+        query_tuples: List[Tuple[str, ...]],
+        rule_head_predicates: Set[str],
+    ) -> Tuple[List[Tuple[str, ...]], List[int]]:
+        """Drop queries whose predicate is not a rule head.
+
+        Thin convenience over :func:`filter_queries_by_predicates` —
+        callers re-align their parallel arrays (atoms, depths, labels)
+        using the returned ``kept_indices``.
+        """
+        return filter_queries_by_predicates(query_tuples, rule_head_predicates)
+
+    def discover_vocabulary(
+        self,
+        *,
+        rules_str: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = (),
+        queries_str: List[Tuple[str, ...]] = (),
+        constants: Optional[Set[str]] = None,
+        predicates: Optional[Set[str]] = None,
+    ) -> Tuple[Set[str], Set[str]]:
+        """Populate ``constants`` / ``predicates`` Sets from rule + query atoms.
+
+        Seeds from base's ``entity2id`` / ``relation2id`` (already filled
+        from facts by :meth:`_load_dataset`) and extends with rule heads,
+        rule bodies, and query atoms — those don't flow through the
+        base's id-assignment path so they're added explicitly.
+
+        Args:
+            rules_str: List of ``(head_tuple, body_list)`` rule tuples.
+            queries_str: Flat list of query ``(predicate, *args)`` tuples
+                (concatenate all splits before passing).
+            constants: Optional Set to update in place. If ``None``, a
+                fresh set is created.
+            predicates: Same shape as ``constants``.
+
+        Returns:
+            ``(constants, predicates)`` with seed + rule + query vocab.
+        """
+        if constants is None:
+            constants = set()
+        if predicates is None:
+            predicates = set()
+        constants.update(self.entity2id.keys())
+        predicates.update(self.relation2id.keys())
+        for (head_pred, *_head_args), body in rules_str:
+            predicates.add(head_pred)
+            for body_pred, *_body_args in body:
+                predicates.add(body_pred)
+        for pred, *args in queries_str:
+            predicates.add(pred)
+            constants.update(args)
+        return constants, predicates
+
     # ---- convenience accessors ----------------------------------------
+
+    def build_sampler(
+        self,
+        *,
+        default_mode: str = "both",
+        seed: int = 0,
+        device: Optional[Any] = None,
+        order_negatives: bool = False,
+    ) -> "Sampler":
+        """Construct a tkk ``Sampler`` from the loaded id space + filters + domains.
+
+        Single source of truth for sampler instantiation across consumers.
+        Reads only attributes already populated by :meth:`_load_dataset`:
+        ``ground_facts_idx_set`` (filter index), ``num_entities`` /
+        ``num_relations`` (id space), and the optional indexed-domain
+        structures ``domain2idx`` / ``entity2domain_idx``.
+
+        Args:
+            default_mode: Fallback corruption mode for ``Sampler.corrupt``
+                when no per-call mode is given.
+            seed: RNG seed for the underlying torch generator.
+            device: Optional device override; defaults to CPU.
+            order_negatives: Forwarded to ``Sampler.from_data``.
+
+        Returns:
+            A configured :class:`kge_kernels.scoring.Sampler`.
+        """
+        import torch
+
+        from ..scoring import Sampler
+
+        device = device or torch.device("cpu")
+        if self.ground_facts_idx_set:
+            all_known = torch.tensor(
+                sorted(self.ground_facts_idx_set), dtype=torch.long,
+            )
+        else:
+            all_known = torch.empty((0, 3), dtype=torch.long)
+        return Sampler.from_data(
+            all_known_triples_idx=all_known,
+            num_entities=self.num_entities,
+            num_relations=self.num_relations,
+            device=device,
+            default_mode=default_mode,
+            seed=seed,
+            domain2idx=(self.domain2idx or None),
+            entity2domain=(self.entity2domain_idx or None),
+            order_negatives=order_negatives,
+            min_entity_idx=0,
+        )
 
     def split_idx(self, split: str) -> List[Tuple[int, int, int]]:
         """Return integer-indexed triples for ``"train" | "valid" | "test" | "known"``."""
@@ -319,4 +593,4 @@ class KGEDatasetHandler:
         raise ValueError(f"Unknown split: {split!r}")
 
 
-__all__ = ["KGEDatasetHandler"]
+__all__ = ["KGEDatasetHandler", "MaterializedSplit"]
