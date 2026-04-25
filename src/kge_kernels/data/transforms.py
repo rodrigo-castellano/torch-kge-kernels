@@ -164,10 +164,38 @@ def build_relation_domains_from_file(
     return head_domain, tail_domain
 
 
+def load_depth_file(path: str) -> List[int]:
+    """Parse a ``<query> <depth>`` sidecar file into a list of depths.
+
+    Used by both ns (per-test-query depth annotations for per-depth metric
+    breakdowns) and DpRL (depth filtering during proof-RL training). The
+    file format is one query per line, with the depth as the last
+    whitespace-separated token; lines without a trailing integer get
+    ``-1`` (depth unknown). Empty lines and ``%``-comment lines are
+    treated as valid query rows with depth -1 to preserve row alignment
+    with the sibling triples file.
+
+    Returns a flat ``List[int]``, one entry per line, in file order.
+    """
+    depths: List[int] = []
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    depths.append(int(parts[1]))
+                    continue
+                except ValueError:
+                    pass
+            depths.append(-1)
+    return depths
+
+
 __all__ = [
     "add_reciprocal_triples",
     "build_filter_maps",
     "build_relation_domains",
     "build_relation_domains_from_file",
+    "load_depth_file",
     "load_domain_file",
 ]
