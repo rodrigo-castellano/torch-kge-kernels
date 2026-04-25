@@ -1,6 +1,14 @@
 """Knowledge-graph dataset utilities.
 
-Pure-Python helpers shared by DpRL, torch-ns, and any future KGE consumer:
+Pure-Python helpers shared by DpRL, torch-ns, and any future KGE consumer.
+
+The high-level entry point is :class:`KGEDatasetHandler` — an extensible
+base class that runs the full canonical loading pipeline (vocabulary
+discovery, split encoding, filter maps, domain mappings) so consumers
+only need to subclass and add their domain-specific structures.
+
+Lower-level building blocks remain available for callers that need more
+control:
 
   ``TripleExample``                 — named triple (head, relation, tail)
   ``load_triples``                  — parse TSV/CSV/Prolog triple files
@@ -15,6 +23,7 @@ Pure-Python helpers shared by DpRL, torch-ns, and any future KGE consumer:
 """
 from __future__ import annotations
 
+from .handler import KGEDatasetHandler
 from .loaders import (
     TripleExample,
     detect_triple_format,
@@ -36,6 +45,7 @@ from .transforms import (
 )
 
 __all__ = [
+    "KGEDatasetHandler",
     "TripleExample",
     "add_reciprocal_triples",
     "build_filter_maps",

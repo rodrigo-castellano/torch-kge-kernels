@@ -111,6 +111,7 @@ def load_triples_with_mappings(
     format_hint: str = "auto",
     *,
     extra_paths: Sequence[str] = (),
+    permissive: bool = False,
 ) -> Tuple[List[Tuple[int, int, int]], Dict[str, int], Dict[str, int]]:
     """Load triples and assign ``entity2id`` / ``relation2id``.
 
@@ -122,15 +123,18 @@ def load_triples_with_mappings(
     Returns ``(triples, entity2id, relation2id)`` where triples are
     ``(relation_id, head_id, tail_id)`` tuples (only from *path*, not
     the extra files).
+
+    ``permissive`` is forwarded to :func:`load_triples` and skips Prolog
+    rule lines / non-binary atoms instead of raising.
     """
-    triples = load_triples(path, format_hint)
+    triples = load_triples(path, format_hint, permissive=permissive)
 
     if extra_paths:
         # Collect ALL entities/relations from all files, sort alphabetically.
         all_triples = list(triples)
         for ep in extra_paths:
             if ep and os.path.isfile(ep):
-                all_triples.extend(load_triples(ep, format_hint))
+                all_triples.extend(load_triples(ep, format_hint, permissive=permissive))
         all_entities = sorted({t.head for t in all_triples} | {t.tail for t in all_triples})
         all_relations = sorted({t.relation for t in all_triples})
         entity2id = {e: i for i, e in enumerate(all_entities)}
