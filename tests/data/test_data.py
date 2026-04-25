@@ -236,68 +236,86 @@ def test_load_rules_file_parses_horn_clauses(tmp_path):
         "ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).\n"
         "\n"
     )
-    rules = load_rules_file(str(p))
-    assert len(rules) == 2
-    head1, body1 = rules[0]
-    assert head1 == ("ancestor", "X", "Y")
-    assert body1 == [("parent", "X", "Y")]
-    head2, body2 = rules[1]
-    assert head2 == ("ancestor", "X", "Z")
-    assert body2 == [("parent", "X", "Y"), ("ancestor", "Y", "Z")]
+    specs, var_to_domain = load_rules_file(str(p))
+    assert var_to_domain == {}
+    assert len(specs) == 2
+    assert specs[0].head == ("ancestor", "X", "Y")
+    assert specs[0].body == [("parent", "X", "Y")]
+    assert specs[0].name is None and specs[0].weight == 1.0
+    assert specs[1].head == ("ancestor", "X", "Z")
+    assert specs[1].body == [("parent", "X", "Y"), ("ancestor", "Y", "Z")]
 
 
 def test_load_rules_file_uppercase_args(tmp_path):
     p = tmp_path / "rules.txt"
     p.write_text("ancestor(x, y) :- parent(x, y).\n")
-    rules = load_rules_file(str(p), uppercase_args=True)
-    head, body = rules[0]
-    assert head == ("ancestor", "X", "Y")
-    assert body == [("parent", "X", "Y")]
+    specs, _ = load_rules_file(str(p), uppercase_args=True)
+    assert specs[0].head == ("ancestor", "X", "Y")
+    assert specs[0].body == [("parent", "X", "Y")]
 
 
 def test_load_rules_file_arrow_format(tmp_path):
     """`body, body -> head` direction (DPL / ProbLog convention)."""
     p = tmp_path / "rules.txt"
     p.write_text("parent(X, Y), parent(Y, Z) -> grandparent(X, Z)\n")
-    rules = load_rules_file(str(p))
-    head, body = rules[0]
-    assert head == ("grandparent", "X", "Z")
-    assert body == [("parent", "X", "Y"), ("parent", "Y", "Z")]
+    specs, _ = load_rules_file(str(p))
+    assert specs[0].head == ("grandparent", "X", "Z")
+    assert specs[0].body == [("parent", "X", "Y"), ("parent", "Y", "Z")]
 
 
 def test_load_rules_file_probabilistic_prefix(tmp_path):
-    """Strip the `rN:weight:` rule prefix used by family / countries."""
+    """Strip the `rN:weight:` rule prefix; capture name + weight."""
     p = tmp_path / "rules.txt"
     p.write_text(
         "r0:0.747:brother(a,h), mother(b,h) -> son(a,b)\n"
         "r1:1:locatedInCS(X,W), locatedInSR(W,Z) -> locatedInCR(X,Z)\n"
     )
-    rules = load_rules_file(str(p), uppercase_args=True)
-    assert len(rules) == 2
-    head1, body1 = rules[0]
-    assert head1 == ("son", "A", "B")
-    assert body1 == [("brother", "A", "H"), ("mother", "B", "H")]
-    head2, body2 = rules[1]
-    assert head2 == ("locatedInCR", "X", "Z")
+    specs, _ = load_rules_file(str(p), uppercase_args=True)
+    assert len(specs) == 2
+    assert specs[0].name == "r0"
+    assert specs[0].weight == 0.747
+    assert specs[0].head == ("son", "A", "B")
+    assert specs[0].body == [("brother", "A", "H"), ("mother", "B", "H")]
+    assert specs[1].name == "r1"
+    assert specs[1].weight == 1.0
+    assert specs[1].head == ("locatedInCR", "X", "Z")
+
+
+def test_load_rules_file_var2domain_preamble(tmp_path):
+    """Parse the `var2domain X dom1 Y dom2 ...` preamble line."""
+    p = tmp_path / "rules.txt"
+    p.write_text(
+        "var2domain X person Y location Z thing\n"
+        "located(X, Y) :- visits(X, Y).\n"
+    )
+    specs, var_to_domain = load_rules_file(str(p))
+    assert var_to_domain == {"X": "person", "Y": "location", "Z": "thing"}
+    assert len(specs) == 1
 
 
 def test_load_rules_file_standalone_fact(tmp_path):
-    """A line with no `:-` and no `->` parses as head + empty body."""
     p = tmp_path / "rules.txt"
     p.write_text("base_fact(a, b)\n")
-    rules = load_rules_file(str(p))
-    assert rules == [(("base_fact", "a", "b"), [])]
+    specs, _ = load_rules_file(str(p))
+    assert len(specs) == 1
+    assert specs[0].head == ("base_fact", "a", "b")
+    assert specs[0].body == []
 
 
 def test_load_rules_file_skips_malformed_silently(tmp_path):
     p = tmp_path / "rules.txt"
     p.write_text("not_a_rule\nancestor(X, Y) :- parent(X, Y).\nbroken :-\n")
-    rules = load_rules_file(str(p))
-    assert len(rules) == 1
+    specs, _ = load_rules_file(str(p))
+    # ``not_a_rule`` is a standalone-fact-like atom; ``broken :-`` is malformed.
+    # Behavior: ``not_a_rule`` parses as standalone (no parens → returns None).
+    # So only the well-formed rule survives.
+    assert len(specs) == 1
 
 
 def test_load_rules_file_missing_returns_empty(tmp_path):
-    assert load_rules_file(str(tmp_path / "nope.txt")) == []
+    specs, var_to_domain = load_rules_file(str(tmp_path / "nope.txt"))
+    assert specs == []
+    assert var_to_domain == {}
 
 
 # ═══════════════════════════════════════════════════════════════════════

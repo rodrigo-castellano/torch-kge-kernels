@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import csv
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 
 @dataclass(frozen=True)
@@ -221,52 +222,82 @@ def encode_split_triples(
     return encoded
 
 
+class RuleSpec(NamedTuple):
+    """Parsed rule with optional metadata.
+
+    - ``head`` / ``body`` are atom tuples ``(predicate, *args)``.
+    - ``name`` is the rule id from a ``rN:`` prefix when present (e.g. "r3"),
+      else ``None``.
+    - ``weight`` is the float from a ``rN:weight:`` prefix when present,
+      else ``1.0`` (hard rule).
+    """
+
+    head: Tuple[str, ...]
+    body: List[Tuple[str, ...]]
+    name: Optional[str] = None
+    weight: float = 1.0
+
+
 def load_rules_file(
     path: str, *, uppercase_args: bool = False,
-) -> List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]]:
-    """Parse a Prolog ``rules.txt`` into ``[(head_tuple, [body_tuple, ...])]``.
+) -> Tuple[List[RuleSpec], "OrderedDict[str, str]"]:
+    """Parse a Prolog ``rules.txt``; return rule specs + optional var2domain.
 
-    Each rule is ``head :- body1, body2, ...``. Atoms are written as
-    ``predicate(arg1, arg2)`` and arguments are usually variables (uppercase
-    by Prolog convention) referenced across head and body. Empty lines and
-    ``%``-prefixed comments are skipped; lines that fail to parse are
-    silently skipped (matches the legacy DpRL loader's permissive behavior).
+    Each rule is one of:
+
+    - ``head :- body, body, ...`` (standard Prolog).
+    - ``body, body, ... -> head`` (DPL / ProbLog left-to-right).
+    - ``<rule_id>:<weight>:body, body, ... -> head`` (probabilistic
+      family/countries format; the prefix populates ``RuleSpec.name`` /
+      ``RuleSpec.weight``).
+
+    A leading line of the form ``var2domain X dom1 Y dom2 ...`` (preamble)
+    is parsed into an ordered ``var → domain`` mapping that callers can
+    use to type rule variables. The preamble must precede every rule;
+    if it appears later it's silently ignored (matches legacy ns
+    ``RuleLoader.load`` behavior).
+
+    Empty / ``%``-comment lines are skipped. Lines that fail to parse
+    are skipped silently.
 
     Args:
         path: Path to a Prolog rule file.
-        uppercase_args: If True, uppercase every atom argument. Used to
-            match SB3-parity behavior where rule variables were always
-            uppercased even if the source file mixed cases.
+        uppercase_args: If True, uppercase every atom argument. Match the
+            SB3-parity behavior where rule variables were always uppercased
+            even if the source file mixed cases.
 
     Returns:
-        A list of rules; each rule is ``(head, body)`` where ``head`` is a
-        ``(predicate, *args)`` tuple and ``body`` is a list of such tuples.
+        ``(specs, var_to_domain)``. ``specs`` is a list of :class:`RuleSpec`.
+        ``var_to_domain`` is an ``OrderedDict[str, str]`` mapping variable
+        name to domain (empty when no preamble exists).
     """
-    rules: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = []
+    specs: List[RuleSpec] = []
+    var_to_domain: "OrderedDict[str, str]" = OrderedDict()
     if not os.path.isfile(path):
-        return rules
+        return specs, var_to_domain
+    seen_rule = False
     with open(path, "r", encoding="utf-8") as handle:
         for line in handle:
             stripped = line.strip()
             if not stripped or stripped.startswith("%"):
                 continue
-            head_body = _parse_prolog_rule(stripped, uppercase_args=uppercase_args)
-            if head_body is not None:
-                rules.append(head_body)
-    return rules
+            # var2domain preamble must precede any rule.
+            if not seen_rule and stripped.startswith("var2domain"):
+                tokens = stripped.split()[1:]
+                for i in range(0, len(tokens) - 1, 2):
+                    var_to_domain[tokens[i]] = tokens[i + 1]
+                continue
+            spec = _parse_prolog_rule(stripped, uppercase_args=uppercase_args)
+            if spec is not None:
+                specs.append(spec)
+                seen_rule = True
+    return specs, var_to_domain
 
 
 def _parse_prolog_rule(
     line: str, *, uppercase_args: bool = False,
-) -> Optional[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]]:
-    """Parse a single rule line into ``(head_tuple, body_list)``.
-
-    Supports the three formats found across our datasets:
-
-    - ``head :- body, body, ...`` (standard Prolog).
-    - ``body, body, ... -> head`` (DPL / ProbLog "left-to-right").
-    - ``<rule_id>:<weight>:body, body, ... -> head`` (probabilistic
-      family/countries format; the prefix is stripped before parsing).
+) -> Optional[RuleSpec]:
+    """Parse a single rule line into a :class:`RuleSpec`.
 
     Returns ``None`` for malformed lines so callers can skip them.
     """
@@ -274,10 +305,12 @@ def _parse_prolog_rule(
     if raw.endswith("."):
         raw = raw[:-1]
 
-    # Strip a probabilistic-rule prefix like ``r3:0.72:`` if present.
-    # Heuristic: ``rN:NUM:`` at the start, where N is a digit run and NUM
-    # is float-or-int. The first colon must be before any '(' (rule prefix
-    # never appears inside an atom).
+    # Strip a probabilistic-rule prefix like ``r3:0.72:`` if present and
+    # capture the rule id + weight. Heuristic: ``rN:NUM:`` at the start,
+    # N digit run, NUM float-or-int. The first colon must be before any
+    # '(' (rule prefix never appears inside an atom).
+    name: Optional[str] = None
+    weight: float = 1.0
     if raw.startswith("r"):
         first_colon = raw.find(":")
         first_paren = raw.find("(")
@@ -285,7 +318,8 @@ def _parse_prolog_rule(
             parts = raw.split(":", 2)
             if len(parts) >= 3 and parts[0][1:].isdigit():
                 try:
-                    float(parts[1])
+                    weight = float(parts[1])
+                    name = parts[0]
                     raw = parts[2].strip()
                 except ValueError:
                     pass
@@ -298,7 +332,7 @@ def _parse_prolog_rule(
     else:
         # Standalone fact: head only, empty body.
         head = _parse_atom_str(raw, uppercase_args=uppercase_args)
-        return (head, []) if head is not None else None
+        return RuleSpec(head=head, body=[], name=name, weight=weight) if head is not None else None
 
     head = _parse_atom_str(head_str, uppercase_args=uppercase_args)
     if head is None:
@@ -309,7 +343,7 @@ def _parse_prolog_rule(
         if atom is None:
             return None
         body.append(atom)
-    return head, body
+    return RuleSpec(head=head, body=body, name=name, weight=weight)
 
 
 def _split_atoms(body_str: str) -> List[str]:

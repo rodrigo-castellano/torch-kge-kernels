@@ -98,7 +98,32 @@ class KGEDatasetHandler:
     relation2id: Dict[str, int] = field(default_factory=dict)
     num_entities: int = 0
     num_relations: int = 0
+    # ``constants`` is the alphabetical sorted entity list (deterministic
+    # iteration). ``constants_set`` / ``predicates_set`` are frozensets
+    # for O(1) membership. After ``_load_dataset`` only the fact-vocabulary
+    # is in here; ``discover_vocabulary`` extends both with rule + query
+    # atoms. Subclasses may carry a separate ``predicates`` attr (e.g.
+    # DpRL keeps a ``Set[str]``); the canonical alphabetical predicate
+    # list is ``sorted(predicates_set)``.
     constants: List[str] = field(default_factory=list)
+    constants_set: frozenset = field(default_factory=frozenset)
+    predicates_set: frozenset = field(default_factory=frozenset)
+    # Typed-data placeholders populated by load_facts / load_rules /
+    # load_queries_with_depth (kept here so subclass __init__ doesn't
+    # have to redeclare them).
+    rule_names: List[Optional[str]] = field(default_factory=list)
+    rule_weights: List[float] = field(default_factory=list)
+    rules_str: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = field(default_factory=list)
+    facts_str: List[Tuple[str, ...]] = field(default_factory=list)
+    train_queries_str: List[Tuple[str, ...]] = field(default_factory=list)
+    valid_queries_str: List[Tuple[str, ...]] = field(default_factory=list)
+    test_queries_str: List[Tuple[str, ...]] = field(default_factory=list)
+    train_depths: List[int] = field(default_factory=list)
+    valid_depths: List[int] = field(default_factory=list)
+    test_depths: List[int] = field(default_factory=list)
+    train_labels: List[int] = field(default_factory=list)
+    valid_labels: List[int] = field(default_factory=list)
+    test_labels: List[int] = field(default_factory=list)
 
     # ---- string-form triples (TripleExample) ---------------------------
     train: List[TripleExample] = field(default_factory=list)
@@ -178,6 +203,21 @@ class KGEDatasetHandler:
         self.num_entities = 0
         self.num_relations = 0
         self.constants = []
+        self.constants_set = frozenset()
+        self.predicates_set = frozenset()
+        self.rule_names = []
+        self.rule_weights = []
+        self.rules_str = []
+        self.facts_str = []
+        self.train_queries_str = []
+        self.valid_queries_str = []
+        self.test_queries_str = []
+        self.train_depths = []
+        self.valid_depths = []
+        self.test_depths = []
+        self.train_labels = []
+        self.valid_labels = []
+        self.test_labels = []
         self.train = []
         self.all_valid = []
         self.test = []
@@ -247,6 +287,10 @@ class KGEDatasetHandler:
         self.num_entities = len(ent2id)
         self.num_relations = len(rel2id)
         self.constants = sorted(ent2id.keys())
+        self.constants_set = frozenset(self.constants)
+        # Predicates frozenset starts with relation2id keys; extended by
+        # discover_vocabulary later if rule / query loading adds more.
+        self.predicates_set = frozenset(rel2id.keys())
         self.train_idx = train_idx
         self.valid_idx = (
             encode_split_triples(valid_path, ent2id, rel2id, "valid")
@@ -303,6 +347,10 @@ class KGEDatasetHandler:
         )
 
         # ── 4. Domain mappings + per-relation domain restriction ──
+        # Note: NOT auto-detected by file existence. Some datasets (family)
+        # ship a ``domain2constants.txt`` but downstream parity references
+        # (SB3) don't use it; auto-detecting would diverge from those
+        # consumers. Callers must opt in explicitly via ``domain_file=``.
         if domain_file is not None:
             domain_path = join(base, domain_file)
             # String-mode: keys are entity / domain names. Used by
@@ -375,21 +423,60 @@ class KGEDatasetHandler:
         filepath: str,
         *,
         uppercase_args: bool = False,
+        limit: Optional[int] = None,
+        force_hard_rules: bool = False,
     ) -> List[Any]:
-        """Load rules and convert via :meth:`make_atom` + :meth:`make_rule`.
+        """Load rules into ``self.rules_str`` + parallel name/weight lists.
 
-        File parsing — Prolog ``:-`` and ``->`` formats, optional
-        ``rN:weight:`` prefix, atom tokenization — lives in
-        :func:`load_rules_file`. The factory hooks decide the typed
-        output: default ``(head_tuple, body_list)`` tuple; DpRL returns
-        ``Rule(Term, [Term, ...])``.
+        Populates these handler attributes (in order):
+
+        - ``self.rules_str: List[(head_tuple, body_list)]``
+        - ``self.rule_names: List[Optional[str]]`` — rule id from
+          ``rN:weight:`` prefix when present, else ``None``.
+        - ``self.rule_weights: List[float]`` — float from prefix, or 1.0.
+        - ``self.rule_var_domains: OrderedDict[str, str]`` — variable
+          domains from ``var2domain`` preamble (empty if no preamble).
+
+        File parsing — Prolog ``:-``/``->`` formats, ``rN:weight:`` prefix,
+        ``var2domain X dom1 ...`` preamble, atom tokenization — lives in
+        :func:`load_rules_file` so all consumers share one parser.
+
+        Args:
+            filepath: Path to the rule file.
+            uppercase_args: Pass through to the parser (uppercase every
+                atom argument). SB3-parity in DpRL.
+            limit: If not None, stop reading after ``limit`` rules
+                (matches legacy ns ``RuleLoader.load(filepath, num_rules)``).
+            force_hard_rules: Override every parsed weight with 1.0.
+
+        Returns:
+            A list whose shape is decided by the :meth:`make_rule` factory
+            hook (default: ``(head_tuple, body_list)`` tuples). Subclasses
+            that override the hook (e.g. DpRL returning ``Rule(Term, ...)``)
+            get their typed list back. The string-form is always available
+            on ``self.rules_str`` regardless of factory output.
         """
-        out: List[Any] = []
-        for head_tuple, body_list in load_rules_file(filepath, uppercase_args=uppercase_args):
-            head = self.make_atom(head_tuple)
-            body = [self.make_atom(b) for b in body_list]
-            out.append(self.make_rule(head, body))
-        return out
+        specs, var_to_domain = load_rules_file(
+            filepath, uppercase_args=uppercase_args,
+        )
+        if limit is not None:
+            specs = specs[:limit]
+        rules_str: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = []
+        rule_names: List[Optional[str]] = []
+        rule_weights: List[float] = []
+        typed: List[Any] = []
+        for spec in specs:
+            rules_str.append((spec.head, spec.body))
+            rule_names.append(spec.name)
+            rule_weights.append(1.0 if force_hard_rules else spec.weight)
+            head_atom = self.make_atom(spec.head)
+            body_atoms = [self.make_atom(b) for b in spec.body]
+            typed.append(self.make_rule(head_atom, body_atoms))
+        self.rules_str = rules_str
+        self.rule_names = rule_names
+        self.rule_weights = rule_weights
+        self.rule_var_domains = var_to_domain
+        return typed
 
     def load_queries_with_depth(
         self,
@@ -483,20 +570,24 @@ class KGEDatasetHandler:
         constants: Optional[Set[str]] = None,
         predicates: Optional[Set[str]] = None,
     ) -> Tuple[Set[str], Set[str]]:
-        """Populate ``constants`` / ``predicates`` Sets from rule + query atoms.
+        """Populate ``constants_set`` / ``predicates_set`` from rule + query atoms.
 
         Seeds from base's ``entity2id`` / ``relation2id`` (already filled
         from facts by :meth:`_load_dataset`) and extends with rule heads,
         rule bodies, and query atoms — those don't flow through the
         base's id-assignment path so they're added explicitly.
 
+        After this method runs, the canonical alphabetical iteration is
+        ``self.constants`` / ``sorted(self.predicates_set)``; the O(1)
+        membership views are ``self.constants_set`` / ``self.predicates_set``.
+
         Args:
             rules_str: List of ``(head_tuple, body_list)`` rule tuples.
             queries_str: Flat list of query ``(predicate, *args)`` tuples
                 (concatenate all splits before passing).
             constants: Optional Set to update in place. If ``None``, a
-                fresh set is created.
-            predicates: Same shape as ``constants``.
+                fresh set is created (seeded from ``entity2id``).
+            predicates: Same shape as ``constants`` (seeded from ``relation2id``).
 
         Returns:
             ``(constants, predicates)`` with seed + rule + query vocab.
@@ -514,7 +605,352 @@ class KGEDatasetHandler:
         for pred, *args in queries_str:
             predicates.add(pred)
             constants.update(args)
+        # Finalize the canonical handler views (alphabetical List + frozenset).
+        # Subclass attrs (e.g. DpRL's ``self.predicates: Set[str]``) are not
+        # touched here — callers that pass their own sets get them updated
+        # in place AND get the canonical views populated on self.
+        self.constants = sorted(constants)
+        self.constants_set = frozenset(constants)
+        self.predicates_set = frozenset(predicates)
         return constants, predicates
+
+    def load_dataset(
+        self,
+        dataset_name: str,
+        base_path: str = "data",
+        *,
+        train_file: str = "train.txt",
+        valid_file: str = "valid.txt",
+        test_file: str = "test.txt",
+        fact_file: Optional[str] = "facts.txt",
+        rules_file: Optional[str] = None,
+        domain_file: Optional[str] = None,
+        permissive: bool = False,
+        valid_size: Optional[int] = None,
+        # Typed-data switches (opt-in for consumers that want typed atoms/rules)
+        load_typed_facts: bool = False,
+        skip_predicate_prefixes: Tuple[str, ...] = (),
+        load_typed_rules: bool = False,
+        uppercase_rule_args: bool = False,
+        rule_limit: Optional[int] = None,
+        force_hard_rules: bool = False,
+        load_typed_queries: bool = False,
+        n_train_queries: Optional[int] = None,
+        n_eval_queries: Optional[int] = None,
+        n_test_queries: Optional[int] = None,
+        train_depth: Optional[Set[int]] = None,
+        valid_depth: Optional[Set[int]] = None,
+        test_depth: Optional[Set[int]] = None,
+        load_depth_info: bool = True,
+        # Filter / vocab / KG / materialize
+        filter_queries_by_rule_heads: bool = False,
+        discover_vocab: bool = True,
+        build_kg: bool = True,
+        default_domain_name: str = "default",
+        materialize: bool = False,
+        sort_data: bool = True,
+        device: Optional[Any] = None,
+    ) -> None:
+        """One canonical KGE dataset load for all consumers.
+
+        Pipeline (each typed-data step is opt-in):
+
+        1. Low-level: vocabulary, splits, filter maps, domains via
+           :meth:`_load_dataset` (always).
+        2. Typed facts via :meth:`load_facts` (if ``load_typed_facts``).
+        3. Typed rules via :meth:`load_rules` (if ``load_typed_rules`` and
+           ``rules_file`` is provided).
+        4. Typed queries with depth via :meth:`load_queries_with_depth`
+           for train / valid / test (if ``load_typed_queries``).
+        5. Filter train queries by rule heads (if requested + rules loaded).
+        6. ``sort_data`` — alphabetical sort of ``facts_str`` + ``rules_str``
+           (and its parallel ``rule_names`` / ``rule_weights`` arrays) +
+           per-split ``{split}_queries_str`` (with parallel labels/depths).
+        7. Vocabulary discovery — populate ``constants`` /
+           ``constants_set`` / ``predicates_set`` (if ``discover_vocab``).
+        8. ``build_kg`` — default-domain catch-all + id-view rebuild +
+           per-relation domain restriction (if ``build_kg`` is True).
+        9. ``materialize`` — tensor versions of facts/rules/queries
+           (if ``materialize`` is True).
+
+        Subclasses override this method only to add consumer-specific
+        extras (DpRL: probabilistic-facts merge, IndexManager-shifted
+        materialize). The default flag values match the SL consumer
+        (just the canonical pipeline, no typed lists, no materialize);
+        DpRL passes ``load_typed_*=True`` and ``materialize=False``
+        (uses its own IndexManager-aware materialize override).
+        """
+        # 1. Low-level loader.
+        self._load_dataset(
+            dataset_name=dataset_name, base_path=base_path,
+            train_file=train_file, valid_file=valid_file, test_file=test_file,
+            fact_file=fact_file, domain_file=domain_file,
+            permissive=permissive, valid_size=valid_size,
+        )
+        dataset_path = join(base_path, dataset_name)
+
+        # 2. Typed facts (str form populated alongside).
+        if load_typed_facts:
+            self.facts = self.load_facts(skip_predicate_prefixes=skip_predicate_prefixes)
+            # Populate facts_str alongside the typed list — useful for
+            # downstream materialize() and consumers that want str-form.
+            self.facts_str = [
+                (t.relation, t.head, t.tail) for t in self.known
+                if not any(t.relation.startswith(p) for p in skip_predicate_prefixes)
+            ]
+
+        # 3. Typed rules.
+        if load_typed_rules and rules_file:
+            rules_path = join(dataset_path, rules_file)
+            if os.path.isfile(rules_path):
+                self.rules = self.load_rules(
+                    rules_path,
+                    uppercase_args=uppercase_rule_args,
+                    limit=rule_limit,
+                    force_hard_rules=force_hard_rules,
+                )
+
+        # 4. Typed queries with depth (per split).
+        if load_typed_queries:
+            train_limit = None if filter_queries_by_rule_heads else n_train_queries
+            for split, fname, limit, depth_set in (
+                ("train", train_file, train_limit, train_depth),
+                ("valid", valid_file, n_eval_queries, valid_depth),
+                ("test", test_file, n_test_queries, test_depth),
+            ):
+                full_path = join(dataset_path, fname)
+                if os.path.isfile(full_path):
+                    queries, depths = self.load_queries_with_depth(
+                        full_path, limit=limit, depth_filter=depth_set,
+                    )
+                    if not load_depth_info:
+                        depths = [-1] * len(queries)
+                else:
+                    queries, depths = [], []
+                # Typed list (factory-returned objects)
+                setattr(self, f"{split}_queries", queries)
+                # String-form parallel list (for materialize + filter)
+                from .loaders import _parse_atom_str
+                queries_str: List[Tuple[str, ...]] = []
+                if os.path.isfile(full_path):
+                    for q_str, q_depth in iter_queries_with_depth(full_path):
+                        if depth_set is not None and q_depth not in depth_set:
+                            continue
+                        atom_tuple = _parse_atom_str(q_str)
+                        if atom_tuple is None:
+                            continue
+                        queries_str.append(atom_tuple)
+                        if limit is not None and len(queries_str) >= limit:
+                            break
+                setattr(self, f"{split}_queries_str", queries_str)
+                setattr(self, f"{split}_depths", list(depths))
+                setattr(self, f"{split}_labels", [1] * len(queries_str))
+
+        # 5. Filter queries by rule heads.
+        if filter_queries_by_rule_heads and self.rules_str:
+            rule_head_preds = {head[0] for head, _body in self.rules_str}
+            filtered_str, kept = self.filter_queries_by_rule_heads(
+                self.train_queries_str, rule_head_preds,
+            )
+            if len(kept) < len(self.train_queries_str):
+                self.train_queries_str = filtered_str
+                self.train_depths = [self.train_depths[i] for i in kept]
+                self.train_labels = [self.train_labels[i] for i in kept]
+                if hasattr(self, "train_queries") and self.train_queries:
+                    self.train_queries = [self.train_queries[i] for i in kept]
+                if n_train_queries is not None:
+                    self.train_queries_str = self.train_queries_str[:n_train_queries]
+                    self.train_depths = self.train_depths[:n_train_queries]
+                    self.train_labels = self.train_labels[:n_train_queries]
+                    if hasattr(self, "train_queries"):
+                        self.train_queries = self.train_queries[:n_train_queries]
+
+        # 6. Sort (deterministic ordering for parity).
+        if sort_data:
+            self._apply_sort_data()
+
+        # 7. Vocabulary discovery.
+        if discover_vocab:
+            self.discover_vocabulary(
+                rules_str=self.rules_str,
+                queries_str=(
+                    self.train_queries_str
+                    + self.valid_queries_str
+                    + self.test_queries_str
+                ),
+            )
+
+        # 8. Build KG (default-domain catch-all + id-view rebuild).
+        if build_kg:
+            self.build_kg(default_domain_name=default_domain_name)
+
+        # 9. Materialize tensors.
+        if materialize:
+            self.materialize(device=device)
+
+    def _apply_sort_data(self) -> None:
+        """Alphabetical sort of typed-data lists for deterministic ordering.
+
+        Sorts ``facts_str`` (natural), ``rules_str`` (by head atom) with
+        parallel ``rule_names`` / ``rule_weights`` re-aligned, and
+        per-split ``{split}_queries_str`` with parallel labels / depths.
+        Idempotent; safe to call multiple times.
+        """
+        if self.facts_str:
+            self.facts_str = sorted(self.facts_str)
+        if self.rules_str:
+            order = sorted(range(len(self.rules_str)),
+                           key=lambda i: (self.rules_str[i][0],
+                                          tuple((b for atom in self.rules_str[i][1] for b in atom))))
+            self.rules_str = [self.rules_str[i] for i in order]
+            self.rule_names = [self.rule_names[i] for i in order]
+            self.rule_weights = [self.rule_weights[i] for i in order]
+        # Per-split queries: keep parallel label/depth arrays aligned.
+        for split in ("train", "valid", "test"):
+            queries = getattr(self, f"{split}_queries_str", [])
+            if not queries:
+                continue
+            labels = getattr(self, f"{split}_labels", [])
+            depths = getattr(self, f"{split}_depths", [])
+            order = sorted(range(len(queries)), key=lambda i: queries[i])
+            setattr(self, f"{split}_queries_str", [queries[i] for i in order])
+            if labels:
+                setattr(self, f"{split}_labels", [labels[i] for i in order])
+            if depths:
+                setattr(self, f"{split}_depths", [depths[i] for i in order])
+
+    def materialize(
+        self,
+        *,
+        device: Optional[Any] = None,
+        entity_id_fn: Optional[Any] = None,
+        relation_id_fn: Optional[Any] = None,
+    ) -> None:
+        """Build tensor versions of facts, rules, and queries.
+
+        Defaults use ``self.entity2id`` / ``self.relation2id`` directly.
+        Subclasses (e.g. DpRL with ``IndexManager``) can pass alternate
+        id-mapping callbacks to remap into a shifted id space (DpRL
+        reserves id 0 for padding atoms).
+
+        Populates these attributes on ``self``:
+
+        - ``facts_t: LongTensor[F, 3]``
+        - ``rules_t: LongTensor[R, max_body, 3]`` (body atoms; ``rule_lens_t``
+          gives the unpadded length per row)
+        - ``rule_lens_t: LongTensor[R]``
+        - ``rules_heads_t: LongTensor[R, 3]``
+        - per-split: ``train_queries_t``, ``valid_queries_t``, ``test_queries_t``
+          all shape ``[N, 3]``
+        - per-split: ``train_labels_t``, ``valid_labels_t``, ``test_labels_t``
+          shape ``[N]``
+        - per-split: ``train_depths_t``, ``valid_depths_t``, ``test_depths_t``
+          shape ``[N]``
+
+        Source-of-truth for the string-form is ``facts_str`` / ``rules_str`` /
+        ``{split}_queries_str`` / ``{split}_depths`` / ``{split}_labels``;
+        these must be populated before calling ``materialize`` (typically
+        by ``load_facts`` / ``load_rules`` / ``load_queries_with_depth``).
+        """
+        device = device or torch.device("cpu")
+        ent_fn = entity_id_fn or (lambda e: self.entity2id[e])
+        rel_fn = relation_id_fn or (lambda r: self.relation2id[r])
+
+        def _atom_to_row(atom: Tuple[str, ...]) -> Tuple[int, int, int]:
+            # Public format is (predicate, head, tail). Tensor row is
+            # (relation_id, head_id, tail_id) — same column order.
+            return (rel_fn(atom[0]), ent_fn(atom[1]), ent_fn(atom[2]))
+
+        # Facts
+        if self.facts_str:
+            self.facts_t = torch.tensor(
+                [_atom_to_row(a) for a in self.facts_str],
+                dtype=torch.long, device=device,
+            )
+        else:
+            self.facts_t = torch.empty((0, 3), dtype=torch.long, device=device)
+
+        # Rules: pack body atoms into [R, max_body, 3]; head into [R, 3].
+        if self.rules_str:
+            max_body = max((len(body) for _, body in self.rules_str), default=0)
+            max_body = max(1, max_body)
+            R = len(self.rules_str)
+            rules_t = torch.zeros((R, max_body, 3), dtype=torch.long, device=device)
+            rule_lens = torch.zeros((R,), dtype=torch.long, device=device)
+            heads_t = torch.zeros((R, 3), dtype=torch.long, device=device)
+            for r, (head, body) in enumerate(self.rules_str):
+                heads_t[r] = torch.tensor(_atom_to_row(head), dtype=torch.long)
+                for b, atom in enumerate(body):
+                    rules_t[r, b] = torch.tensor(_atom_to_row(atom), dtype=torch.long)
+                rule_lens[r] = len(body)
+            self.rules_t = rules_t
+            self.rule_lens_t = rule_lens
+            self.rules_heads_t = heads_t
+        else:
+            self.rules_t = torch.empty((0, 1, 3), dtype=torch.long, device=device)
+            self.rule_lens_t = torch.empty((0,), dtype=torch.long, device=device)
+            self.rules_heads_t = torch.empty((0, 3), dtype=torch.long, device=device)
+
+        # Per-split queries / labels / depths.
+        for split in ("train", "valid", "test"):
+            queries = getattr(self, f"{split}_queries_str")
+            labels = getattr(self, f"{split}_labels")
+            depths = getattr(self, f"{split}_depths")
+            if queries:
+                q_t = torch.tensor(
+                    [_atom_to_row(a) for a in queries],
+                    dtype=torch.long, device=device,
+                )
+            else:
+                q_t = torch.empty((0, 3), dtype=torch.long, device=device)
+            l_t = torch.as_tensor(labels, dtype=torch.long, device=device)
+            d_t = torch.as_tensor(depths, dtype=torch.long, device=device)
+            setattr(self, f"{split}_queries_t", q_t)
+            setattr(self, f"{split}_labels_t", l_t)
+            setattr(self, f"{split}_depths_t", d_t)
+
+    def build_kg(self, default_domain_name: str = "default") -> None:
+        """Default-domain catch-all: every constant gets a domain.
+
+        Mutates ``self.domain2entities`` (str-keyed) and ``self.entity2domain``
+        in place. Rebuilds ``self.domain2idx`` / ``self.entity2domain_idx``
+        from the updated str-keyed maps so the id-keyed views stay aligned
+        after the catch-all adds the default-domain entries.
+
+        If a real ``domain2constants.txt`` was loaded by :meth:`_load_dataset`,
+        any constants missing from it are appended to the default-domain
+        bucket here. If no domain file was loaded, EVERY constant lands
+        in the default-domain bucket — datasets become a single-domain
+        view with no domain-restricted corruption (``use_domain_eval``
+        stays at its load-time value, which is False for these datasets).
+
+        Per-relation domain restriction (``head_domain`` / ``tail_domain``)
+        is rebuilt from the updated id-keyed maps so the sampler /
+        evaluator see the catch-all entries.
+        """
+        # Catch-all over alphabetical self.constants for determinism.
+        self.domain2entities.setdefault(default_domain_name, [])
+        for c in self.constants:
+            if c not in self.entity2domain:
+                self.domain2entities[default_domain_name].append(c)
+                self.entity2domain[c] = default_domain_name
+
+        # Rebuild id-keyed views from the updated string-keyed maps.
+        self.domain2idx = {
+            dom: [self.entity2id[e] for e in entities if e in self.entity2id]
+            for dom, entities in self.domain2entities.items()
+        }
+        self.entity2domain_idx = {
+            self.entity2id[e]: d
+            for e, d in self.entity2domain.items()
+            if e in self.entity2id
+        }
+        # Per-relation domain restriction reflects the catch-all additions.
+        if self.use_domain_eval and self.domain2idx:
+            self.head_domain, self.tail_domain = build_relation_domains_from_file(
+                self.train_idx + self.valid_idx + self.test_idx,
+                self.entity2domain_idx, self.domain2idx,
+            )
 
     # ---- convenience accessors ----------------------------------------
 
