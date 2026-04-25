@@ -224,7 +224,13 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             optimizer, mode="min", factor=0.5, patience=10, min_lr=1e-4,
         )
 
-    os.makedirs(cfg.save_dir, exist_ok=True)
+    # Disk persistence is opt-in. The shared logging contract
+    # (kge_kernels.logging.run_experiment) wraps train_model with a
+    # RunContext that handles model saving via output/runs/<exp>/<run>/.
+    # Standalone train_model() calls (e.g. from sweep scripts) default to
+    # save_dir=None which skips all disk writes.
+    if cfg.save_dir is not None:
+        os.makedirs(cfg.save_dir, exist_ok=True)
 
     # ── Validation state ──────────────────────────────────────────────
     eval_limit = cfg.eval_limit if cfg.eval_limit > 0 else None
@@ -336,8 +342,9 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             best_valid_epoch = epoch
             best_state_dict = {k: v.detach().cpu().clone() for k, v in _current_state_dict(mdl).items()}
             no_improve_evals = 0
-            save_best_checkpoint(cfg.save_dir, state_dict=_current_state_dict(mdl),
-                                 config_payload=make_payload({"valid_mrr": current_valid_mrr}))
+            if cfg.save_dir is not None:
+                save_best_checkpoint(cfg.save_dir, state_dict=_current_state_dict(mdl),
+                                     config_payload=make_payload({"valid_mrr": current_valid_mrr}))
         else:
             no_improve_evals += 1
             if cfg.use_early_stopping and no_improve_evals >= cfg.patience:
@@ -412,7 +419,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epoch_time = time.perf_counter() - epoch_start
             epoch_durations.append(epoch_time)
             print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
-            save_latest_weights(cfg.save_dir, _current_state_dict(model))
+            if cfg.save_dir is not None:
+                save_latest_weights(cfg.save_dir, _current_state_dict(model))
 
             if plateau_scheduler is not None:
                 plateau_scheduler.step(avg_loss)
@@ -463,7 +471,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epochs_completed = epoch
             epoch_durations.append(epoch_time)
             print(f"Epoch {epoch:03d} | loss={avg_loss:.4f} | time={epoch_time:.2f}s", end="\r")
-            save_latest_weights(cfg.save_dir, _current_state_dict(mdl))
+            if cfg.save_dir is not None:
+                save_latest_weights(cfg.save_dir, _current_state_dict(mdl))
             if plateau_scheduler is not None:
                 plateau_scheduler.step(avg_loss)
             return _run_validation(epoch, mdl)
@@ -548,15 +557,18 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     if metric_logs:
         print("Evaluation | " + " | ".join(metric_logs))
 
-    # ── Save final checkpoint ─────────────────────────────────────────
-    weights_path, config_path = save_final_checkpoint(
-        cfg.save_dir,
-        state_dict=_current_state_dict(model),
-        config_payload=make_payload(metrics),
-        entity2id=e2id,
-        relation2id=r2id,
-    )
-    print(f"Saved model to {cfg.save_dir}")
+    # ── Save final checkpoint (only when save_dir is set) ────────────
+    if cfg.save_dir is not None:
+        weights_path, config_path = save_final_checkpoint(
+            cfg.save_dir,
+            state_dict=_current_state_dict(model),
+            config_payload=make_payload(metrics),
+            entity2id=e2id,
+            relation2id=r2id,
+        )
+        print(f"Saved model to {cfg.save_dir}")
+    else:
+        weights_path, config_path = "", ""
     return TrainArtifacts(
         entity2id=e2id,
         relation2id=r2id,

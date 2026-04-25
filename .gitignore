@@ -2,3 +2,19 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.egg-info/
+
+# Run bundles + promoted runs (per shared logging contract)
+output/runs/
+output/registry/
+output/legacy/
+
+# Stray artefacts — should never appear here. Anything writing models or
+# weights MUST go through kge_kernels.logging.run_experiment, which routes
+# to output/runs/<exp>/<run>/. These entries catch accidental ad-hoc writes
+# (e.g. TrainConfig with an explicit save_dir at the repo root).
+checkpoints/
+*.pth
+*.safetensors
+
+# Inductor / torch.compile caches
+.torchinductor_cache/

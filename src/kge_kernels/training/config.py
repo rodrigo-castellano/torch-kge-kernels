@@ -32,7 +32,15 @@ class TrainConfig:
     """
 
     # -- Data paths --
-    save_dir: str = "checkpoints"
+    # Disk persistence is opt-in: by default ``train_model`` writes nothing.
+    # Real runs go through :func:`kge_kernels.logging.run_experiment`, which
+    # supplies the contract path (``output/runs/<experiment>/<run>/``) via
+    # :class:`RunContext`. Setting ``save_dir`` directly is for ad-hoc CLI
+    # use only and bypasses the shared logging contract — prefer
+    # ``run_experiment``. The legacy default ``"checkpoints"`` was removed
+    # because it polluted the repo root on every standalone train_model
+    # call (notably from scripts/run_3way_sweep.py).
+    save_dir: str | None = None
     run_signature: str | None = None
     train_path: str | None = None
     dataset: str | None = None
@@ -115,7 +123,12 @@ KGETrainConfig = TrainConfig
 
 @dataclass
 class TrainArtifacts:
-    """Output of a completed ``train_model`` run."""
+    """Output of a completed ``train_model`` run.
+
+    ``config_path`` and ``weights_path`` are only set when ``save_dir`` was
+    provided; with the default ``save_dir=None`` they're empty strings and
+    no disk writes happen.
+    """
 
     entity2id: dict
     relation2id: dict
