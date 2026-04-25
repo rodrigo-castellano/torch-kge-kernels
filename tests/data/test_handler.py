@@ -100,19 +100,16 @@ def test_domain_file_must_be_explicit(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_build_kg_catch_all_when_no_domain_file(tmp_path):
-    """Without a domain file, every constant lands in the default-domain
-    bucket and id-keyed views are populated."""
+def test_build_kg_no_op_when_no_domain_file(tmp_path):
+    """Without a domain file, ``build_kg`` is a no-op — ``domain2entities``
+    stays empty so the sampler treats the dataset as not domain-restricted.
+    KGE-standard datasets that ship a ``domain2constants.txt`` (e.g. family)
+    where the SB3 parity reference doesn't use it stay consistent."""
     base_path, name = _write_tiny_dataset(tmp_path)
     h = KnowledgeBase(name, base_path)
     h.build_kg(default_domain_name="default")
-    assert "default" in h.domain2entities
-    # All 5 constants in the catch-all
-    assert set(h.domain2entities["default"]) == set(h.constants)
-    # Id-keyed views populated
-    assert "default" in h.domain2idx
-    assert len(h.domain2idx["default"]) == 5
-    # Per-relation domain restriction NOT activated (no real domain file)
+    assert h.domain2entities == {}
+    assert h.domain2idx == {}
     assert not h.use_domain_eval
 
 

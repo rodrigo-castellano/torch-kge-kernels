@@ -98,15 +98,14 @@ class KnowledgeBase:
     relation2id: Dict[str, int] = field(default_factory=dict)
     num_entities: int = 0
     num_relations: int = 0
-    # ``constants`` is the alphabetical sorted entity list (deterministic
-    # iteration). ``constants_set`` / ``predicates_set`` are frozensets
-    # for O(1) membership. After ``_load_dataset`` only the fact-vocabulary
-    # is in here; ``discover_vocabulary`` extends both with rule + query
-    # atoms. Subclasses may carry a separate ``predicates`` attr (e.g.
-    # DpRL keeps a ``Set[str]``); the canonical alphabetical predicate
-    # list is ``sorted(predicates_set)``.
+    # ``constants`` / ``predicates`` are alphabetical sorted entity / relation
+    # lists for deterministic iteration. ``constants_set`` /
+    # ``predicates_set`` are frozensets for O(1) membership. After
+    # ``_load_dataset`` only the fact-vocabulary is in here;
+    # ``discover_vocabulary`` extends both with rule + query atoms.
     constants: List[str] = field(default_factory=list)
     constants_set: frozenset = field(default_factory=frozenset)
+    predicates: List[str] = field(default_factory=list)
     predicates_set: frozenset = field(default_factory=frozenset)
     # Typed-data placeholders populated by load_facts / load_rules /
     # load_queries_with_depth (kept here so subclass __init__ doesn't
@@ -204,6 +203,7 @@ class KnowledgeBase:
         self.num_relations = 0
         self.constants = []
         self.constants_set = frozenset()
+        self.predicates = []
         self.predicates_set = frozenset()
         self.rule_names = []
         self.rule_weights = []
@@ -288,9 +288,10 @@ class KnowledgeBase:
         self.num_relations = len(rel2id)
         self.constants = sorted(ent2id.keys())
         self.constants_set = frozenset(self.constants)
-        # Predicates frozenset starts with relation2id keys; extended by
-        # discover_vocabulary later if rule / query loading adds more.
-        self.predicates_set = frozenset(rel2id.keys())
+        # Predicates list / frozenset start with relation2id keys; extended
+        # by discover_vocabulary later if rule / query loading adds more.
+        self.predicates = sorted(rel2id.keys())
+        self.predicates_set = frozenset(self.predicates)
         self.train_idx = train_idx
         self.valid_idx = (
             encode_split_triples(valid_path, ent2id, rel2id, "valid")
@@ -606,11 +607,9 @@ class KnowledgeBase:
             predicates.add(pred)
             constants.update(args)
         # Finalize the canonical handler views (alphabetical List + frozenset).
-        # Subclass attrs (e.g. DpRL's ``self.predicates: Set[str]``) are not
-        # touched here — callers that pass their own sets get them updated
-        # in place AND get the canonical views populated on self.
         self.constants = sorted(constants)
         self.constants_set = frozenset(constants)
+        self.predicates = sorted(predicates)
         self.predicates_set = frozenset(predicates)
         return constants, predicates
 
@@ -758,12 +757,17 @@ class KnowledgeBase:
                 self.train_labels = [self.train_labels[i] for i in kept]
                 if hasattr(self, "train_queries") and self.train_queries:
                     self.train_queries = [self.train_queries[i] for i in kept]
-                if n_train_queries is not None:
-                    self.train_queries_str = self.train_queries_str[:n_train_queries]
-                    self.train_depths = self.train_depths[:n_train_queries]
-                    self.train_labels = self.train_labels[:n_train_queries]
-                    if hasattr(self, "train_queries"):
-                        self.train_queries = self.train_queries[:n_train_queries]
+            # Always re-apply ``n_train_queries`` after the filter — even
+            # when the filter removed nothing, the loader pre-bypassed
+            # the limit (so it could see all candidates) and we must trim
+            # back here to honor the cap. Matches DpRL's pre-Phase-A
+            # behavior where SB3 parity expects a hard limit.
+            if n_train_queries is not None:
+                self.train_queries_str = self.train_queries_str[:n_train_queries]
+                self.train_depths = self.train_depths[:n_train_queries]
+                self.train_labels = self.train_labels[:n_train_queries]
+                if hasattr(self, "train_queries") and self.train_queries:
+                    self.train_queries = self.train_queries[:n_train_queries]
 
         # 6. Sort (deterministic ordering for parity).
         if sort_data:
@@ -789,35 +793,38 @@ class KnowledgeBase:
             self.materialize(device=device)
 
     def _apply_sort_data(self) -> None:
-        """Alphabetical sort of typed-data lists for deterministic ordering.
+        """Alphabetical sort of facts + rules for deterministic ordering.
 
-        Sorts ``facts_str`` (natural), ``rules_str`` (by head atom) with
-        parallel ``rule_names`` / ``rule_weights`` re-aligned, and
-        per-split ``{split}_queries_str`` with parallel labels / depths.
-        Idempotent; safe to call multiple times.
+        Sorts ``facts_str`` (natural) plus parallel ``self.facts`` if
+        populated, and ``rules_str`` (by head atom) with parallel
+        ``rule_names`` / ``rule_weights`` / ``self.rules`` re-aligned.
+
+        Per-split queries are NOT sorted — file order matters for parity
+        references (notably DpRL's SB3 baseline) which iterate queries in
+        source-file order. Sort the typed parallel lists alongside the
+        str-form so the two views stay aligned. Idempotent.
         """
         if self.facts_str:
-            self.facts_str = sorted(self.facts_str)
+            order = sorted(range(len(self.facts_str)),
+                           key=lambda i: self.facts_str[i])
+            self.facts_str = [self.facts_str[i] for i in order]
+            facts_typed = getattr(self, "facts", None)
+            if facts_typed and len(facts_typed) == len(order):
+                self.facts = [facts_typed[i] for i in order]
         if self.rules_str:
+            # Sort by HEAD only (head_tuple). Stable sort preserves the
+            # original (file) order across rules with the same head — DpRL's
+            # SB3 parity reference relies on this for deterministic rule
+            # selection in the env. Including body in the key would shuffle
+            # same-head rules.
             order = sorted(range(len(self.rules_str)),
-                           key=lambda i: (self.rules_str[i][0],
-                                          tuple((b for atom in self.rules_str[i][1] for b in atom))))
+                           key=lambda i: self.rules_str[i][0])
             self.rules_str = [self.rules_str[i] for i in order]
             self.rule_names = [self.rule_names[i] for i in order]
             self.rule_weights = [self.rule_weights[i] for i in order]
-        # Per-split queries: keep parallel label/depth arrays aligned.
-        for split in ("train", "valid", "test"):
-            queries = getattr(self, f"{split}_queries_str", [])
-            if not queries:
-                continue
-            labels = getattr(self, f"{split}_labels", [])
-            depths = getattr(self, f"{split}_depths", [])
-            order = sorted(range(len(queries)), key=lambda i: queries[i])
-            setattr(self, f"{split}_queries_str", [queries[i] for i in order])
-            if labels:
-                setattr(self, f"{split}_labels", [labels[i] for i in order])
-            if depths:
-                setattr(self, f"{split}_depths", [depths[i] for i in order])
+            rules_typed = getattr(self, "rules", None)
+            if rules_typed and len(rules_typed) == len(order):
+                self.rules = [rules_typed[i] for i in order]
 
     def materialize(
         self,
@@ -825,6 +832,7 @@ class KnowledgeBase:
         device: Optional[Any] = None,
         entity_id_fn: Optional[Any] = None,
         relation_id_fn: Optional[Any] = None,
+        include_rules: bool = True,
     ) -> None:
         """Build tensor versions of facts, rules, and queries.
 
@@ -836,8 +844,11 @@ class KnowledgeBase:
         Populates these attributes on ``self``:
 
         - ``facts_t: LongTensor[F, 3]``
-        - ``rules_t: LongTensor[R, max_body, 3]`` (body atoms; ``rule_lens_t``
-          gives the unpadded length per row)
+        - ``rules_t: LongTensor[R, max_body, 3]`` (body atoms; only when
+          ``include_rules`` is True — rule atoms with variable arguments
+          can't be encoded by ``entity_id_fn``, so consumers with variable
+          rules pass ``include_rules=False`` and tensorize rules
+          themselves).
         - ``rule_lens_t: LongTensor[R]``
         - ``rules_heads_t: LongTensor[R, 3]``
         - per-split: ``train_queries_t``, ``valid_queries_t``, ``test_queries_t``
@@ -871,7 +882,11 @@ class KnowledgeBase:
             self.facts_t = torch.empty((0, 3), dtype=torch.long, device=device)
 
         # Rules: pack body atoms into [R, max_body, 3]; head into [R, 3].
-        if self.rules_str:
+        # Skipped when ``include_rules=False`` — for consumers whose rules
+        # contain variables (DpRL) the entity_id_fn can't encode them; those
+        # consumers materialize rules separately via their own machinery
+        # (IndexManager.rules_to_tensor in DpRL's case).
+        if self.rules_str and include_rules:
             max_body = max((len(body) for _, body in self.rules_str), default=0)
             max_body = max(1, max_body)
             R = len(self.rules_str)
@@ -910,24 +925,25 @@ class KnowledgeBase:
             setattr(self, f"{split}_depths_t", d_t)
 
     def build_kg(self, default_domain_name: str = "default") -> None:
-        """Default-domain catch-all: every constant gets a domain.
+        """Default-domain catch-all over a loaded domain file.
 
-        Mutates ``self.domain2entities`` (str-keyed) and ``self.entity2domain``
-        in place. Rebuilds ``self.domain2idx`` / ``self.entity2domain_idx``
-        from the updated str-keyed maps so the id-keyed views stay aligned
-        after the catch-all adds the default-domain entries.
+        Only runs when a real domain file was loaded (i.e.
+        ``self.domain2entities`` is non-empty). For any constant not
+        assigned by the file, appends it to the ``default_domain_name``
+        bucket and updates ``self.entity2domain``. Then rebuilds
+        ``self.domain2idx`` / ``self.entity2domain_idx`` and
+        ``self.head_domain`` / ``self.tail_domain`` from the updated
+        string-keyed maps.
 
-        If a real ``domain2constants.txt`` was loaded by :meth:`_load_dataset`,
-        any constants missing from it are appended to the default-domain
-        bucket here. If no domain file was loaded, EVERY constant lands
-        in the default-domain bucket — datasets become a single-domain
-        view with no domain-restricted corruption (``use_domain_eval``
-        stays at its load-time value, which is False for these datasets).
-
-        Per-relation domain restriction (``head_domain`` / ``tail_domain``)
-        is rebuilt from the updated id-keyed maps so the sampler /
-        evaluator see the catch-all entries.
+        For datasets WITHOUT a domain file, no-op: domain2entities stays
+        empty, the sampler sees no domain restriction (KGE-standard
+        behavior), and parity references that don't load domains stay
+        consistent with the canonical id space.
         """
+        if not self.domain2entities:
+            # No real domain file loaded — nothing to catch up with.
+            return
+
         # Catch-all over alphabetical self.constants for determinism.
         self.domain2entities.setdefault(default_domain_name, [])
         for c in self.constants:
@@ -951,6 +967,30 @@ class KnowledgeBase:
                 self.train_idx + self.valid_idx + self.test_idx,
                 self.entity2domain_idx, self.domain2idx,
             )
+
+    def build_domain_idx(self, entity_id_map: Optional[Dict[str, int]] = None) -> None:
+        """Rebuild id-keyed domain views from the string-keyed mapping.
+
+        ``self.domain2entities`` (str → str list) is the canonical source.
+        This method populates ``self.domain2idx`` (str → int list) and
+        ``self.entity2domain_idx`` (int → str) using either ``self.entity2id``
+        (default) or a custom ``entity_id_map`` (e.g. DpRL's
+        ``IndexManager.constant_str2idx`` which has a +1 padding shift).
+
+        Skip entities not present in the id map.
+        """
+        ent_map = self.entity2id if entity_id_map is None else entity_id_map
+        self.domain2idx = {
+            dom: [ent_map[e] for e in entities if e in ent_map]
+            for dom, entities in self.domain2entities.items()
+        }
+        # Drop empty buckets (caller-friendly).
+        self.domain2idx = {k: v for k, v in self.domain2idx.items() if v}
+        self.entity2domain_idx = {
+            ent_map[e]: d
+            for e, d in self.entity2domain.items()
+            if e in ent_map
+        }
 
     # ---- convenience accessors ----------------------------------------
 
