@@ -1,9 +1,9 @@
-"""Tests for KGEDatasetHandler — base loader + convenience methods."""
+"""Tests for KnowledgeBase — base loader + convenience methods."""
 from __future__ import annotations
 
 import torch
 
-from kge_kernels.data import KGEDatasetHandler
+from kge_kernels.data import KnowledgeBase
 from kge_kernels.scoring import Sampler
 
 
@@ -20,7 +20,7 @@ def _write_tiny_dataset(tmp_path):
 
 def test_handler_loads_canonical_pipeline(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     # Alphabetical id assignment: alice=0, bob=1, carol=2, dave=3, eve=4
     assert h.entity2id == {"alice": 0, "bob": 1, "carol": 2, "dave": 3, "eve": 4}
     assert h.relation2id == {"knows": 0}
@@ -34,7 +34,7 @@ def test_handler_loads_canonical_pipeline(tmp_path):
 
 def test_handler_split_idx_returns_indexed_triples(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     assert h.split_idx("train") == h.train_idx
     assert h.split_idx("valid") == h.valid_idx
     assert h.split_idx("test") == h.test_idx
@@ -43,7 +43,7 @@ def test_handler_split_idx_returns_indexed_triples(tmp_path):
 
 def test_build_sampler_uses_loaded_id_space(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     sampler = h.build_sampler()
     assert isinstance(sampler, Sampler)
     assert sampler.num_entities == h.num_entities
@@ -61,7 +61,7 @@ def test_build_sampler_picks_up_domain_info(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
     base = tmp_path / name
     (base / "domain.txt").write_text("people alice bob carol\nothers dave eve\n")
-    h = KGEDatasetHandler(name, base_path, domain_file="domain.txt")
+    h = KnowledgeBase(name, base_path, domain_file="domain.txt")
     sampler = h.build_sampler()
     # Domain-restricted corruption: tail of (knows, alice, bob) stays in 'people'.
     pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
@@ -86,11 +86,11 @@ def test_domain_file_must_be_explicit(tmp_path):
     base = tmp_path / name
     (base / "domain2constants.txt").write_text("people alice bob carol\nothers dave eve\n")
     # Without explicit arg: not loaded.
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     assert not h.use_domain_eval
     assert h.domain2entities == {}
     # Explicit: loaded.
-    h2 = KGEDatasetHandler(name, base_path, domain_file="domain2constants.txt")
+    h2 = KnowledgeBase(name, base_path, domain_file="domain2constants.txt")
     assert h2.use_domain_eval
     assert "people" in h2.domain2entities
 
@@ -104,7 +104,7 @@ def test_build_kg_catch_all_when_no_domain_file(tmp_path):
     """Without a domain file, every constant lands in the default-domain
     bucket and id-keyed views are populated."""
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     h.build_kg(default_domain_name="default")
     assert "default" in h.domain2entities
     # All 5 constants in the catch-all
@@ -123,7 +123,7 @@ def test_build_kg_appends_missing_to_default_when_partial_domain_file(tmp_path):
     base = tmp_path / name
     # Only alice and bob are typed; carol/dave/eve are not.
     (base / "domain2constants.txt").write_text("people alice bob\n")
-    h = KGEDatasetHandler(name, base_path, domain_file="domain2constants.txt")
+    h = KnowledgeBase(name, base_path, domain_file="domain2constants.txt")
     h.build_kg(default_domain_name="default")
     assert h.entity2domain["alice"] == "people"
     assert h.entity2domain["bob"] == "people"
@@ -141,7 +141,7 @@ def test_build_kg_appends_missing_to_default_when_partial_domain_file(tmp_path):
 
 def test_materialize_facts_tensor(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     h.facts_str = list(h.known_facts)  # convert from base str-tuples
     h.materialize()
     assert h.facts_t.shape == (1, 3)  # one fact: (knows, dave, eve)
@@ -154,7 +154,7 @@ def test_materialize_facts_tensor(tmp_path):
 def test_materialize_rules_tensor(tmp_path):
     """Rules tensor packs body atoms; rule_lens gives unpadded count."""
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     h.rules_str = [
         # head: knows(alice, bob); body: knows(alice, carol)
         (("knows", "alice", "bob"), [("knows", "alice", "carol")]),
@@ -170,7 +170,7 @@ def test_materialize_rules_tensor(tmp_path):
 
 def test_materialize_queries_tensor(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     h.train_queries_str = [("knows", "alice", "bob"), ("knows", "bob", "carol")]
     h.train_labels = [1, 0]
     h.train_depths = [-1, 2]
@@ -183,7 +183,7 @@ def test_materialize_queries_tensor(tmp_path):
 def test_materialize_with_id_fn_callbacks(tmp_path):
     """Custom id-fn callbacks remap into a different id space (e.g. shifted)."""
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     h.facts_str = list(h.known_facts)
     # Shift entity ids by +1 (DpRL-style: id 0 reserved for padding)
     h.materialize(
@@ -202,7 +202,7 @@ def test_materialize_with_id_fn_callbacks(tmp_path):
 
 def test_discover_vocabulary_finalizes_set_views(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
-    h = KGEDatasetHandler(name, base_path)
+    h = KnowledgeBase(name, base_path)
     # Pretend a rule introduced a new predicate "ancestor" not in any fact
     rules_str = [(("ancestor", "X", "Y"), [("knows", "X", "Y")])]
     h.discover_vocabulary(rules_str=rules_str, queries_str=[], constants=set(), predicates=set())

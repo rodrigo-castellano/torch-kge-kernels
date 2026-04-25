@@ -2,7 +2,7 @@
 
 Pure-Python helpers shared by DpRL, torch-ns, and any future KGE consumer.
 
-The high-level entry point is :class:`KGEDatasetHandler` — an extensible
+The high-level entry point is :class:`KnowledgeBase` — an extensible
 base class that runs the full canonical loading pipeline (vocabulary
 discovery, split encoding, filter maps, domain mappings) so consumers
 only need to subclass and add their domain-specific structures.
@@ -23,7 +23,7 @@ control:
 """
 from __future__ import annotations
 
-from .handler import KGEDatasetHandler, MaterializedSplit
+from .knowledge_base import KnowledgeBase, MaterializedSplit
 from .loaders import (
     TripleExample,
     detect_triple_format,
@@ -50,7 +50,7 @@ from .transforms import (
 )
 
 __all__ = [
-    "KGEDatasetHandler",
+    "KnowledgeBase",
     "MaterializedSplit",
     "TripleExample",
     "add_reciprocal_triples",

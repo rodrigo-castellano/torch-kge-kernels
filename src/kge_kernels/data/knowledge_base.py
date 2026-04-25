@@ -18,7 +18,7 @@ in slightly different ways:
 5. ``build_filter_maps`` + ``build_relation_domains_from_file`` for
    filtered ranking and domain-aware corruption.
 
-:class:`KGEDatasetHandler` runs all five steps in ``__init__`` and exposes
+:class:`KnowledgeBase` runs all five steps in ``__init__`` and exposes
 the result as plain attributes. Consumers inherit and bolt their own
 specialized representation on top in their own ``__init__``:
 
@@ -79,7 +79,7 @@ class MaterializedSplit:
 
 
 @dataclass
-class KGEDatasetHandler:
+class KnowledgeBase:
     """Base loader for the standard tkk KGE dataset shape.
 
     Subclasses pass ``dataset_name``, ``base_path`` and optional file-name
@@ -1029,4 +1029,4 @@ class KGEDatasetHandler:
         raise ValueError(f"Unknown split: {split!r}")
 
 
-__all__ = ["KGEDatasetHandler", "MaterializedSplit"]
+__all__ = ["KnowledgeBase", "MaterializedSplit"]
