@@ -28,7 +28,7 @@ from .checkpoints import (
     unwrap_model,
     write_json_payload,
 )
-from .batching import iterate_epoch_batches
+from .batching import iterate_epoch_batches, pick_query_batch
 from .config import KGETrainConfig, TrainArtifacts, TrainConfig
 from .epoch import clear_train_cache, train_epoch
 from .loop import (
@@ -51,6 +51,7 @@ __all__ = [
     "TripleDataset",
     "clear_train_cache",
     "iterate_epoch_batches",
+    "pick_query_batch",
     "make_cosine_warmup_scheduler",
     "set_seed",
     "train_epoch",

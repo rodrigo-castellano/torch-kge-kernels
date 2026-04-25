@@ -1,10 +1,19 @@
-"""Shared per-epoch training batch iterator.
+"""Shared batch acquisition primitives for training and env loops.
 
-Used by tkk's BCE training pipeline and by ns's training loop. Both
-consume the same per-epoch schedule: sample all negatives once, shuffle,
-iterate in fixed-size batches. The iterator yields positive and negative
-tensors in their structured shape so callers (KGE-only, reasoner) can
-flatten or reshape as they need.
+Two complementary access patterns:
+
+- ``iterate_epoch_batches`` — SL pattern. Pre-samples all negatives once,
+  shuffles via ``torch.randperm``, yields ``(pos, neg, valid)`` per batch
+  for full epoch coverage. Used by tkk's BCE training pipeline and by ns's
+  training loop.
+
+- ``pick_query_batch`` — RL/episodic pattern. Picks ``B`` queries from a
+  pool in one shot (weighted multinomial / round-robin / uniform). No
+  corruption; callers (e.g. DpRL's ``EnvVec.reset``) own the curriculum
+  decision and call ``Sampler.corrupt`` themselves for negatives.
+
+Raw triple corruption itself stays in :class:`kge_kernels.scoring.Sampler`
+— this module never produces negatives directly.
 """
 from __future__ import annotations
 
@@ -72,4 +81,51 @@ def iterate_epoch_batches(
         yield train_triples[idx], neg_epoch[idx], valid_epoch[idx]
 
 
-__all__ = ["iterate_epoch_batches"]
+def pick_query_batch(
+    queries: Tensor,
+    batch_size: int,
+    *,
+    sampling_weights: Optional[Tensor] = None,
+    ptrs: Optional[Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+    """Pick a batch of queries from a pool of size ``N``.
+
+    Selection mode (priority):
+        1. Weighted multinomial — if ``sampling_weights`` is given.
+        2. Round-robin — else if ``ptrs`` is given (``indices = ptrs % N``).
+        3. Uniform random — fallback.
+
+    Pointer advance: when ``ptrs`` is given, the returned ``new_ptrs`` is
+    ``(ptrs + 1) % N`` regardless of which mode produced the indices. The
+    advance is always by 1; callers needing custom advance semantics
+    (slotted curriculum, masked done envs) should manage ptrs themselves.
+
+    Args:
+        queries: ``[N, *]`` pool tensor (any per-row shape).
+        batch_size: number of queries to pick.
+        sampling_weights: optional ``[N]`` weights for weighted sampling.
+        ptrs: optional ``[B]`` long tensor of per-slot pointers.
+        generator: optional ``torch.Generator`` for randint / multinomial.
+
+    Returns:
+        ``(batch [B, *], indices [B], new_ptrs [B] | None)``. ``new_ptrs``
+        is ``None`` when ``ptrs`` was not supplied.
+    """
+    N = queries.shape[0]
+    device = queries.device
+
+    if sampling_weights is not None:
+        indices = torch.multinomial(
+            sampling_weights, batch_size, replacement=True, generator=generator
+        )
+    elif ptrs is not None:
+        indices = ptrs % N
+    else:
+        indices = torch.randint(0, N, (batch_size,), device=device, generator=generator)
+
+    new_ptrs = (ptrs + 1) % N if ptrs is not None else None
+    return queries[indices], indices, new_ptrs
+
+
+__all__ = ["iterate_epoch_batches", "pick_query_batch"]
