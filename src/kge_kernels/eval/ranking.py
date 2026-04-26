@@ -59,19 +59,19 @@ def compute_ranks(
         return greater + 1.0 + tied_won
 
 
-def ranking_metrics(
+def metrics_from_ranks(
     ranks: Tensor,
     ks: Tuple[int, ...] = (1, 3, 10),
 ) -> Dict[str, float]:
-    """Compute MRR and Hits@k from a rank tensor.
+    """Summarize a rank tensor into MRR and Hits@k.
 
     Args:
         ranks: Float tensor of 1-based ranks (shape ``[N]``).
-        ks: Cutoffs for Hits@k. Default ``(1, 3, 10)`` matches the legacy
-            output keys ``Hits@1``, ``Hits@3``, ``Hits@10``.
+        ks: Cutoffs for Hits@k. Default ``(1, 3, 10)`` produces
+            ``Hits@1``, ``Hits@3``, ``Hits@10``.
 
     Returns:
-        Dict with key ``MRR`` and one ``Hits@{k}`` entry per ``k``.
+        Dict with ``MRR`` and one ``Hits@{k}`` entry per ``k``.
     """
     if ranks.numel() == 0:
         out: Dict[str, float] = {"MRR": 0.0}
@@ -83,36 +83,6 @@ def ranking_metrics(
     for k in ks:
         results[f"Hits@{k}"] = (ranks <= k).double().mean().item()
     return results
-
-
-def _ranks_from_labeled_predictions(
-    y_pred: Tensor,
-    y_true: Tensor,
-    pad_value: int = -1,
-    positive_value: int = 1,
-) -> Tuple[Tensor, Tensor]:
-    """Compute per-row ranks from ``[B, N]`` score/label pairs.
-
-    Finds the best-scored positive per row and delegates to
-    :func:`compute_ranks`. Rows without a positive are flagged as invalid.
-
-    Args:
-        y_pred: ``[B, N]`` scores.
-        y_true: ``[B, N]`` labels (``positive_value`` = correct,
-            ``pad_value`` = ignored, anything else = distractor).
-
-    Returns:
-        ``(ranks, valid)`` both ``[B]``. Invalid rows should be excluded.
-    """
-    mask = y_true != pad_value
-    is_positive = y_true == positive_value
-    valid = mask.any(dim=1) & is_positive.any(dim=1)
-
-    # Find index of the best-scored positive per row
-    best_pos_idx = y_pred.masked_fill(~is_positive, float("-inf")).argmax(dim=1)
-
-    ranks = compute_ranks(y_pred, best_pos_idx, valid_mask=mask)
-    return ranks, valid
 
 
 class StreamingRankingMetrics:
@@ -137,7 +107,7 @@ class StreamingRankingMetrics:
         positive_value: Label value marking positives (default ``1``).
         metric_key: Legacy key name for the MRR output. Set to
             ``"mrrmetric"`` for the lowercase keys used by some codebases;
-            default ``"MRR"`` matches :func:`ranking_metrics`.
+            default ``"MRR"`` matches :func:`metrics_from_ranks`.
     """
 
     def __init__(
@@ -185,6 +155,10 @@ class StreamingRankingMetrics:
     def update(self, y_pred: Tensor, y_true: Tensor) -> None:
         """Accumulate one batch without any GPU→CPU sync.
 
+        ``y_true`` is a per-cell label tensor: ``positive_value`` marks
+        positives, ``pad_value`` marks ignored cells, anything else is a
+        distractor. We pick the best-scored positive per row and rank it.
+
         All operations run in ``y_pred.dtype`` (typically float32) with
         no dtype promotion. The in-place ``masked_fill_`` avoids
         allocating a fresh tensor per batch.
@@ -193,12 +167,13 @@ class StreamingRankingMetrics:
             self._init(y_pred.device)
         assert self._mrr_sum is not None and self._count is not None
 
-        ranks, valid = _ranks_from_labeled_predictions(
-            y_pred,
-            y_true,
-            pad_value=self.pad_value,
-            positive_value=self.positive_value,
-        )
+        # Pick the highest-scored positive per row, rank it among valid cells.
+        valid_cells = y_true != self.pad_value
+        is_positive = y_true == self.positive_value
+        valid = valid_cells.any(dim=1) & is_positive.any(dim=1)
+        best_pos_idx = y_pred.masked_fill(~is_positive, float("-inf")).argmax(dim=1)
+        ranks = compute_ranks(y_pred, best_pos_idx, valid_mask=valid_cells)
+
         inv_ranks = (1.0 / ranks).masked_fill_(~valid, 0.0)
         self._mrr_sum.add_(inv_ranks.sum())
         self._count.add_(valid.sum())
@@ -314,7 +289,7 @@ def zscore_fusion(
 __all__ = [
     "StreamingRankingMetrics",
     "compute_ranks",
-    "ranking_metrics",
+    "metrics_from_ranks",
     "rrf",
     "zscore_fusion",
 ]

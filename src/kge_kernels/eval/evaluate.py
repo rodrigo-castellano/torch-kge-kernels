@@ -420,7 +420,7 @@ def evaluate(
     """
     del chunk_size  # superseded — the model owns scoring chunking
 
-    from .ranking import compute_ranks, ranking_metrics
+    from .ranking import compute_ranks, metrics_from_ranks
 
     if device is None:
         device = next(model.parameters()).device
@@ -498,7 +498,7 @@ def evaluate(
 
         if not all_ranks:
             return {"MRR": 0.0, "Hits@1": 0.0, "Hits@3": 0.0, "Hits@10": 0.0}
-        return ranking_metrics(torch.cat(all_ranks))
+        return metrics_from_ranks(torch.cat(all_ranks))
     finally:
         if was_training and hasattr(model, "train") and callable(model.train):
             model.train()

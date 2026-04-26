@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import torch
 from torch import Tensor, nn
 
-from .ranking import compute_ranks, ranking_metrics
+from .ranking import compute_ranks, metrics_from_ranks
 
 
 def _unwrap_model(model: nn.Module) -> nn.Module:
@@ -182,7 +182,7 @@ def evaluate_ranking(
 
     if not all_ranks_list:
         return {"MRR": 0.0, "Hits@1": 0.0, "Hits@3": 0.0, "Hits@10": 0.0}
-    return ranking_metrics(torch.cat(all_ranks_list))
+    return metrics_from_ranks(torch.cat(all_ranks_list))
 
 
 def evaluate_checkpoint(

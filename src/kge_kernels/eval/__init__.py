@@ -13,7 +13,7 @@ from .pool import CandidatePool
 from .ranking import (
     StreamingRankingMetrics,
     compute_ranks,
-    ranking_metrics,
+    metrics_from_ranks,
     rrf,
     zscore_fusion,
 )
@@ -32,7 +32,7 @@ __all__ = [
     "evaluate",
     "evaluate_checkpoint",
     "evaluate_ranking",
-    "ranking_metrics",
+    "metrics_from_ranks",
     "recommended_eval_batch_size",
     "rrf",
     "zscore_fusion",

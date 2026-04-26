@@ -1,6 +1,6 @@
 import torch
 
-from kge_kernels.eval import compute_ranks, ranking_metrics
+from kge_kernels.eval import compute_ranks, metrics_from_ranks
 
 
 def test_compute_ranks_average():
@@ -54,9 +54,9 @@ def test_compute_ranks_matrix_with_ties():
     assert ranks[0].item() == 2.0
 
 
-def test_ranking_metrics():
+def test_metrics_from_ranks():
     ranks = torch.tensor([1.0, 2.0, 5.0, 11.0])
-    metrics = ranking_metrics(ranks)
+    metrics = metrics_from_ranks(ranks)
     expected_mrr = (1 / 1.0 + 1 / 2.0 + 1 / 5.0 + 1 / 11.0) / 4
     assert abs(metrics["MRR"] - expected_mrr) < 1e-6
     assert metrics["Hits@1"] == 0.25

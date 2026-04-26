@@ -55,7 +55,7 @@ from .eval import (
     evaluate,
     evaluate_checkpoint,
     evaluate_ranking,
-    ranking_metrics,
+    metrics_from_ranks,
     rrf,
     zscore_fusion,
 )
@@ -164,7 +164,7 @@ __all__ = [
     "evaluate",
     "evaluate_checkpoint",
     "evaluate_ranking",
-    "ranking_metrics",
+    "metrics_from_ranks",
     "rrf",
     "zscore_fusion",
     # Scoring pipeline
