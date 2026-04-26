@@ -1,23 +1,29 @@
 """Default scorer + memory heuristic for tkk-native KGE models.
 
-Free functions, not methods. The :class:`~kge_kernels.eval.RankingEvaluator`
-takes any callable matching :type:`~kge_kernels.eval.ScoreFn`; for a plain
-KGE model with a ``score(h, r, t)`` API, wrap it in :func:`kge_default_scorer`.
-For a model that has its own ``eval_scores`` method (ns ``ReasonerModel``,
-DpRL ``PPOScorer``), pass the bound method directly.
+The model layer owns these because both functions are about the model:
+
+- :func:`kge_default_scorer` knows the ``model.score(h, r, t)`` API and
+  adapts it to the evaluator's
+  ``ScoreFn`` shape ``(q_buf [B, 3], pool_buf [B, P], mode) -> [B, P]``.
+- :func:`recommended_eval_batch_size` reads ``model.dim`` /
+  ``model.half_dim`` to pick a safe per-batch memory budget.
+
+The evaluator (:class:`kge_kernels.eval.RankingEvaluator`) is the
+consumer; it never has to know how a tkk model scores or how big a
+batch it can handle — the model layer owns those facts.
 """
 from __future__ import annotations
 
-from torch import Tensor, nn
+from typing import Literal
 
-from .candidates import Mode
+from torch import Tensor, nn
 
 
 def kge_default_scorer(
     model: nn.Module,
     q_buf: Tensor,     # [B, 3]  int64, columns (r, h, t)
     pool_buf: Tensor,  # [B, P]  int64, entity indices to score
-    mode: Mode,
+    mode: Literal["head", "tail"],
 ) -> Tensor:           # [B, P]  float
     """Default scorer for tkk-native KGE models with ``model.score(h, r, t)``.
 

@@ -85,7 +85,7 @@ def _build_ranking_evaluator(
     training sampler is built; reused for every validation pass and
     final eval. Compile cache lives on this instance."""
     from ..eval.candidates import SamplerCandidates
-    from ..eval.eval_hooks import kge_default_scorer, recommended_eval_batch_size
+    from ..models.scorer import kge_default_scorer, recommended_eval_batch_size
     from ..eval.ranking_evaluator import RankingEvaluator
 
     eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None

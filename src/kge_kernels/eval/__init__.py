@@ -2,7 +2,6 @@
 
 from .candidates import CandidateSource, Mode, SamplerCandidates
 from .checkpoint import evaluate_checkpoint
-from .eval_hooks import kge_default_scorer, recommended_eval_batch_size
 from .pool import CandidatePool
 from .ranking import (
     compute_ranks,
@@ -24,9 +23,7 @@ __all__ = [
     "ScoreFn",
     "compute_ranks",
     "evaluate_checkpoint",
-    "kge_default_scorer",
     "metrics_from_ranks",
-    "recommended_eval_batch_size",
     "rrf",
     "zscore_fusion",
 ]

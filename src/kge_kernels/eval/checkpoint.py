@@ -12,7 +12,7 @@ from typing import Dict
 import torch
 
 from .candidates import SamplerCandidates
-from .eval_hooks import kge_default_scorer, recommended_eval_batch_size
+from ..models.scorer import kge_default_scorer, recommended_eval_batch_size
 from .ranking_evaluator import RankingEvaluator
 
 

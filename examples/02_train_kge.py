@@ -19,7 +19,8 @@ from typing import List, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from kge_kernels.eval import RankingEvaluator, SamplerCandidates, kge_default_scorer
+from kge_kernels.eval import RankingEvaluator, SamplerCandidates
+from kge_kernels.models import kge_default_scorer
 from kge_kernels.scoring import Sampler
 from kge_kernels.losses import NSSALoss
 from kge_kernels.models import TransE

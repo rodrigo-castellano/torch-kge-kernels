@@ -54,7 +54,6 @@ from .eval import (
     SamplerCandidates,
     compute_ranks,
     evaluate_checkpoint,
-    kge_default_scorer,
     metrics_from_ranks,
     rrf,
     zscore_fusion,
@@ -141,6 +140,8 @@ from .models import (
     TuckER,
     build_model,
     build_training_model,
+    kge_default_scorer,
+    recommended_eval_batch_size,
 )
 
 # Scoring pipeline (sampler, partial, types). KGE scoring itself is the
@@ -163,7 +164,6 @@ __all__ = [
     "SamplerCandidates",
     "compute_ranks",
     "evaluate_checkpoint",
-    "kge_default_scorer",
     "metrics_from_ranks",
     "rrf",
     "zscore_fusion",
@@ -254,4 +254,6 @@ __all__ = [
     "TuckER",
     "build_model",
     "build_training_model",
+    "kge_default_scorer",
+    "recommended_eval_batch_size",
 ]

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import torch
 
-from kge_kernels.eval import RankingEvaluator, SamplerCandidates, kge_default_scorer
+from kge_kernels.eval import RankingEvaluator, SamplerCandidates
+from kge_kernels.models import kge_default_scorer
 from kge_kernels.models import TransE
 from kge_kernels.scoring import Sampler
 

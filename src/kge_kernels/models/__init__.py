@@ -13,6 +13,7 @@ from .distmult import DistMult
 from .factory import build_model, build_training_model
 from .mode import ModE
 from .rotate import RotatE
+from .scorer import kge_default_scorer, recommended_eval_batch_size
 from .transe import TransE
 from .tucker import TuckER
 
@@ -27,4 +28,6 @@ __all__ = [
     "TuckER",
     "build_model",
     "build_training_model",
+    "kge_default_scorer",
+    "recommended_eval_batch_size",
 ]

@@ -8,10 +8,10 @@ from kge_kernels.eval import (
     EvalResults,
     RankingEvaluator,
     SamplerCandidates,
-    kge_default_scorer,
     rrf,
     zscore_fusion,
 )
+from kge_kernels.models import kge_default_scorer
 from kge_kernels.scoring import Sampler
 
 

@@ -46,7 +46,7 @@ class _RotateBase(KGEModel):
     BCE-with-logits — the raw RotatE score ``γ - ||h rot r - t||`` is
     large enough that BCE-with-logits saturates the gradient on confident
     negatives. Memory-aware eval batch sizing is handled by
-    :func:`kge_kernels.eval.recommended_eval_batch_size`, which detects
+    :func:`kge_kernels.models.recommended_eval_batch_size`, which detects
     the RotatE family via the ``half_dim`` attribute.
 
     Subclasses must set ``self.relation_embeddings`` (or ``rel_phase``)

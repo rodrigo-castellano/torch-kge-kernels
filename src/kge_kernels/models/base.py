@@ -35,9 +35,9 @@ Optional class flag:
 External orchestration (free functions over a model):
   - :func:`kge_kernels.training.train_step` — mask-aware BCE loss
     (unified compile boundary).
-  - :func:`kge_kernels.eval.eval_scores` — gather candidates from
-    exhaustive ``score`` (compile boundary).
-  - :func:`kge_kernels.eval.recommended_eval_batch_size` — memory-aware
+  - :func:`kge_kernels.models.kge_default_scorer` — adapt ``score`` to
+    the evaluator's ``(q_buf, pool_buf, mode) -> [B, P]`` ScoreFn shape.
+  - :func:`kge_kernels.models.recommended_eval_batch_size` — memory-aware
     batch-size hint.
 
 Subclasses with a different atom layout (e.g. ns's ``ReasonerModel``
