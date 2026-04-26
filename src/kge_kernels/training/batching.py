@@ -50,8 +50,8 @@ def iterate_epoch_batches(
         corrupt_modes: One or more sampler modes, e.g. ``["head", "tail"]``
             for head-and-tail training, or ``["bernoulli"]`` / ``["tail"]``.
         generator: Optional ``torch.Generator`` for reproducible shuffling.
-        filter: Pass through to ``Sampler.corrupt_with_mask``.
-        unique: Pass through to ``Sampler.corrupt_with_mask``.
+        filter: Pass through to ``Sampler.corrupt``.
+        unique: Pass through to ``Sampler.corrupt``.
 
     Yields:
         ``(pos [B, 3], neg [B, K_total, 3], valid [B, K_total])``, where
@@ -65,9 +65,9 @@ def iterate_epoch_batches(
     all_negs: List[Tensor] = []
     all_valid: List[Tensor] = []
     for mode in corrupt_modes:
-        neg, valid = sampler.corrupt_with_mask(
+        neg, valid = sampler.corrupt(
             train_triples, num_negatives=num_negatives, mode=mode,
-            filter=filter, unique=unique,
+            filter=filter, unique=unique, return_mask=True,
         )
         all_negs.append(neg)
         all_valid.append(valid)

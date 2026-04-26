@@ -1,9 +1,9 @@
 import torch
 
-from kge_kernels.scoring import Sampler, compute_bernoulli_probs, corrupt
+from kge_kernels.scoring import BernoulliSampler, Sampler
 
 
-def test_corrupt_with_mask_supports_zero_ids():
+def test_corrupt_supports_zero_ids():
     known = torch.tensor(
         [
             [0, 0, 0],
@@ -21,8 +21,7 @@ def test_corrupt_with_mask_supports_zero_ids():
     )
 
     pos = torch.tensor([[0, 0, 0]], dtype=torch.long)
-    out = corrupt(sampler, pos, num_corruptions=None, mode="tail")
-    neg, valid = out.negatives, out.valid_mask
+    neg, valid = sampler.corrupt(pos, num_negatives=None, mode="tail", return_mask=True)
 
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert (0, 0, 0) not in rows
@@ -43,8 +42,7 @@ def test_domain_sampling_stays_in_domain():
     )
 
     pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
-    out = corrupt(sampler, pos, num_corruptions=None, mode="head")
-    neg, valid = out.negatives, out.valid_mask
+    neg, valid = sampler.corrupt(pos, num_negatives=None, mode="head", return_mask=True)
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert rows == [(0, 2, 1)]
 
@@ -62,21 +60,36 @@ def test_exhaustive_domain_sampling_does_not_leak_padding_entity_zero():
     )
 
     pos = torch.tensor([[0, 1, 2]], dtype=torch.long)
-    out = corrupt(sampler, pos, num_corruptions=None, mode="tail")
-    neg, valid = out.negatives, out.valid_mask
+    neg, valid = sampler.corrupt(pos, num_negatives=None, mode="tail", return_mask=True)
     rows = [tuple(triple.tolist()) for triple, keep in zip(neg[0], valid[0]) if keep]
     assert rows == [(0, 1, 3)]
 
 
-def test_bernoulli_corruption_mode():
-    """Bernoulli mode produces valid corruptions and respects the shape contract."""
+def test_corrupt_default_returns_negs_only():
+    """Default ``return_mask=False`` returns just the negatives tensor."""
+    known = torch.tensor([[0, 0, 1]], dtype=torch.long)
+    sampler = Sampler.from_data(
+        all_known_triples_idx=known,
+        num_entities=4,
+        num_relations=1,
+        device=torch.device("cpu"),
+        min_entity_idx=0,
+    )
+    pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
+    out = sampler.corrupt(pos, num_negatives=2, mode="tail")
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == (1, 2, 3)
+
+
+def test_bernoulli_sampler_produces_valid_corruptions():
+    """BernoulliSampler.corrupt yields per-triple coin-flipped negatives."""
     known = torch.tensor([
         [0, 0, 1],
         [0, 1, 2],
         [1, 2, 0],
     ], dtype=torch.long)
-    bern_probs = compute_bernoulli_probs(known, num_relations=2)
-    sampler = Sampler.from_data(
+    bern_probs = BernoulliSampler.compute_probs(known, num_relations=2)
+    sampler = BernoulliSampler.from_data(
         all_known_triples_idx=known,
         num_entities=3,
         num_relations=2,
@@ -86,9 +99,8 @@ def test_bernoulli_corruption_mode():
     )
 
     pos = torch.tensor([[0, 0, 1], [1, 2, 0]], dtype=torch.long)
-    neg, valid = sampler.corrupt_with_mask(
-        pos, num_negatives=5, mode="bernoulli",
-        filter=False, unique=False,
+    neg, valid = sampler.corrupt(
+        pos, num_negatives=5, filter=False, unique=False, return_mask=True,
     )
     assert neg.shape == (2, 5, 3)
     assert valid.shape == (2, 5)
@@ -98,36 +110,15 @@ def test_bernoulli_corruption_mode():
             assert neg[i, j, 0].item() == pos[i, 0].item()
 
 
-def test_bernoulli_without_probs_raises():
-    """Bernoulli mode without bern_probs raises a clear error."""
-    known = torch.tensor([[0, 0, 1]], dtype=torch.long)
-    sampler = Sampler.from_data(
-        all_known_triples_idx=known,
-        num_entities=3,
-        num_relations=1,
-        device=torch.device("cpu"),
-        min_entity_idx=0,
-    )
-    pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
-    try:
-        sampler.corrupt_with_mask(pos, num_negatives=2, mode="bernoulli")
-        assert False, "Expected RuntimeError"
-    except RuntimeError:
-        pass
-
-
-def test_compute_bernoulli_probs():
-    """compute_bernoulli_probs returns probabilities in valid range."""
+def test_compute_probs():
+    """compute_probs returns probabilities in valid range."""
     triples = torch.tensor([
         [0, 0, 1],  # r=0, h=0, t=1
         [0, 0, 2],  # r=0, h=0, t=2
         [0, 1, 2],  # r=0, h=1, t=2
         [1, 0, 1],  # r=1, h=0, t=1
     ], dtype=torch.long)
-    probs = compute_bernoulli_probs(triples, num_relations=2)
+    probs = BernoulliSampler.compute_probs(triples, num_relations=2)
     assert probs.shape == (2,)
     assert (probs >= 0.05).all()
     assert (probs <= 0.95).all()
-    # Relation 0: 2 unique heads (0,1), 2 unique tails (1,2), 3 triples
-    # tph = 3/2 = 1.5, hpt = 3/2 = 1.5 -> prob = 0.5
-    assert abs(probs[0].item() - 0.5) < 1e-5

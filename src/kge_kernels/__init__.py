@@ -144,14 +144,11 @@ from .models import (
 # Scoring pipeline (sampler, partial, types). KGE scoring itself is the
 # model's own ``score(h, r, t)`` method — see kge_kernels.models.
 from .scoring import (
-    CorruptionOutput,
+    BernoulliSampler,
     LazyPartialScorer,
+    PartialScorer,
     Sampler,
     SamplerConfig,
-    compute_bernoulli_probs,
-    corrupt,
-    precompute_partial_scores,
-    score_partial_atoms,
 )
 
 __all__ = [
@@ -167,14 +164,11 @@ __all__ = [
     "rrf",
     "zscore_fusion",
     # Scoring pipeline
-    "CorruptionOutput",
+    "BernoulliSampler",
     "LazyPartialScorer",
+    "PartialScorer",
     "Sampler",
     "SamplerConfig",
-    "compute_bernoulli_probs",
-    "corrupt",
-    "precompute_partial_scores",
-    "score_partial_atoms",
     # Logging
     "ExperimentSpec",
     "LoggingConfig",

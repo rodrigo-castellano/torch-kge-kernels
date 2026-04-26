@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from kge_kernels.scoring import precompute_partial_scores, score_partial_atoms
+from kge_kernels.scoring import LazyPartialScorer, PartialScorer
 
 
 class _StubModel(nn.Module):
@@ -27,14 +27,14 @@ class _StubModel(nn.Module):
         )
 
 
-def test_precompute_partial_scores_matches_model_maxima():
+def test_partial_scorer_compute_all_matches_model_maxima():
     model = _StubModel()
     pred_remap = torch.tensor([0, 1])
     const_remap = torch.tensor([0, 1, 2])
 
-    max_tail_score, max_head_score = precompute_partial_scores(
-        model, pred_remap, const_remap, batch_chunk=2, sigmoid=False,
-    )
+    scorer = PartialScorer(
+        model, pred_remap, const_remap, constant_no=3, sigmoid=False,
+    ).compute_all(batch_chunk=2)
 
     expected_tail = torch.tensor(
         [
@@ -49,19 +49,39 @@ def test_precompute_partial_scores_matches_model_maxima():
         ]
     )
 
-    assert torch.equal(max_tail_score, expected_tail)
-    assert torch.equal(max_head_score, expected_head)
+    assert torch.equal(scorer.max_tail_score, expected_tail)
+    assert torch.equal(scorer.max_head_score, expected_head)
 
 
-def test_score_partial_atoms_uses_precomputed_tables():
-    max_tail_score = torch.tensor([[0.0, 1.0, 2.0]])
-    max_head_score = torch.tensor([[3.0, 2.0, 1.0]])
-    out = score_partial_atoms(
+def test_score_atoms_uses_precomputed_tables():
+    """``PartialScorer.score_atoms`` reads the lookup tables directly."""
+    scorer = PartialScorer.__new__(PartialScorer)
+    scorer.max_tail_score = torch.tensor([[0.0, 1.0, 2.0]])
+    scorer.max_head_score = torch.tensor([[3.0, 2.0, 1.0]])
+    scorer.constant_no = 3
+    out = scorer.score_atoms(
         preds=torch.tensor([0, 0, 0]),
         args1=torch.tensor([1, 4, 4]),
         args2=torch.tensor([4, 2, 5]),
-        constant_no=3,
-        max_tail_score=max_tail_score,
-        max_head_score=max_head_score,
     )
     assert torch.equal(out, torch.tensor([1.0, 1.0, 0.0]))
+
+
+def test_lazy_scorer_inherits_score_atoms():
+    """LazyPartialScorer is-a PartialScorer (shares score_atoms)."""
+    model = _StubModel()
+    pred_remap = torch.tensor([0, 1])
+    const_remap = torch.tensor([0, 1, 2])
+    lazy = LazyPartialScorer(
+        model, pred_remap, const_remap,
+        constant_no=3, padding_idx=0, true_pred_idx=-1, false_pred_idx=-1,
+        sigmoid=False,
+    )
+    assert isinstance(lazy, PartialScorer)
+    # Tables start zero; score_atoms reads zeros (no fill yet).
+    out = lazy.score_atoms(
+        preds=torch.tensor([0]),
+        args1=torch.tensor([1]),  # bound (≤ constant_no)
+        args2=torch.tensor([5]),  # unbound (> constant_no)
+    )
+    assert out.item() == 0.0

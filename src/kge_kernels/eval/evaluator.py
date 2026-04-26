@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Literal, Optional, Sequence, Set, Tuple
 import torch
 from torch import Tensor, nn
 
-from ..scoring import SupportsCorruptWithMask
+from ..scoring import Sampler
 from .pool import CandidatePool
 from .ranking import compute_ranks, ranking_metrics
 
@@ -110,7 +110,7 @@ class Evaluator:
         tail_filter: Optional[Dict[Tuple[int, int], Set[int]]] = None,
         head_domain: Optional[Dict[int, Set[int]]] = None,
         tail_domain: Optional[Dict[int, Set[int]]] = None,
-        sampler: Optional[SupportsCorruptWithMask] = None,
+        sampler: Optional[Sampler] = None,
         corruption_scheme: Literal["head", "tail", "both"] = "both",
         batch_size: int = 0,
         fusion: Optional[FusionFn] = None,
@@ -322,9 +322,10 @@ class Evaluator:
                     pos_triples = torch.stack([
                         r_tensor.expand(B), heads, tails
                     ], dim=1)
-                    neg, valid_mask = self.sampler.corrupt_with_mask(
+                    neg, valid_mask = self.sampler.corrupt(
                         pos_triples, num_negatives=K, mode=mode,
                         device=self.device, filter=True, unique=False,
+                        return_mask=True,
                     )
                     # neg: [B, K, 3] — extract the corrupted entity column
                     corrupt_col = 1 if mode == "head" else 2

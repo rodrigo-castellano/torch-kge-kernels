@@ -1,105 +1,36 @@
-"""Partial-atom scoring utilities built on top of ``model.score``."""
+"""Partial-atom scoring built on top of ``model.score``.
+
+Two scorer flavours share one interface:
+
+- :class:`PartialScorer` — eager precompute. ``compute_all()`` fills
+  ``[P, E]`` lookup tables for every (pred, entity) pair upfront; cheap
+  per-atom scoring afterwards via :meth:`score_atoms`.
+- :class:`LazyPartialScorer` — incremental fill. Tables start empty;
+  :meth:`ensure_for_derived_states` (or :meth:`ensure`) computes only
+  the (pred, entity) entries the caller actually needs. Same
+  :meth:`score_atoms` lookup. Use this when ``P × E`` is too large to
+  precompute or when only a fraction of pairs are touched per batch.
+
+Both keep ``max_tail_score`` and ``max_head_score`` ``[P_im, E_im]``
+tensors as the lookup tables. ``score_atoms`` reads them; the lazy
+variant updates them on demand.
+"""
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
 
-@torch.no_grad()
-def precompute_partial_scores(
-    model: nn.Module,
-    pred_remap: Tensor,
-    const_remap: Tensor,
-    batch_chunk: int = 64,
-    *,
-    sigmoid: bool = True,
-) -> Tuple[Tensor, Tensor]:
-    """Precompute partial-atom lookup tables for grounding-style use cases.
-
-    For each mapped predicate/entity pair, this computes:
-
-    - the best score over all possible tails for ``pred(entity, ?)``
-    - the best score over all possible heads for ``pred(?, entity)``
-
-    Args:
-        model: tkk-native KGE model.
-        pred_remap: Predicate remap tensor of shape ``[P_im]`` with ``-1`` for
-            unmapped predicates.
-        const_remap: Entity remap tensor of shape ``[E_im]`` with ``-1`` for
-            unmapped entities.
-        batch_chunk: Number of entities scored per chunk in the batched
-            exhaustive calls.
-        sigmoid: if True, apply ``torch.sigmoid`` to ``model.score``'s
-            raw output before taking the per-relation max.
-
-    Returns:
-        ``(max_tail_score, max_head_score)``, both of shape ``[P_im, E_im]``.
-    """
-
-    device = const_remap.device
-    p_im = pred_remap.shape[0]
-    e_im = const_remap.shape[0]
-
-    max_tail_score = torch.zeros(p_im, e_im, dtype=torch.float32, device=device)
-    max_head_score = torch.zeros(p_im, e_im, dtype=torch.float32, device=device)
-
-    valid_preds = (pred_remap >= 0).nonzero(as_tuple=True)[0]
-    valid_ents = (const_remap >= 0).nonzero(as_tuple=True)[0]
-    if valid_preds.numel() == 0 or valid_ents.numel() == 0:
-        return max_tail_score, max_head_score
-
-    if batch_chunk <= 0:
-        batch_chunk = 64
-
-    kge_ents = const_remap[valid_ents]
-    for im_pred in valid_preds:
-        kge_rel = pred_remap[im_pred]
-        tail_scores = _partial_score_chunked(
-            model, kge_ents, kge_rel, role=0, batch_chunk=batch_chunk, sigmoid=sigmoid,
-        )
-        head_scores = _partial_score_chunked(
-            model, kge_ents, kge_rel, role=1, batch_chunk=batch_chunk, sigmoid=sigmoid,
-        )
-        max_tail_score[im_pred, valid_ents] = tail_scores
-        max_head_score[im_pred, valid_ents] = head_scores
-
-    return max_tail_score, max_head_score
+# ============================================================================
+# Pure-tensor lookup helper (used by PartialScorer.score_atoms)
+# ============================================================================
 
 
-def _partial_score_chunked(
-    model: nn.Module,
-    kge_ents: Tensor,
-    kge_rel: Tensor,
-    role: int,
-    batch_chunk: int,
-    sigmoid: bool,
-) -> Tensor:
-    """Compute best head/tail completions for a chunk of entities."""
-
-    num_entities = kge_ents.shape[0]
-    device = kge_ents.device
-    result = torch.empty(num_entities, dtype=torch.float32, device=device)
-
-    for start in range(0, num_entities, batch_chunk):
-        end = min(start + batch_chunk, num_entities)
-        chunk = kge_ents[start:end]
-        rel_exp = kge_rel.expand(chunk.shape[0])
-        if role == 0:
-            raw = model.score(chunk, rel_exp, None)
-        else:
-            raw = model.score(None, rel_exp, chunk)
-        if sigmoid:
-            raw = torch.sigmoid(raw)
-        result[start:end] = raw.max(dim=1).values
-
-    return result
-
-
-def score_partial_atoms(
+def _lookup_partial_atom_scores(
     preds: Tensor,
     args1: Tensor,
     args2: Tensor,
@@ -114,19 +45,7 @@ def score_partial_atoms(
     - ``pred(const, ?)`` uses ``max_tail_score``
     - ``pred(?, const)`` uses ``max_head_score``
     - fully unbound atoms receive score ``0``
-
-    Args:
-        preds: Predicate ids ``[N]``.
-        args1: First argument ids ``[N]``.
-        args2: Second argument ids ``[N]``.
-        constant_no: Highest constant id in the caller's index space.
-        max_tail_score: Precomputed tail lookup table ``[P, E]``.
-        max_head_score: Precomputed head lookup table ``[P, E]``.
-
-    Returns:
-        Scores of shape ``[N]``.
     """
-
     n = preds.shape[0]
     device = preds.device
     scores = torch.zeros(n, dtype=torch.float32, device=device)
@@ -151,17 +70,175 @@ def score_partial_atoms(
     return scores
 
 
-class LazyPartialScorer:
-    """Lazy per-(predicate, entity) partial score computation with caching.
+# ============================================================================
+# Base scorer (eager precompute)
+# ============================================================================
 
-    Computes ``max_tail_score[p, e]`` and ``max_head_score[p, e]`` on-the-fly
-    as partial atoms are encountered during proof search, then caches them in
-    lookup tables for subsequent accesses. No upfront precompute — scales to
-    any dataset size.
 
-    Call ``ensure_for_derived_states(derived_states, derived_counts)`` before
-    each scoring step. The scorer then uses ``max_tail_score`` / ``max_head_score``
-    as pure lookup tables (CUDA-graph safe).
+class PartialScorer:
+    """Partial-atom scorer with eager precompute.
+
+    Holds two ``[P_im, E_im]`` lookup tables (``max_tail_score`` and
+    ``max_head_score``). Call :meth:`compute_all` once after
+    construction to fill them, then use :meth:`score_atoms` for
+    per-batch scoring.
+
+    For datasets where ``P × E`` is too large to precompute upfront,
+    use :class:`LazyPartialScorer` instead — same scoring API,
+    incremental fill.
+
+    Args:
+        model: tkk-native KGE model exposing ``score(h, r, t)``.
+        pred_remap: ``[P_im]`` predicate remap. Caller's predicate id
+            ``i`` maps to KGE relation ``pred_remap[i]``; ``-1`` means
+            unmapped (no precompute, contributes neutral 0.5 if asked).
+        const_remap: ``[E_im]`` entity remap, same convention.
+        constant_no: Highest constant id in the caller's index space.
+            Atoms with ``args1 > constant_no`` (or ``args2 > constant_no``)
+            are treated as unbound variables.
+        sigmoid: if True (default), apply ``torch.sigmoid`` to
+            ``model.score``'s raw output before taking the per-relation max.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        pred_remap: Tensor,
+        const_remap: Tensor,
+        constant_no: int,
+        *,
+        sigmoid: bool = True,
+    ) -> None:
+        device = const_remap.device
+        P_im = pred_remap.shape[0]
+        E_im = const_remap.shape[0]
+
+        self.model = model
+        self.pred_remap = pred_remap
+        self.const_remap = const_remap
+        self.constant_no = constant_no
+        self.sigmoid = sigmoid
+
+        self.max_tail_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
+        self.max_head_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
+
+        # Auto-tune chunk so each ``model.score`` call peaks at ~2GB.
+        E_kge = (const_remap >= 0).sum().item()
+        self._batch_chunk = max(1, min(512, int(2e9 / (max(E_kge, 1) * 4 * 1024))))
+
+    @classmethod
+    def from_tables(
+        cls,
+        max_tail_score: Tensor,
+        max_head_score: Tensor,
+        constant_no: int,
+    ) -> "PartialScorer":
+        """Construct a scorer from pre-built lookup tables.
+
+        Use this when the tables come from somewhere other than
+        :meth:`compute_all` (e.g. cached on disk, or the caller built
+        them with their own logic). The resulting scorer can only be
+        used for :meth:`score_atoms` lookups — no recompute path.
+        """
+        scorer = cls.__new__(cls)
+        scorer.model = None
+        scorer.pred_remap = None
+        scorer.const_remap = None
+        scorer.constant_no = constant_no
+        scorer.sigmoid = True
+        scorer.max_tail_score = max_tail_score
+        scorer.max_head_score = max_head_score
+        scorer._batch_chunk = 64
+        return scorer
+
+    @torch.no_grad()
+    def compute_all(self, batch_chunk: Optional[int] = None) -> "PartialScorer":
+        """Eagerly fill both lookup tables for every (pred, entity) pair.
+
+        For each mapped predicate/entity pair:
+          - ``max_tail_score[p, e]`` = best score over all tails for ``p(e, ?)``.
+          - ``max_head_score[p, e]`` = best score over all heads for ``p(?, e)``.
+
+        Args:
+            batch_chunk: Number of entities scored per chunk. ``None``
+                uses the auto-tuned default (~2GB peak per call).
+
+        Returns:
+            ``self`` so the call chains: ``PartialScorer(...).compute_all()``.
+        """
+        bc = batch_chunk if batch_chunk and batch_chunk > 0 else self._batch_chunk
+
+        valid_preds = (self.pred_remap >= 0).nonzero(as_tuple=True)[0]
+        valid_ents = (self.const_remap >= 0).nonzero(as_tuple=True)[0]
+        if valid_preds.numel() == 0 or valid_ents.numel() == 0:
+            return self
+
+        kge_ents = self.const_remap[valid_ents]
+        for im_pred in valid_preds:
+            kge_rel = self.pred_remap[im_pred]
+            tail_scores = self._chunked_max(kge_ents, kge_rel, role="tail", batch_chunk=bc)
+            head_scores = self._chunked_max(kge_ents, kge_rel, role="head", batch_chunk=bc)
+            self.max_tail_score[im_pred, valid_ents] = tail_scores
+            self.max_head_score[im_pred, valid_ents] = head_scores
+
+        return self
+
+    def _chunked_max(
+        self,
+        kge_ents: Tensor,
+        kge_rel: Tensor,
+        role: str,
+        batch_chunk: int,
+    ) -> Tensor:
+        """Best head/tail completion per entity, chunked over the entity axis."""
+        num_entities = kge_ents.shape[0]
+        device = kge_ents.device
+        result = torch.empty(num_entities, dtype=torch.float32, device=device)
+
+        for start in range(0, num_entities, batch_chunk):
+            end = min(start + batch_chunk, num_entities)
+            chunk = kge_ents[start:end]
+            rel_exp = kge_rel.expand(chunk.shape[0])
+            if role == "tail":
+                raw = self.model.score(chunk, rel_exp, None)
+            else:
+                raw = self.model.score(None, rel_exp, chunk)
+            if self.sigmoid:
+                raw = torch.sigmoid(raw)
+            result[start:end] = raw.max(dim=1).values
+
+        return result
+
+    def score_atoms(
+        self,
+        preds: Tensor,
+        args1: Tensor,
+        args2: Tensor,
+    ) -> Tensor:
+        """Score partially grounded atoms via lookup. Returns ``[N]``."""
+        return _lookup_partial_atom_scores(
+            preds, args1, args2, self.constant_no,
+            self.max_tail_score, self.max_head_score,
+        )
+
+
+# ============================================================================
+# Lazy variant (incremental fill)
+# ============================================================================
+
+
+class LazyPartialScorer(PartialScorer):
+    """Lazy partial-atom scorer with on-demand fill.
+
+    Tables start at zero. Call :meth:`ensure_for_derived_states` (or
+    :meth:`ensure`) before scoring to fill the entries for the
+    (pred, entity) pairs you're about to look up. Subsequent
+    :meth:`score_atoms` calls read from the partially-filled tables
+    just like the eager :class:`PartialScorer`.
+
+    Use this when the full ``[P × E]`` precompute is too expensive or
+    only a small fraction of pairs are visited per batch (proof-search
+    workloads).
     """
 
     def __init__(
@@ -176,28 +253,20 @@ class LazyPartialScorer:
         *,
         sigmoid: bool = True,
     ) -> None:
-        device = const_remap.device
-        P_im = pred_remap.shape[0]
-        E_im = const_remap.shape[0]
-
-        self.model = model
-        self.pred_remap = pred_remap
-        self.const_remap = const_remap
-        self.constant_no = constant_no
+        super().__init__(
+            model, pred_remap, const_remap, constant_no, sigmoid=sigmoid,
+        )
         self.padding_idx = padding_idx
         self.true_pred_idx = true_pred_idx
         self.false_pred_idx = false_pred_idx
-        self.sigmoid = sigmoid
-        self.max_tail_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
-        self.max_head_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
 
+        device = const_remap.device
+        P_im = pred_remap.shape[0]
+        E_im = const_remap.shape[0]
         self._cached_tail = torch.zeros(P_im, E_im, dtype=torch.bool, device=device)
         self._cached_head = torch.zeros(P_im, E_im, dtype=torch.bool, device=device)
         self._computed: set = set()
         self._n_computed = 0
-
-        E_kge = (const_remap >= 0).sum().item()
-        self._batch_chunk = max(1, min(512, int(2e9 / (max(E_kge, 1) * 4 * 1024))))
 
     @torch.no_grad()
     def ensure(self, preds: Tensor) -> None:
@@ -336,4 +405,4 @@ class LazyPartialScorer:
         return self._n_computed
 
 
-__all__ = ["LazyPartialScorer", "precompute_partial_scores", "score_partial_atoms"]
+__all__ = ["LazyPartialScorer", "PartialScorer"]

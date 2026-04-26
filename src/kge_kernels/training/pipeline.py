@@ -33,8 +33,8 @@ from ..data import resolve_split_path, resolve_train_path
 from ..eval.checkpoint import evaluate_ranking
 from ..losses import NSSALoss
 from ..models.factory import build_training_model
+from ..scoring import BernoulliSampler as _BernoulliKGESampler
 from ..scoring import Sampler as _KGESampler
-from ..scoring import compute_bernoulli_probs
 from .batching import iterate_epoch_batches
 from .checkpoints import (
     build_config_payload,
@@ -377,15 +377,23 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         # same-domain negatives but never learns to rank unseen entities.
         # Domain restriction is applied only at eval time (head_domain /
         # tail_domain in the Evaluator).
-        sampler = _KGESampler.from_data(
-            all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
-            num_entities=num_entities, num_relations=num_relations,
-            device=device, default_mode=corrupt_mode,
-            bern_probs=compute_bernoulli_probs(
-                torch.tensor(train_triples, dtype=torch.long), num_relations,
-            ),
-            min_entity_idx=0,
-        )
+        if corrupt_mode == "bernoulli":
+            sampler = _BernoulliKGESampler.from_data(
+                all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
+                num_entities=num_entities, num_relations=num_relations,
+                device=device,
+                bern_probs=_BernoulliKGESampler.compute_probs(
+                    torch.tensor(train_triples, dtype=torch.long), num_relations,
+                ),
+                min_entity_idx=0,
+            )
+        else:
+            sampler = _KGESampler.from_data(
+                all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
+                num_entities=num_entities, num_relations=num_relations,
+                device=device, default_mode=corrupt_mode,
+                min_entity_idx=0,
+            )
         # Hand the sampler to the validation closure so per-epoch val goes
         # through the compiled unified evaluator. The sampler's filter
         # hashes were built from train ∪ valid ∪ test positives, so known
@@ -440,11 +448,11 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             test_triples=test_triples, use_reciprocal=cfg.use_reciprocal,
             num_relations_orig=num_relations_orig,
         )
-        sampler = _KGESampler.from_data(
+        sampler = _BernoulliKGESampler.from_data(
             all_known_triples_idx=torch.tensor(known_sampling_triples, dtype=torch.long),
             num_entities=num_entities, num_relations=num_relations,
-            device=device, default_mode="bernoulli",
-            bern_probs=compute_bernoulli_probs(
+            device=device,
+            bern_probs=_BernoulliKGESampler.compute_probs(
                 torch.tensor(train_triples, dtype=torch.long), num_relations,
             ),
             min_entity_idx=0,
@@ -466,7 +474,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
 
         @torch.no_grad()
         def sample_negatives(batch: Tensor) -> Tensor:
-            neg_rht, _ = sampler.corrupt_with_mask(
+            neg_rht = sampler.corrupt(
                 batch, num_negatives=cfg.neg_ratio,
                 mode=corrupt_mode, filter=False, unique=False,
             )

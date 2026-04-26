@@ -231,12 +231,13 @@ class CandidateProvider:
         """
         # Sampler draws `num_negatives=None` for exhaustive, int for sampled.
         num_neg = None if self._is_exhaustive else self.K_fixed
-        neg, mask = self.sampler.corrupt_with_mask(
+        neg, mask = self.sampler.corrupt(
             query_batch,
             num_negatives=num_neg,
             mode=mode,
             filter=True,
             unique=True,
+            return_mask=True,
         )
         # neg: [B, K, 3] in (r, h, t) format; extract the column that was
         # actually corrupted — that's our candidate entity for each slot.

@@ -2,10 +2,12 @@
 
 Three modules:
 
-- :mod:`.types` — shared dataclasses + protocol (``CorruptionOutput``,
-  ``SamplerConfig``, ``SupportsCorruptWithMask``).
-- :mod:`.sampler` — vectorized corruption (filter, domain pools,
-  Bernoulli) plus on-the-fly Python-list helpers.
+- :mod:`.types` — shared dataclasses (``SamplerConfig``).
+- :mod:`.sampler` — :class:`Sampler` (head/tail/both corruption with
+  filter, domain pools, optional validity-mask return) and the
+  :class:`BernoulliSampler` subclass for per-triple coin-flip
+  corruption (Bordes et al. trick). Probabilities for the latter come
+  from :meth:`BernoulliSampler.compute_probs`.
 - :mod:`.partial` — partial-atom scoring (precomputed tables + lazy
   per-batch caching) on top of ``model.score``.
 
@@ -21,37 +23,25 @@ conventions, not tkk's KGE math.
 
 from .partial import (
     LazyPartialScorer,
-    precompute_partial_scores,
-    score_partial_atoms,
+    PartialScorer,
 )
 from .sampler import (
+    BernoulliSampler,
     Sampler,
-    compute_bernoulli_probs,
-    corrupt,
-    corrupt_to_lists,
-    corrupt_with_topup,
 )
 from .types import (
-    CorruptionOutput,
     LongTensor,
     SamplerConfig,
-    SupportsCorruptWithMask,
 )
 
 __all__ = [
     # Types
-    "CorruptionOutput",
     "LongTensor",
     "SamplerConfig",
-    "SupportsCorruptWithMask",
     # Sampler
+    "BernoulliSampler",
     "Sampler",
-    "compute_bernoulli_probs",
-    "corrupt",
-    "corrupt_to_lists",
-    "corrupt_with_topup",
     # Partial scoring
     "LazyPartialScorer",
-    "precompute_partial_scores",
-    "score_partial_atoms",
+    "PartialScorer",
 ]

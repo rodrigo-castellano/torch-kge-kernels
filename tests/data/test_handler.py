@@ -53,7 +53,7 @@ def test_build_sampler_uses_loaded_id_space(tmp_path):
     # Filter index covers ALL ground triples (train + valid + test + facts).
     # 1-based ids: knows=1, alice=1, bob=2.
     pos = torch.tensor([[1, 1, 2]], dtype=torch.long)  # knows(alice, bob)
-    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=10, mode="tail")
+    neg, valid = sampler.corrupt(pos, num_negatives=10, mode="tail", return_mask=True)
     rows = [tuple(t.tolist()) for t, k in zip(neg[0], valid[0]) if k]
     # Filter should remove every known (knows, alice, *) triple
     for r, h_idx, t_idx in rows:
@@ -69,7 +69,7 @@ def test_build_sampler_picks_up_domain_info(tmp_path):
     # Domain-restricted corruption: tail of (knows, alice, bob) stays in 'people'.
     # 1-based ids: knows=1, alice=1, bob=2.
     pos = torch.tensor([[1, 1, 2]], dtype=torch.long)
-    neg, valid = sampler.corrupt_with_mask(pos, num_negatives=10, mode="tail")
+    neg, valid = sampler.corrupt(pos, num_negatives=10, mode="tail", return_mask=True)
     rows = [tuple(t.tolist()) for t, k in zip(neg[0], valid[0]) if k]
     people_ids = {h.entity2id[n] for n in ("alice", "bob", "carol")}
     for _r, _h, t in rows:

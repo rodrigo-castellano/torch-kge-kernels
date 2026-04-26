@@ -2,27 +2,22 @@
 
 Public surface:
 
-- :class:`Sampler` — the core class with ``corrupt_with_mask`` /
-  ``corrupt`` / Bernoulli mode / domain-restricted pools / filtered
-  lookup over a known-positives index.
-- :func:`corrupt` — module-level entry point that wraps any
-  :class:`SupportsCorruptWithMask` implementation and returns the
-  shared :class:`CorruptionOutput` dataclass.
-- :func:`corrupt_to_lists`, :func:`corrupt_with_topup` — Python-list
-  on-the-fly corruption helpers for ``Dataset.__getitem__``-style use.
-- :func:`compute_bernoulli_probs` — per-relation head/tail Bernoulli
-  probabilities for ``mode="bernoulli"`` corruption.
+- :class:`Sampler` — head / tail / both corruption with optional filter,
+  domain pools, and validity-mask return.
+- :class:`BernoulliSampler` — per-triple coin-flip between head and
+  tail corruption (Bordes et al. trick); uses per-relation
+  head-corruption probabilities. Has a ``compute_probs`` staticmethod
+  that builds the probabilities from a known-triple set.
 """
 
 from __future__ import annotations
 
-import random
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 from torch import Tensor as _Tensor
 
-from .types import CorruptionOutput, LongTensor, SamplerConfig, SupportsCorruptWithMask, Tensor
+from .types import LongTensor, SamplerConfig, Tensor
 
 
 # ============================================================================
@@ -43,51 +38,13 @@ def _mix_hash(triples: LongTensor, b_e: int, b_r: int) -> LongTensor:
     return ((h * b_r) + r) * b_e + t
 
 
-def compute_bernoulli_probs(triples_rht: LongTensor, num_relations: int) -> _Tensor:
-    """Per-relation head-corruption probabilities for Bernoulli sampling.
-
-    Args:
-        triples_rht: ``[N, 3]`` triples in ``(r, h, t)`` format.
-        num_relations: Total number of relations.
-
-    Returns:
-        ``[num_relations]`` float tensor of head-corruption probabilities,
-        clamped to ``[0.05, 0.95]``.
-    """
-    t = triples_rht.cpu().long()
-    rels = t[:, 0]
-    heads = t[:, 1]
-    tails = t[:, 2]
-    N = t.shape[0]
-
-    ones = torch.ones(N, dtype=torch.float32)
-    triple_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(0, rels, ones)
-
-    max_ent = max(heads.max().item(), tails.max().item()) + 1
-
-    rh_rels = torch.unique(rels * max_ent + heads) // max_ent
-    unique_head_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
-        0, rh_rels, torch.ones(rh_rels.shape[0], dtype=torch.float32)
-    )
-
-    rt_rels = torch.unique(rels * max_ent + tails) // max_ent
-    unique_tail_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
-        0, rt_rels, torch.ones(rt_rels.shape[0], dtype=torch.float32)
-    )
-
-    # tph = tails per head, hpt = heads per tail
-    tph = triple_counts / unique_head_counts.clamp(min=1)
-    hpt = triple_counts / unique_tail_counts.clamp(min=1)
-
-    denom = tph + hpt
-    probs = torch.where(denom > 0, tph / denom, torch.full_like(denom, 0.5))
-    return probs.clamp(0.05, 0.95)
-
-
 class Sampler:
-    """Fully vectorized corruption sampler.
+    """Fully vectorized head / tail / both corruption sampler.
 
     Public tensors are always in ``(relation, head, tail)`` format.
+
+    For Bordes-style per-triple Bernoulli coin-flip corruption, use
+    :class:`BernoulliSampler` instead.
     """
 
     def __init__(self, cfg: SamplerConfig) -> None:
@@ -99,7 +56,6 @@ class Sampler:
         self.order_negatives = cfg.order_negatives
         self.min_entity_idx = cfg.min_entity_idx
         self._filter_hashes_sorted: Optional[LongTensor] = None
-        self._bern_probs: Optional[Tensor] = None
         self.b_e = max(2 * self.num_entities + 1, 1024)
         self.b_r = max(2 * self.num_relations + 1, 128)
         self.domain_padded: Optional[Tensor] = None
@@ -116,13 +72,12 @@ class Sampler:
         num_entities: int,
         num_relations: int,
         device: torch.device,
-        default_mode: Literal["head", "tail", "both", "bernoulli"] = "both",
+        default_mode: Literal["head", "tail", "both"] = "both",
         seed: int = 0,
         domain2idx: Optional[Dict[str, List[int]]] = None,
         entity2domain: Optional[Dict[int, str]] = None,
         order_negatives: bool = False,
         min_entity_idx: int = 1,
-        bern_probs: Optional[Tensor] = None,
     ) -> "Sampler":
         """Construct a sampler from known triples and optional domain pools.
 
@@ -132,7 +87,7 @@ class Sampler:
             num_entities: Number of entity ids available to corrupt with.
             num_relations: Number of relation ids.
             device: Device where the internal lookup tensors will live.
-            default_mode: Default corruption side used by ``corrupt`` methods.
+            default_mode: Default corruption side used by ``corrupt``.
             seed: Stored seed for downstream callers; runtime sampling remains
                 purely tensor-based.
             domain2idx: Optional domain-to-entity mapping for typed corruption.
@@ -140,28 +95,20 @@ class Sampler:
             order_negatives: Whether to sort valid negatives deterministically.
             min_entity_idx: Smallest valid entity id. Use ``0`` when entity 0
                 is real data rather than padding.
-            bern_probs: Per-relation head-corruption probabilities for
-                ``"bernoulli"`` mode.  Shape ``[num_relations]``.
         """
-        cfg = SamplerConfig(num_entities, num_relations, device, default_mode, seed, order_negatives, min_entity_idx)
+        cfg = SamplerConfig(
+            num_entities, num_relations, device, default_mode, seed,
+            order_negatives, min_entity_idx,
+        )
         self = cls(cfg)
         if all_known_triples_idx is not None and all_known_triples_idx.numel() > 0:
             hashes = _mix_hash(all_known_triples_idx.detach().to(device=self.device, dtype=torch.long), self.b_e, self.b_r)
             self._filter_hashes_sorted = torch.sort(torch.unique(hashes)).values
         else:
             self._filter_hashes_sorted = torch.empty((0,), dtype=torch.long, device=self.device)
-        if bern_probs is not None:
-            self._bern_probs = bern_probs.to(device=device)
         if domain2idx and entity2domain:
             self._build_domain_structures(domain2idx, entity2domain, device)
         return self
-
-    @property
-    def hashes_sorted(self) -> LongTensor:
-        """Return the sorted known-triple hashes used by the filter."""
-        if self._filter_hashes_sorted is None:
-            return torch.empty((0,), dtype=torch.long, device=self.device)
-        return self._filter_hashes_sorted
 
     def _build_domain_structures(
         self,
@@ -192,9 +139,7 @@ class Sampler:
         """Return ``True`` when typed/domain-aware corruption is available."""
         return self.domain_padded is not None and self.num_domains > 0
 
-    def _get_corruption_indices(self, mode: str) -> List[int]:
-        """Map corruption mode to columns in internal ``(h, r, t)`` layout."""
-        return [0] if mode == "head" else [2] if mode == "tail" else [0, 2]
+    # ---- per-column corruption primitives (dispatched from .corrupt) -----
 
     def _corrupt_relation_col(
         self,
@@ -289,6 +234,8 @@ class Sampler:
         result_flat = torch.where(mask, sampled_ents, result_flat)
         return result_flat.reshape(orig_slice.shape)
 
+    # ---- filter / postprocess --------------------------------------------
+
     def _filter_mask_batched(self, triples: LongTensor) -> torch.BoolTensor:
         """Return a keep-mask for batched triples against known positives."""
         if self._filter_hashes_sorted is None or self._filter_hashes_sorted.numel() == 0:
@@ -304,19 +251,6 @@ class Sampler:
         eq = in_range & (target[safe_pos] == hashes)
         return (~eq).reshape(batch_size, k)
 
-    def _filter_keep_mask(self, triples: LongTensor) -> torch.BoolTensor:
-        """Return a keep-mask for flat triples against known positives."""
-        if self._filter_hashes_sorted is None or self._filter_hashes_sorted.numel() == 0:
-            return torch.ones((triples.shape[0],), dtype=torch.bool, device=triples.device)
-        hashes = _mix_hash(triples, self.b_e, self.b_r)
-        target = self._filter_hashes_sorted
-
-        pos = torch.searchsorted(target, hashes)
-        in_range = pos < target.numel()
-        safe_pos = pos.clamp(min=0, max=target.numel() - 1)
-        eq = in_range & (target[safe_pos] == hashes)
-        return ~eq
-
     def _postprocess(
         self,
         neg: LongTensor,
@@ -325,7 +259,7 @@ class Sampler:
         do_filter: bool,
         do_unique: bool,
         device: torch.device,
-    ) -> tuple[LongTensor, torch.BoolTensor]:
+    ) -> Tuple[LongTensor, torch.BoolTensor]:
         """Convert internal triples to public ``(r, h, t)`` and compact them."""
         neg_rht = torch.stack([neg[:, :, 1], neg[:, :, 0], neg[:, :, 2]], dim=-1)
         lo = self.min_entity_idx
@@ -358,83 +292,55 @@ class Sampler:
 
         return neg_rht, valid
 
-    def _corrupt_bernoulli(
-        self,
-        positives: LongTensor,
-        *,
-        num_negatives: Optional[int] = None,
-        device: Optional[torch.device] = None,
-        filter: bool = True,
-        unique: bool = True,
-    ) -> tuple[LongTensor, torch.BoolTensor]:
-        """Bernoulli mode: per-triple coin flip between head and tail corruption."""
-        if self._bern_probs is None:
-            raise RuntimeError(
-                "Bernoulli corruption requires bern_probs; pass them to from_data()."
-            )
-        head_neg, head_valid = self.corrupt_with_mask(
-            positives, num_negatives=num_negatives, mode="head",
-            device=device, filter=filter, unique=unique,
-        )
-        tail_neg, tail_valid = self.corrupt_with_mask(
-            positives, num_negatives=num_negatives, mode="tail",
-            device=device, filter=filter, unique=unique,
-        )
-        rels = positives[:, 0]
-        bern = self._bern_probs.to(device=rels.device)
-        corrupt_head = torch.bernoulli(bern[rels]).bool()
-        ch = corrupt_head[:, None, None]
-        return (
-            torch.where(ch, head_neg, tail_neg),
-            torch.where(corrupt_head[:, None], head_valid, tail_valid),
-        )
+    # ---- canonical entry point -------------------------------------------
 
-    def corrupt_with_mask(
+    def corrupt(
         self,
         positives: LongTensor,
         *,
         num_negatives: Optional[int] = None,
-        mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
+        mode: Optional[Literal["head", "tail", "both"]] = None,
         device: Optional[torch.device] = None,
         filter: bool = True,
         unique: bool = True,
-    ) -> tuple[LongTensor, torch.BoolTensor]:
-        """Generate corruptions and an explicit validity mask.
+        return_mask: bool = False,
+    ) -> Union[LongTensor, Tuple[LongTensor, torch.BoolTensor]]:
+        """Generate corruptions, optionally with an explicit validity mask.
 
         Args:
             positives: Positive triples in public ``(r, h, t)`` format.
             num_negatives: Number of negatives per positive. ``None`` means
                 exhaustive corruption over the active candidate pool.
-            mode: Which side to corrupt: ``head``, ``tail``, ``both``, or
-                ``bernoulli`` (per-triple coin flip between head and tail).
+            mode: Which side to corrupt: ``head``, ``tail``, or ``both``.
+                Defaults to the sampler's ``default_mode``.
             device: Optional override for the runtime device.
             filter: Remove known positives using the indexed fact set.
             unique: Deduplicate negatives within each row after filtering.
+            return_mask: If True, return ``(negatives, valid_mask)`` —
+                needed by mask-aware loss/eval reductions where padded
+                or filtered slots must be gated out. If False (default),
+                return just the negatives tensor.
 
         Returns:
-            ``(negatives, valid_mask)`` where ``negatives`` has shape
-            ``[B, K, 3]`` in ``(r, h, t)`` format and ``valid_mask`` has shape
-            ``[B, K]``.
+            If ``return_mask=False`` (default): ``negatives`` of shape
+            ``[B, K, 3]`` in ``(r, h, t)`` format.
+            If ``return_mask=True``: ``(negatives, valid_mask)`` where
+            ``valid_mask`` has shape ``[B, K]`` and is ``True`` for slots
+            holding a real, filtered, unique corruption.
         """
         device = device or self.device
         mode = mode or self.default_mode
-
-        if mode == "bernoulli":
-            return self._corrupt_bernoulli(
-                positives, num_negatives=num_negatives,
-                device=device, filter=filter, unique=unique,
-            )
-
         pos = positives.to(device=device)
         batch_size = pos.shape[0]
 
         if batch_size == 0:
             empty_neg = torch.zeros((0, num_negatives or 0, 3), dtype=pos.dtype, device=device)
             empty_valid = torch.zeros((0, num_negatives or 0), dtype=torch.bool, device=device)
-            return empty_neg, empty_valid
+            return (empty_neg, empty_valid) if return_mask else empty_neg
 
         pos_hrt = torch.stack([pos[:, 1], pos[:, 0], pos[:, 2]], dim=1)
-        cols = self._get_corruption_indices(mode)
+        # Map mode → internal (h, r, t) column list.
+        cols = [0] if mode == "head" else [2] if mode == "tail" else [0, 2]
         is_exhaustive = num_negatives is None
 
         pool_size = (self.max_pool_len - 1) if self._has_domain_info() else (self.num_entities - 1)
@@ -458,172 +364,155 @@ class Sampler:
             neg[:, start : start + count, col] = result
             start += count
 
-        return self._postprocess(neg, batch_size, k, do_filter=filter, do_unique=unique, device=device)
+        neg_rht, valid = self._postprocess(neg, batch_size, k, do_filter=filter, do_unique=unique, device=device)
+        return (neg_rht, valid) if return_mask else neg_rht
+
+
+class BernoulliSampler(Sampler):
+    """Bernoulli-mode corruption sampler (Bordes et al. trick).
+
+    Per-triple coin flip selects the corruption side: with probability
+    ``bern_probs[r]`` the head is corrupted, otherwise the tail. This
+    biases training toward corrupting the rarer side of the relation
+    (1-to-N relations bias toward head, N-to-1 toward tail), which
+    yields harder negatives than uniform head-or-tail sampling.
+
+    Construct via :meth:`from_data` with ``bern_probs`` from
+    :meth:`compute_probs`. The default :meth:`corrupt` call
+    (``mode=None`` or ``mode="bernoulli"``) does the coin-flip.
+    Explicit ``mode="head"`` / ``"tail"`` / ``"both"`` defers to the
+    base :class:`Sampler` behaviour — useful for eval, where the same
+    sampler instance must do plain head- or tail-only corruption while
+    training uses the bernoulli mix.
+    """
+
+    def __init__(self, cfg: SamplerConfig, bern_probs: _Tensor) -> None:
+        super().__init__(cfg)
+        self._bern_probs = bern_probs.to(device=cfg.device)
+
+    @staticmethod
+    def compute_probs(triples_rht: LongTensor, num_relations: int) -> _Tensor:
+        """Per-relation head-corruption probabilities for Bernoulli sampling.
+
+        Computed once from a known-triple set (typically the train split)
+        and passed to :meth:`from_data` as ``bern_probs``.
+
+        Args:
+            triples_rht: ``[N, 3]`` triples in ``(r, h, t)`` format.
+            num_relations: Total number of relations.
+
+        Returns:
+            ``[num_relations]`` float tensor of head-corruption
+            probabilities, clamped to ``[0.05, 0.95]``.
+        """
+        t = triples_rht.cpu().long()
+        rels = t[:, 0]
+        heads = t[:, 1]
+        tails = t[:, 2]
+        N = t.shape[0]
+
+        ones = torch.ones(N, dtype=torch.float32)
+        triple_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(0, rels, ones)
+
+        max_ent = max(heads.max().item(), tails.max().item()) + 1
+
+        rh_rels = torch.unique(rels * max_ent + heads) // max_ent
+        unique_head_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
+            0, rh_rels, torch.ones(rh_rels.shape[0], dtype=torch.float32)
+        )
+
+        rt_rels = torch.unique(rels * max_ent + tails) // max_ent
+        unique_tail_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
+            0, rt_rels, torch.ones(rt_rels.shape[0], dtype=torch.float32)
+        )
+
+        # tph = tails per head, hpt = heads per tail
+        tph = triple_counts / unique_head_counts.clamp(min=1)
+        hpt = triple_counts / unique_tail_counts.clamp(min=1)
+
+        denom = tph + hpt
+        probs = torch.where(denom > 0, tph / denom, torch.full_like(denom, 0.5))
+        return probs.clamp(0.05, 0.95)
+
+    @classmethod
+    def from_data(
+        cls,
+        all_known_triples_idx: Optional[LongTensor],
+        num_entities: int,
+        num_relations: int,
+        device: torch.device,
+        bern_probs: _Tensor,
+        seed: int = 0,
+        domain2idx: Optional[Dict[str, List[int]]] = None,
+        entity2domain: Optional[Dict[int, str]] = None,
+        order_negatives: bool = False,
+        min_entity_idx: int = 1,
+    ) -> "BernoulliSampler":
+        """Construct a Bernoulli sampler. See :meth:`Sampler.from_data` for
+        the shared args; ``bern_probs`` is the per-relation head-corruption
+        probability vector (typically from :func:`compute_bernoulli_probs`).
+        """
+        # The parent's ``default_mode`` is hit only when callers pass an
+        # explicit non-bernoulli mode (e.g. eval); store ``"both"`` so
+        # ``mode=None`` on those callers means head+tail.
+        cfg = SamplerConfig(
+            num_entities, num_relations, device, "both", seed,
+            order_negatives, min_entity_idx,
+        )
+        self = cls(cfg, bern_probs)
+        if all_known_triples_idx is not None and all_known_triples_idx.numel() > 0:
+            hashes = _mix_hash(
+                all_known_triples_idx.detach().to(device=self.device, dtype=torch.long),
+                self.b_e, self.b_r,
+            )
+            self._filter_hashes_sorted = torch.sort(torch.unique(hashes)).values
+        else:
+            self._filter_hashes_sorted = torch.empty((0,), dtype=torch.long, device=self.device)
+        if domain2idx and entity2domain:
+            self._build_domain_structures(domain2idx, entity2domain, device)
+        return self
 
     def corrupt(
         self,
         positives: LongTensor,
         *,
         num_negatives: Optional[int] = None,
-        mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
+        mode: Optional[str] = None,
         device: Optional[torch.device] = None,
         filter: bool = True,
         unique: bool = True,
-    ) -> LongTensor:
-        """Generate padded corruptions (drops the valid mask).
+        return_mask: bool = False,
+    ) -> Union[LongTensor, Tuple[LongTensor, torch.BoolTensor]]:
+        """Corrupt with a per-triple head/tail coin flip (bernoulli) by default.
 
-        Thin convenience wrapper over :meth:`corrupt_with_mask` for callers
-        that don't need the explicit validity mask.
+        Pass an explicit ``mode="head"``, ``"tail"``, or ``"both"`` to fall
+        back to the base sampler — useful when the same sampler instance
+        is shared between training (bernoulli) and eval (plain head/tail).
         """
-        neg, _ = self.corrupt_with_mask(
-            positives,
-            num_negatives=num_negatives,
-            mode=mode,
-            device=device,
-            filter=filter,
-            unique=unique,
+        if mode not in (None, "bernoulli"):
+            return super().corrupt(
+                positives, num_negatives=num_negatives, mode=mode,
+                device=device, filter=filter, unique=unique, return_mask=return_mask,
+            )
+        head_neg, head_valid = super().corrupt(
+            positives, num_negatives=num_negatives, mode="head",
+            device=device, filter=filter, unique=unique, return_mask=True,
         )
-        return neg
-
-
-def corrupt(
-    sampler: SupportsCorruptWithMask,
-    positives: LongTensor,
-    *,
-    num_corruptions: Optional[int] = None,
-    mode: Optional[Literal["head", "tail", "both", "bernoulli"]] = None,
-    device: Optional[torch.device] = None,
-    filter: bool = True,
-    unique: bool = True,
-) -> CorruptionOutput:
-    """Public corruption entry point for sampled or exhaustive generation.
-
-    Args:
-        sampler: Any sampler exposing ``corrupt_with_mask``.
-        positives: Positive triples in ``(r, h, t)`` format, shape ``[B, 3]``.
-        num_corruptions: Number of corruptions per query. ``None`` means
-            exhaustive corruption over the active candidate pool.
-        mode: Which side to corrupt: ``head``, ``tail``, or ``both``.
-        device: Optional runtime device override.
-        filter: Remove known positives using the sampler index.
-        unique: Deduplicate negatives within each query after filtering.
-
-    Returns:
-        ``CorruptionOutput`` with padded negatives ``[B, K, 3]`` in ``(r, h, t)``
-        format and a ``valid_mask`` of shape ``[B, K]``.
-    """
-
-    negatives, valid_mask = sampler.corrupt_with_mask(
-        positives,
-        num_negatives=num_corruptions,
-        mode=mode,
-        device=device,
-        filter=filter,
-        unique=unique,
-    )
-    return CorruptionOutput(negatives=negatives, valid_mask=valid_mask)
-
-
-# ============================================================================
-# On-the-fly corruption helpers (Python-list output for Dataset.__getitem__)
-# ============================================================================
-
-
-def corrupt_to_lists(
-    neg: torch.Tensor, valid: torch.Tensor,
-) -> List[List[Tuple[int, int, int]]]:
-    """Convert ``(neg [B, K, 3], valid [B, K])`` to a Python list of valid rows.
-
-    Drops every entry whose ``valid`` flag is False; preserves per-query
-    grouping. Returns rows in ``(r, h, t)`` order matching the sampler's
-    public tensor format.
-    """
-    out: List[List[Tuple[int, int, int]]] = []
-    for triples, mask in zip(neg.tolist(), valid.tolist()):
-        out.append([
-            tuple(map(int, triple))
-            for triple, keep in zip(triples, mask) if keep
-        ])
-    return out
-
-
-def corrupt_with_topup(
-    sampler: "Sampler",
-    queries: List[Tuple[int, int, int]],
-    *,
-    num_negatives: Optional[int],
-    mode: str,
-    max_retries: int = 4,
-) -> List[List[Tuple[int, int, int]]]:
-    """Generate ``num_negatives`` valid negatives per query, with retry + duplicate fallback.
-
-    Wraps :meth:`Sampler.corrupt_with_mask` (with ``filter=True, unique=False``)
-    and retries up to ``max_retries`` times, doubling the draw count each
-    pass to maximize the chance of filling every row. If after the retries
-    some rows are still short, falls back to an unfiltered exhaustive draw
-    and tops up via :func:`random.choices` from each query's own pool.
-
-    ``num_negatives=None`` skips topup entirely and returns the variable-length
-    valid rows from a single exhaustive draw — used by ranking eval where
-    "all candidates" is the desired output, not a fixed-K bundle.
-
-    Returns a list of length ``len(queries)`` where each row has exactly
-    ``num_negatives`` entries (or as close as the sampler can deliver in
-    extreme small-domain edge cases).
-    """
-    if not queries:
-        return []
-    queries_tensor = torch.tensor(queries, dtype=torch.long)
-
-    if num_negatives is None:
-        neg, valid = sampler.corrupt_with_mask(
-            queries_tensor, num_negatives=None, mode=mode,
-            device=torch.device("cpu"), filter=True, unique=False,
+        tail_neg, tail_valid = super().corrupt(
+            positives, num_negatives=num_negatives, mode="tail",
+            device=device, filter=filter, unique=unique, return_mask=True,
         )
-        return corrupt_to_lists(neg, valid)
-
-    target = num_negatives
-    gathered: List[List[Tuple[int, int, int]]] = [[] for _ in queries]
-    pending = list(range(len(queries)))
-
-    for _ in range(max_retries):
-        if not pending:
-            break
-        sub = queries_tensor[pending]
-        remaining = [target - len(gathered[idx]) for idx in pending]
-        draw_k = max(1, max(remaining)) * 2
-        neg, valid = sampler.corrupt_with_mask(
-            sub, num_negatives=draw_k, mode=mode,
-            device=torch.device("cpu"), filter=True, unique=False,
-        )
-        rows = corrupt_to_lists(neg, valid)
-        next_pending: List[int] = []
-        for idx, row, need in zip(pending, rows, remaining):
-            if row:
-                gathered[idx].extend(row[:need])
-            if len(gathered[idx]) < target:
-                next_pending.append(idx)
-        pending = next_pending
-
-    if pending:
-        fallback = corrupt_with_topup(
-            sampler, [queries[idx] for idx in pending],
-            num_negatives=None, mode=mode,
-        )
-        for idx, row in zip(pending, fallback):
-            if not row:
-                continue
-            need = target - len(gathered[idx])
-            gathered[idx].extend(random.choices(row, k=need))
-
-    return [row[:target] for row in gathered]
+        rels = positives[:, 0]
+        bern = self._bern_probs.to(device=rels.device)
+        corrupt_head = torch.bernoulli(bern[rels]).bool()
+        ch = corrupt_head[:, None, None]
+        neg = torch.where(ch, head_neg, tail_neg)
+        valid = torch.where(corrupt_head[:, None], head_valid, tail_valid)
+        return (neg, valid) if return_mask else neg
 
 
 __all__ = [
+    "BernoulliSampler",
     "Sampler",
     "SamplerConfig",
-    "compute_bernoulli_probs",
-    "corrupt",
-    "corrupt_to_lists",
-    "corrupt_with_topup",
 ]

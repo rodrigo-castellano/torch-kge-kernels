@@ -8,7 +8,7 @@ from typing import Literal, Optional, Sequence
 import torch
 from torch import Tensor
 
-from ..scoring import SupportsCorruptWithMask
+from ..scoring import Sampler
 
 
 @dataclass
@@ -37,7 +37,7 @@ class CandidatePool:
     @staticmethod
     def build(
         queries: Tensor,
-        sampler: SupportsCorruptWithMask,
+        sampler: Sampler,
         n_corruptions: int,
         mode: Literal["head", "tail"] = "head",
         device: Optional[torch.device] = None,
@@ -46,7 +46,7 @@ class CandidatePool:
 
         Args:
             queries: ``[CQ, 3]`` positive triples in ``(r, h, t)`` format.
-            sampler: Sampler with ``corrupt_with_mask`` method.
+            sampler: Sampler with ``corrupt`` method.
             n_corruptions: Number of negatives per positive.
             mode: Corruption side (``"head"`` or ``"tail"``).
             device: Device for the pool tensors.
@@ -56,8 +56,9 @@ class CandidatePool:
         """
         device = device or queries.device
         CQ = queries.shape[0]
-        neg, neg_valid = sampler.corrupt_with_mask(
+        neg, neg_valid = sampler.corrupt(
             queries, num_negatives=n_corruptions, mode=mode, device=device,
+            return_mask=True,
         )
         neg_count = neg.shape[1]
         K = 1 + neg_count
@@ -80,7 +81,7 @@ class CandidatePool:
         buffer: Tensor,
         offset: int,
         queries: Tensor,
-        sampler: SupportsCorruptWithMask,
+        sampler: Sampler,
         n_corruptions: int,
         mode: Literal["head", "tail"] = "head",
         device: Optional[torch.device] = None,
@@ -94,7 +95,7 @@ class CandidatePool:
             buffer: Pre-allocated ``[max_pool, 3]`` tensor.
             offset: Write position in the buffer.
             queries: ``[CQ, 3]`` positive triples.
-            sampler: Sampler with ``corrupt_with_mask``.
+            sampler: Sampler with ``corrupt``.
             n_corruptions: Negatives per positive.
             mode: Corruption side.
             device: Device override.
@@ -104,8 +105,9 @@ class CandidatePool:
         """
         device = device or queries.device
         CQ = queries.shape[0]
-        neg, neg_valid = sampler.corrupt_with_mask(
+        neg, neg_valid = sampler.corrupt(
             queries, num_negatives=n_corruptions, mode=mode, device=device,
+            return_mask=True,
         )
         neg_count = neg.shape[1]
         K = 1 + neg_count
@@ -126,7 +128,7 @@ class CandidatePool:
     @staticmethod
     def build_batched(
         queries: Tensor,
-        sampler: SupportsCorruptWithMask,
+        sampler: Sampler,
         n_corruptions: int,
         modes: Sequence[str],
         device: Optional[torch.device] = None,
@@ -140,7 +142,7 @@ class CandidatePool:
 
         Args:
             queries: ``[CQ, 3]`` positive triples.
-            sampler: Sampler with ``corrupt_with_mask``.
+            sampler: Sampler with ``corrupt``.
             n_corruptions: Negatives per positive.
             modes: Corruption modes (e.g. ``["head", "tail"]``).
             device: Device.
