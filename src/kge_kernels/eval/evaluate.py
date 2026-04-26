@@ -125,7 +125,7 @@ Replaces
 """
 from __future__ import annotations
 
-from typing import Literal, Optional, Protocol
+from typing import Dict, Literal, Optional, Protocol
 
 import torch
 from torch import Tensor
@@ -192,6 +192,11 @@ class CandidateProvider:
     candidate pool. The true entity for each query is therefore NOT
     in the returned candidates; evaluators must score it separately
     and combine.
+
+    Per-relation domain restriction: pass ``head_domain`` /
+    ``tail_domain`` (``{relation_id: {valid_entity_ids}}``) to mask out
+    candidates that aren't in the relation's domain. This is the
+    standard countries/ablation eval protocol.
     """
 
     def __init__(
@@ -199,6 +204,9 @@ class CandidateProvider:
         sampler,
         num_entities: int,
         k: Optional[int],
+        *,
+        head_domain: Optional[Dict[int, set]] = None,
+        tail_domain: Optional[Dict[int, set]] = None,
     ) -> None:
         self.sampler = sampler
         self.num_entities = num_entities
@@ -216,6 +224,37 @@ class CandidateProvider:
         else:
             self.K_fixed = int(k)
             self._is_exhaustive = False
+
+        # Per-relation domain masks: [num_relations, num_entities] booleans.
+        self._head_domain_mask: Optional[Tensor] = None
+        self._tail_domain_mask: Optional[Tensor] = None
+        if head_domain is not None or tail_domain is not None:
+            num_relations = sampler.num_relations
+            device = sampler.device
+            if head_domain is not None:
+                self._head_domain_mask = self._build_domain_mask(
+                    head_domain, num_relations, num_entities, device
+                )
+            if tail_domain is not None:
+                self._tail_domain_mask = self._build_domain_mask(
+                    tail_domain, num_relations, num_entities, device
+                )
+
+    @staticmethod
+    def _build_domain_mask(
+        domain_dict: Dict[int, set],
+        num_relations: int,
+        num_entities: int,
+        device: torch.device,
+    ) -> Tensor:
+        """Convert ``{rel: {ents}}`` dict to ``[R, E]`` boolean mask."""
+        mask = torch.zeros(num_relations, num_entities, dtype=torch.bool, device=device)
+        for r, ents in domain_dict.items():
+            if not ents:
+                continue
+            ent_t = torch.tensor(sorted(ents), dtype=torch.long, device=device)
+            mask[int(r), ent_t] = True
+        return mask
 
     def candidates(
         self,
@@ -251,8 +290,6 @@ class CandidateProvider:
 
         # Pad/truncate to K_fixed so downstream compile shapes stay static.
         B, K = cand_entities.shape
-        if K == self.K_fixed:
-            return cand_entities, mask
         if K < self.K_fixed:
             pad = self.K_fixed - K
             cand_entities = torch.cat(
@@ -263,9 +300,21 @@ class CandidateProvider:
                 [mask, torch.zeros(B, pad, dtype=torch.bool, device=mask.device)],
                 dim=1,
             )
-            return cand_entities, mask
-        # K > K_fixed: keep first K_fixed (shouldn't happen for correctly-sized sampler).
-        return cand_entities[:, : self.K_fixed], mask[:, : self.K_fixed]
+        elif K > self.K_fixed:
+            # Shouldn't happen for correctly-sized sampler; clip defensively.
+            cand_entities = cand_entities[:, : self.K_fixed]
+            mask = mask[:, : self.K_fixed]
+
+        # Per-relation domain restriction (e.g. countries: head of relation r
+        # must be in head_domain[r]). Applied after sampling so we mask
+        # out-of-domain candidates regardless of sampler's domain config.
+        domain_mask = self._head_domain_mask if mode == "head" else self._tail_domain_mask
+        if domain_mask is not None:
+            rels = query_batch[:, 0]                      # [B]
+            row_mask = domain_mask[rels]                  # [B, num_entities]
+            cand_in_domain = row_mask.gather(1, cand_entities)  # [B, K_fixed]
+            mask = mask & cand_in_domain
+        return cand_entities, mask
 
 
 class _EvalState:

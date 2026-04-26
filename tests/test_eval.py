@@ -3,7 +3,14 @@
 import torch
 from torch import nn
 
-from kge_kernels.eval import CandidatePool, EvalResults, evaluate_ranking, rrf, zscore_fusion
+from kge_kernels.eval import (
+    CandidatePool,
+    CandidateProvider,
+    EvalResults,
+    evaluate,
+    rrf,
+    zscore_fusion,
+)
 from kge_kernels.scoring import Sampler
 
 
@@ -113,97 +120,34 @@ def test_zscore_fusion():
     assert per_q_mean.abs().max().item() < 0.5
 
 
-def test_evaluate_ranking_sampled_mode():
-    """evaluate_ranking with sampled corruptions returns valid metrics."""
+def test_evaluate_sampled_mode():
+    """evaluate() with sampled CandidateProvider returns valid metrics."""
     model = _FakeModel(num_entities=20)
     sampler = _make_sampler(num_entities=20)
-    queries = [(0, 10, 15), (1, 12, 18)]
-    results = evaluate_ranking(
-        model, queries, num_entities=20,
-        head_filter={}, tail_filter={},
-        device=torch.device("cpu"),
-        eval_num_corruptions=10,
-        sampler=sampler,
-        corruption_scheme="tail",
-        seed=42,
+    queries = torch.tensor([[0, 10, 15], [1, 12, 18]], dtype=torch.long)
+    provider = CandidateProvider(sampler, num_entities=20, k=10)
+    results = evaluate(
+        model, queries, provider,
+        scheme="tail", batch_size=2,
+        seed=42, device=torch.device("cpu"), compile=False,
     )
     assert "MRR" in results
     assert results["MRR"] > 0
 
 
-def test_evaluate_ranking_exhaustive_mode():
-    """evaluate_ranking with exhaustive mode returns valid metrics."""
+def test_evaluate_exhaustive_mode():
+    """evaluate() with exhaustive CandidateProvider returns valid metrics."""
     model = _FakeModel(num_entities=10)
-    queries = [(0, 3, 7), (1, 4, 8)]
-    results = evaluate_ranking(
-        model, queries, num_entities=10,
-        head_filter={}, tail_filter={},
-        device=torch.device("cpu"),
-        eval_num_corruptions=0,  # exhaustive
+    sampler = _make_sampler(num_entities=10)
+    queries = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.long)
+    provider = CandidateProvider(sampler, num_entities=10, k=None)
+    results = evaluate(
+        model, queries, provider,
+        scheme="both", batch_size=2,
+        device=torch.device("cpu"), compile=False,
     )
     assert "MRR" in results
     assert 0.0 <= results["MRR"] <= 1.0
-
-
-def test_evaluate_ranking_honors_num_corruptions():
-    """evaluate_ranking with eval_num_corruptions > 0 must use the sampled
-    path (not exhaustive). Regression test for a bug where the param was
-    accepted but silently ignored — the Evaluator was always constructed
-    with num_corruptions=0."""
-    from kge_kernels.eval.checkpoint import evaluate_ranking
-
-    model = _FakeModel(num_entities=20)
-    sampler = _make_sampler(num_entities=20)
-
-    # Build minimal filter maps
-    triples = [(0, 1, 2), (1, 3, 4), (2, 5, 6)]
-    from kge_kernels.data import build_filter_maps
-    head_filter, tail_filter = build_filter_maps(triples)
-
-    test_triples = [(0, 1, 2)]
-
-    # With eval_num_corruptions=0 (exhaustive): rank against all 20 entities
-    metrics_exhaustive = evaluate_ranking(
-        model, test_triples, num_entities=20,
-        head_filter=head_filter, tail_filter=tail_filter,
-        device=torch.device("cpu"),
-        eval_num_corruptions=0,
-        corruption_scheme="tail",
-    )
-
-    # With eval_num_corruptions=5 (sampled): rank against 5 corruptions
-    # Requires a sampler; without one, should raise ValueError
-    try:
-        evaluate_ranking(
-            model, test_triples, num_entities=20,
-            head_filter=head_filter, tail_filter=tail_filter,
-            device=torch.device("cpu"),
-            eval_num_corruptions=5,
-            corruption_scheme="tail",
-            sampler=None,
-        )
-        assert False, "Should have raised ValueError for sampled eval without sampler"
-    except ValueError:
-        pass  # expected
-
-    # With sampler provided, sampled eval should succeed and differ from exhaustive
-    metrics_sampled = evaluate_ranking(
-        model, test_triples, num_entities=20,
-        head_filter=head_filter, tail_filter=tail_filter,
-        device=torch.device("cpu"),
-        eval_num_corruptions=5,
-        corruption_scheme="tail",
-        sampler=sampler,
-    )
-    assert "MRR" in metrics_sampled
-    assert metrics_sampled["MRR"] > 0
-    # Sampled (5 competitors) should give equal or better MRR than
-    # exhaustive (19 competitors) — fewer competitors = easier ranking.
-    # Not guaranteed per-query, but on this deterministic model it holds.
-    assert metrics_sampled["MRR"] >= metrics_exhaustive["MRR"] - 0.01, (
-        f"Sampled MRR {metrics_sampled['MRR']:.3f} unexpectedly below "
-        f"exhaustive {metrics_exhaustive['MRR']:.3f}"
-    )
 
 
 def test_eval_results_to_dict():

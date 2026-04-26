@@ -1,6 +1,6 @@
 """Evaluation framework: single ``evaluate()`` entry point + ranking primitives."""
 
-from .checkpoint import evaluate_checkpoint, evaluate_ranking
+from .checkpoint import evaluate_checkpoint
 from .eval_hooks import eval_scores, recommended_eval_batch_size
 from .evaluate import (
     CandidateProvider,
@@ -31,7 +31,6 @@ __all__ = [
     "eval_scores",
     "evaluate",
     "evaluate_checkpoint",
-    "evaluate_ranking",
     "metrics_from_ranks",
     "recommended_eval_batch_size",
     "rrf",

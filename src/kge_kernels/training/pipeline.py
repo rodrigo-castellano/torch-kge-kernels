@@ -30,7 +30,6 @@ from ..data import (
     load_triples_with_mappings,
 )
 from ..data import resolve_split_path, resolve_train_path
-from ..eval.checkpoint import evaluate_ranking
 from ..losses import NSSALoss
 from ..models.factory import build_training_model
 from ..scoring import BernoulliSampler as _BernoulliKGESampler
@@ -267,31 +266,29 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         )
 
     # ``_eval_sampler`` is set by the BCE branch below after the training
-    # sampler is built. When set, ``_run_validation`` routes through the
-    # unified compiled ``evaluate()`` path (static buffers + per-model
-    # compile cache). Otherwise it falls back to ``evaluate_ranking``.
+    # sampler is built. ``_run_validation`` always routes through the
+    # unified compiled ``evaluate()`` path; per-relation domain
+    # restriction (countries / ablation) flows in via the
+    # ``CandidateProvider`` head_domain / tail_domain kwargs.
     _eval_sampler = [None]  # boxed so inner function can see the assignment
 
     def _unified_valid_mrr(mdl: torch.nn.Module,
                            valid_t: List[Tuple[int, int, int]]) -> float:
-        """Validation MRR via unified.evaluate (compiled static-buffer path).
-
-        Uses the model's own ``recommended_eval_batch_size`` — the model
-        knows its per-batch memory profile (matmul-style for ComplEx /
-        DistMult, ``[B, E, H]`` broadcast for RotatE). The legacy
-        ``cfg.eval_chunk_size`` is only a lower bound; the model's
-        recommendation is the cap.
-        """
+        """Validation MRR via the unified compiled evaluator."""
         from ..eval.evaluate import CandidateProvider, evaluate
+        from ..eval.eval_hooks import recommended_eval_batch_size
+
         sampler = _eval_sampler[0]
+        assert sampler is not None, "sampler must be built before validation"
         triples_tensor = torch.tensor(valid_t, dtype=torch.long, device=device)
         eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None
         provider = CandidateProvider(
             sampler, num_entities=num_entities,
             k=eval_negs if eval_negs else None,
+            head_domain=head_domain if use_domain_eval else None,
+            tail_domain=tail_domain if use_domain_eval else None,
         )
         scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-        from ..eval.eval_hooks import recommended_eval_batch_size
         recommended_B = recommended_eval_batch_size(mdl, num_entities)
         metrics = evaluate(
             mdl, triples_tensor, provider,
@@ -301,16 +298,6 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             tie_handling="average",
         )
         return float(metrics["MRR"])
-
-    def _exhaustive_valid_mrr(mdl: torch.nn.Module, valid_t: List[Tuple[int, int, int]]) -> float:
-        """Exhaustive filtered validation MRR (legacy path, used when no sampler)."""
-        valid_metrics = evaluate_ranking(
-            mdl, valid_t, num_entities,
-            head_filter, tail_filter, device, cfg.eval_chunk_size,
-            head_domain=head_domain, tail_domain=tail_domain,
-            corruption_scheme=cfg.corruption_scheme,
-        )
-        return float(valid_metrics["MRR"])
 
     def _run_validation(epoch: int, mdl: torch.nn.Module) -> bool:
         """Run validation, update best model, check early stopping. Returns True to stop."""
@@ -322,26 +309,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         if not should_run:
             return False
 
-        if _eval_sampler[0] is not None and not use_domain_eval:
-            # Fast path: shared compiled evaluator with static buffers —
-            # same code ns uses. Per-epoch val hits are amortised by the
-            # cached compiled scorer on the model. Skipped when
-            # ``use_domain_eval`` is set because the training sampler has
-            # no domain info and domain-aware datasets (ablation_d3,
-            # countries_s3) need head/tail domain-restricted candidate
-            # pools for the correct MRR.
-            current_valid_mrr = _unified_valid_mrr(mdl, valid_eval_triples)
-        elif cfg.loss == "bce" and use_domain_eval:
-            current_valid_mrr = _exhaustive_valid_mrr(mdl, valid_eval_triples)
-        else:
-            # Exhaustive filtered ranking
-            valid_metrics = evaluate_ranking(
-                mdl, valid_eval_triples, num_entities,
-                head_filter, tail_filter, device, cfg.eval_chunk_size,
-                head_domain=head_domain, tail_domain=tail_domain,
-                corruption_scheme=cfg.corruption_scheme,
-            )
-            current_valid_mrr = float(valid_metrics["MRR"])
+        current_valid_mrr = _unified_valid_mrr(mdl, valid_eval_triples)
 
         if current_valid_mrr > best_valid_mrr:
             best_valid_mrr = current_valid_mrr
@@ -459,6 +427,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             domain2idx=domain2idx or None,
             entity2domain=entity2domain or None,
         )
+        # Hand sampler to validation closure (same as BCE branch).
+        _eval_sampler[0] = sampler
         dataloader = DataLoader(
             TripleDataset(train_triples), batch_size=cfg.batch_size,
             shuffle=True, num_workers=cfg.num_workers,
@@ -521,31 +491,24 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     # and without it the MRR collapses (domain-restricted eval only
     # ranks against entities that can validly fill the slot).
     def _final_eval(split_label, triples):
-        if _eval_sampler[0] is not None and not use_domain_eval:
-            from ..eval.evaluate import CandidateProvider, evaluate as _u_evaluate
-            triples_t = torch.tensor(triples, dtype=torch.long, device=device)
-            eval_negs = cfg.eval_num_corruptions or None
-            provider = CandidateProvider(
-                _eval_sampler[0], num_entities=num_entities,
-                k=eval_negs if eval_negs else None,
-            )
-            scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-            from ..eval.eval_hooks import recommended_eval_batch_size as _rec_B
-            recommended_B = _rec_B(model, num_entities)
-            return _u_evaluate(
-                model, triples_t, provider,
-                scheme=scheme_map.get(cfg.corruption_scheme, "both"),
-                batch_size=recommended_B, seed=cfg.seed, device=device,
-                compile=True, tie_handling="average",
-            )
-        # Legacy fallback (NSSA branch or domain-aware eval)
-        return evaluate_ranking(
-            model, triples, num_entities,
-            head_filter, tail_filter, device, cfg.eval_chunk_size,
-            head_domain=head_domain, tail_domain=tail_domain,
-            eval_num_corruptions=cfg.eval_num_corruptions, seed=cfg.seed,
-            corruption_scheme=cfg.corruption_scheme,
-            sampler=sampler if cfg.eval_num_corruptions > 0 else None,
+        from ..eval.evaluate import CandidateProvider, evaluate as _u_evaluate
+        from ..eval.eval_hooks import recommended_eval_batch_size as _rec_B
+        assert _eval_sampler[0] is not None, "sampler must be built before final eval"
+        triples_t = torch.tensor(triples, dtype=torch.long, device=device)
+        eval_negs = cfg.eval_num_corruptions or None
+        provider = CandidateProvider(
+            _eval_sampler[0], num_entities=num_entities,
+            k=eval_negs if eval_negs else None,
+            head_domain=head_domain if use_domain_eval else None,
+            tail_domain=tail_domain if use_domain_eval else None,
+        )
+        scheme_map = {"tail": "tail", "head": "head", "both": "both"}
+        recommended_B = _rec_B(model, num_entities)
+        return _u_evaluate(
+            model, triples_t, provider,
+            scheme=scheme_map.get(cfg.corruption_scheme, "both"),
+            batch_size=recommended_B, seed=cfg.seed, device=device,
+            compile=True, tie_handling="average",
         )
 
     if cfg.report_train_mrr:
