@@ -1,14 +1,8 @@
-"""Evaluation framework: single ``evaluate()`` entry point + ranking primitives."""
+"""Evaluation framework: a single class-based evaluator + ranking primitives."""
 
+from .candidates import CandidateSource, Mode, SamplerCandidates
 from .checkpoint import evaluate_checkpoint
-from .eval_hooks import eval_scores, recommended_eval_batch_size
-from .evaluate import (
-    CandidateProvider,
-    Mode,
-    ScoresModel,
-    clear_eval_cache,
-    evaluate,
-)
+from .eval_hooks import kge_default_scorer, recommended_eval_batch_size
 from .pool import CandidatePool
 from .ranking import (
     StreamingRankingMetrics,
@@ -17,20 +11,22 @@ from .ranking import (
     rrf,
     zscore_fusion,
 )
+from .ranking_evaluator import RankingEvaluator, RankingResult, ScoreFn
 from .results import EvalResults
 
 __all__ = [
     "CandidatePool",
-    "CandidateProvider",
+    "CandidateSource",
     "EvalResults",
     "Mode",
-    "ScoresModel",
+    "RankingEvaluator",
+    "RankingResult",
+    "SamplerCandidates",
+    "ScoreFn",
     "StreamingRankingMetrics",
-    "clear_eval_cache",
     "compute_ranks",
-    "eval_scores",
-    "evaluate",
     "evaluate_checkpoint",
+    "kge_default_scorer",
     "metrics_from_ranks",
     "recommended_eval_batch_size",
     "rrf",

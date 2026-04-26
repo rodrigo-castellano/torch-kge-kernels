@@ -1,8 +1,9 @@
 """Example 3 — Standalone filtered-ranking evaluation.
 
 Shows how to evaluate an already-trained KGE model on a test split
-using ``kge_kernels.eval.evaluate``. This is what every published KGE
-paper computes for its MRR / Hits@1 / Hits@3 / Hits@10 table.
+using ``kge_kernels.eval.RankingEvaluator``. This is what every
+published KGE paper computes for its MRR / Hits@1 / Hits@3 / Hits@10
+table.
 
 Both exhaustive and sampled evaluation modes are demonstrated:
   - Exhaustive (``k=None``): rank against all entities
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import torch
 
-from kge_kernels.eval import CandidateProvider, evaluate
+from kge_kernels.eval import RankingEvaluator, SamplerCandidates, kge_default_scorer
 from kge_kernels.models import TransE
 from kge_kernels.scoring import Sampler
 
@@ -35,33 +36,34 @@ def main() -> None:
     valid = [(0, 4, 5), (1, 1, 3)]
     test = [(0, 5, 6), (1, 6, 7), (2, 2, 4)]
 
-    # Sampler over the union of all known triples — provides the filter
-    # used by both exhaustive and sampled candidate pools.
     sampler = Sampler.from_data(
         all_known_triples_idx=torch.tensor(train + valid + test, dtype=torch.long),
         num_entities=num_entities, num_relations=num_relations,
         device=torch.device("cpu"), min_entity_idx=0,
     )
     test_t = torch.tensor(test, dtype=torch.long)
+    scorer = lambda q, p, m: kge_default_scorer(model, q, p, m)
 
     # Exhaustive filtered ranking
-    provider = CandidateProvider(sampler, num_entities=num_entities, k=None)
-    exhaustive = evaluate(
-        model, test_t, provider,
-        scheme="both", batch_size=8,
+    ev_exhaustive = RankingEvaluator(
+        scorer=scorer,
+        candidates=SamplerCandidates(sampler, k=None),
+        batch_size=8, modes=("head", "tail"),
         device=torch.device("cpu"), compile=False,
     )
+    exhaustive = ev_exhaustive.evaluate(test_t).metrics()
     print("Exhaustive filtered ranking:")
     for k, v in exhaustive.items():
         print(f"  {k:>8}: {v:.4f}")
 
     # Sampled filtered ranking (K=10)
-    provider_sampled = CandidateProvider(sampler, num_entities=num_entities, k=10)
-    sampled = evaluate(
-        model, test_t, provider_sampled,
-        scheme="both", batch_size=8, seed=42,
+    ev_sampled = RankingEvaluator(
+        scorer=scorer,
+        candidates=SamplerCandidates(sampler, k=10),
+        batch_size=8, modes=("head", "tail"), seed=42,
         device=torch.device("cpu"), compile=False,
     )
+    sampled = ev_sampled.evaluate(test_t).metrics()
     print("\nSampled filtered ranking (K=10):")
     for k, v in sampled.items():
         print(f"  {k:>8}: {v:.4f}")

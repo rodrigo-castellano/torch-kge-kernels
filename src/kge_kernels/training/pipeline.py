@@ -70,6 +70,46 @@ def _current_state_dict(model: torch.nn.Module) -> Dict[str, Tensor]:
     return _unwrap(model).state_dict()
 
 
+def _build_ranking_evaluator(
+    model: torch.nn.Module,
+    sampler,
+    cfg: TrainConfig,
+    num_entities: int,
+    *,
+    head_domain,
+    tail_domain,
+    use_domain_eval: bool,
+    device: torch.device,
+):
+    """Build the cached RankingEvaluator. Called once after the
+    training sampler is built; reused for every validation pass and
+    final eval. Compile cache lives on this instance."""
+    from ..eval.candidates import SamplerCandidates
+    from ..eval.eval_hooks import kge_default_scorer, recommended_eval_batch_size
+    from ..eval.ranking_evaluator import RankingEvaluator
+
+    eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None
+    candidates = SamplerCandidates(
+        sampler, k=eval_negs,
+        head_domain=head_domain if use_domain_eval else None,
+        tail_domain=tail_domain if use_domain_eval else None,
+    )
+    scheme = cfg.corruption_scheme if cfg.corruption_scheme in ("head", "tail", "both") else "both"
+    modes = ("head", "tail") if scheme == "both" else (scheme,)
+    batch_size = recommended_eval_batch_size(model, num_entities)
+    scorer = lambda q, p, m: kge_default_scorer(model, q, p, m)
+    return RankingEvaluator(
+        scorer=scorer,
+        candidates=candidates,
+        batch_size=batch_size,
+        modes=modes,
+        device=device,
+        compile=True,
+        tie_handling="average",
+        seed=0,
+    )
+
+
 def _build_known_sampling_triples(
     *,
     train_triples: List[Tuple[int, int, int]],
@@ -265,39 +305,20 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             epochs_completed_payload=epochs_completed,
         )
 
-    # ``_eval_sampler`` is set by the BCE branch below after the training
-    # sampler is built. ``_run_validation`` always routes through the
-    # unified compiled ``evaluate()`` path; per-relation domain
-    # restriction (countries / ablation) flows in via the
-    # ``CandidateProvider`` head_domain / tail_domain kwargs.
-    _eval_sampler = [None]  # boxed so inner function can see the assignment
+    # The RankingEvaluator is instantiated once after the sampler is
+    # built (see the loss-branch below) and reused across every
+    # validation pass + the final eval — its compiled scorers and
+    # static buffers persist for the training run's lifetime.
+    _evaluator = [None]  # boxed so inner functions can see the assignment
 
     def _unified_valid_mrr(mdl: torch.nn.Module,
                            valid_t: List[Tuple[int, int, int]]) -> float:
-        """Validation MRR via the unified compiled evaluator."""
-        from ..eval.evaluate import CandidateProvider, evaluate
-        from ..eval.eval_hooks import recommended_eval_batch_size
-
-        sampler = _eval_sampler[0]
-        assert sampler is not None, "sampler must be built before validation"
+        """Validation MRR via the cached RankingEvaluator."""
+        ev = _evaluator[0]
+        assert ev is not None, "RankingEvaluator must be built before validation"
         triples_tensor = torch.tensor(valid_t, dtype=torch.long, device=device)
-        eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None
-        provider = CandidateProvider(
-            sampler, num_entities=num_entities,
-            k=eval_negs if eval_negs else None,
-            head_domain=head_domain if use_domain_eval else None,
-            tail_domain=tail_domain if use_domain_eval else None,
-        )
-        scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-        recommended_B = recommended_eval_batch_size(mdl, num_entities)
-        metrics = evaluate(
-            mdl, triples_tensor, provider,
-            scheme=scheme_map.get(cfg.corruption_scheme, "both"),
-            batch_size=recommended_B,
-            seed=0, device=device, compile=True,
-            tie_handling="average",
-        )
-        return float(metrics["MRR"])
+        result = ev.evaluate(triples_tensor)
+        return float(result.metrics()["MRR"])
 
     def _run_validation(epoch: int, mdl: torch.nn.Module) -> bool:
         """Run validation, update best model, check early stopping. Returns True to stop."""
@@ -362,11 +383,15 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 device=device, default_mode=corrupt_mode,
                 min_entity_idx=0,
             )
-        # Hand the sampler to the validation closure so per-epoch val goes
-        # through the compiled unified evaluator. The sampler's filter
-        # hashes were built from train ∪ valid ∪ test positives, so known
-        # positives are correctly excluded from the candidate pool.
-        _eval_sampler[0] = sampler
+        # Build the cached RankingEvaluator now that the sampler is in
+        # hand. The sampler's filter hashes were built from train ∪
+        # valid ∪ test positives, so known positives are excluded
+        # correctly from the candidate pool.
+        _evaluator[0] = _build_ranking_evaluator(
+            model, sampler, cfg, num_entities,
+            head_domain=head_domain, tail_domain=tail_domain,
+            use_domain_eval=use_domain_eval, device=device,
+        )
 
         # Pre-allocate training triples on device for bare-tensor loop
         # (no DataLoader / Python iteration overhead).
@@ -427,8 +452,12 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             domain2idx=domain2idx or None,
             entity2domain=entity2domain or None,
         )
-        # Hand sampler to validation closure (same as BCE branch).
-        _eval_sampler[0] = sampler
+        # Build the cached RankingEvaluator (same as BCE branch).
+        _evaluator[0] = _build_ranking_evaluator(
+            model, sampler, cfg, num_entities,
+            head_domain=head_domain, tail_domain=tail_domain,
+            use_domain_eval=use_domain_eval, device=device,
+        )
         dataloader = DataLoader(
             TripleDataset(train_triples), batch_size=cfg.batch_size,
             shuffle=True, num_workers=cfg.num_workers,
@@ -482,34 +511,14 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     metrics: Dict[str, float] = {}
     metric_logs: List[str] = []
 
-    # Final train / valid / test eval. When ``_eval_sampler`` is set
-    # (BCE branch) AND the dataset isn't domain-restricted, route
-    # through the unified compiled evaluator so final metrics reuse the
-    # CUDA graphs captured during training. Domain-aware datasets
-    # (ablation_d3, countries_s3, ...) still need the legacy path: the
-    # training sampler doesn't know about head/tail domain restriction,
-    # and without it the MRR collapses (domain-restricted eval only
-    # ranks against entities that can validly fill the slot).
+    # Final train / valid / test eval reuses the same RankingEvaluator
+    # built during training — same compile cache, same static buffers.
     def _final_eval(split_label, triples):
-        from ..eval.evaluate import CandidateProvider, evaluate as _u_evaluate
-        from ..eval.eval_hooks import recommended_eval_batch_size as _rec_B
-        assert _eval_sampler[0] is not None, "sampler must be built before final eval"
+        ev = _evaluator[0]
+        assert ev is not None, "RankingEvaluator must be built before final eval"
         triples_t = torch.tensor(triples, dtype=torch.long, device=device)
-        eval_negs = cfg.eval_num_corruptions or None
-        provider = CandidateProvider(
-            _eval_sampler[0], num_entities=num_entities,
-            k=eval_negs if eval_negs else None,
-            head_domain=head_domain if use_domain_eval else None,
-            tail_domain=tail_domain if use_domain_eval else None,
-        )
-        scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-        recommended_B = _rec_B(model, num_entities)
-        return _u_evaluate(
-            model, triples_t, provider,
-            scheme=scheme_map.get(cfg.corruption_scheme, "both"),
-            batch_size=recommended_B, seed=cfg.seed, device=device,
-            compile=True, tie_handling="average",
-        )
+        result = ev.evaluate(triples_t)
+        return result.metrics()
 
     if cfg.report_train_mrr:
         train_eval_triples = _limit_eval_triples(

@@ -1,18 +1,19 @@
 """Load a saved KGE checkpoint and evaluate it on a split.
 
-Single responsibility: rebuild the model from on-disk artifacts, then
-delegate ranking to :func:`kge_kernels.eval.evaluate`. Exhaustive vs
-sampled, filtered, optional per-relation domain restriction — all
-expressed by what we hand to ``CandidateProvider``.
+Single responsibility: rebuild the model from on-disk artifacts, build
+a :class:`~kge_kernels.eval.SamplerCandidates` over train ∪ valid ∪ test,
+instantiate :class:`~kge_kernels.eval.RankingEvaluator`, and call it.
 """
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional, Sequence, Set, Tuple
+from typing import Dict
 
 import torch
 
-from .evaluate import CandidateProvider, evaluate
+from .candidates import SamplerCandidates
+from .eval_hooks import kge_default_scorer, recommended_eval_batch_size
+from .ranking_evaluator import RankingEvaluator
 
 
 def evaluate_checkpoint(
@@ -28,13 +29,9 @@ def evaluate_checkpoint(
     show_progress: bool = True,
     eval_limit: int = 0,
 ) -> Dict[str, float]:
-    """Load a saved checkpoint and evaluate on the requested split.
-
-    Builds a tkk Sampler from the train ∪ valid ∪ test triples (filtered
-    protocol) and an optional per-relation domain mask for countries-style
-    datasets, then runs :func:`kge_kernels.eval.evaluate`.
-    """
-    del compile_warmup_steps  # superseded — evaluate() handles compile internally
+    """Load a saved checkpoint and evaluate on the requested split."""
+    del compile_warmup_steps  # superseded — RankingEvaluator handles compile
+    del show_progress
 
     from ..data import (
         add_reciprocal_triples,
@@ -116,10 +113,10 @@ def evaluate_checkpoint(
     if not eval_triples:
         raise ValueError(f"No triples available for split '{split_name}'")
     if eval_limit > 0 and len(eval_triples) > eval_limit:
-        print(f"Profiling/evaluation limit: using first {eval_limit} of {len(eval_triples)} {split_name} triples")
+        print(f"Evaluation limit: using first {eval_limit} of {len(eval_triples)} {split_name} triples")
         eval_triples = eval_triples[:eval_limit]
 
-    # Build a filtered sampler over the union of all known triples.
+    # Filtered sampler over the union of all known triples.
     known = torch.tensor(triples + valid_triples + test_triples, dtype=torch.long)
     sampler = Sampler.from_data(
         all_known_triples_idx=known,
@@ -130,23 +127,30 @@ def evaluate_checkpoint(
     )
 
     eval_negs = cfg.eval_num_corruptions or None
-    provider = CandidateProvider(
-        sampler, num_entities=num_entities, k=eval_negs,
+    candidates = SamplerCandidates(
+        sampler, k=eval_negs,
         head_domain=head_domain, tail_domain=tail_domain,
     )
 
+    scheme = cfg.corruption_scheme if cfg.corruption_scheme in ("head", "tail", "both") else "both"
+    modes = ("head", "tail") if scheme == "both" else (scheme,)
+    batch_size = recommended_eval_batch_size(model, num_entities) if not eval_negs else max(1, cfg.eval_chunk_size or 512)
+
     print(f"Evaluating {split_name} split from {weights_path} ...")
-    triples_t = torch.tensor(eval_triples, dtype=torch.long, device=device)
-    metrics = evaluate(
-        model, triples_t, provider,
-        scheme=cfg.corruption_scheme if cfg.corruption_scheme in ("head", "tail", "both") else "both",
-        batch_size=max(1, cfg.eval_chunk_size or 512),
-        seed=cfg.seed,
+    scorer = lambda q, p, m: kge_default_scorer(model, q, p, m)
+    evaluator = RankingEvaluator(
+        scorer=scorer,
+        candidates=candidates,
+        batch_size=batch_size,
+        modes=modes,
         device=device,
         compile=cfg.compile,
         tie_handling="average",
+        seed=cfg.seed,
     )
-    del show_progress  # evaluate() doesn't expose progress; legacy noise
+    triples_t = torch.tensor(eval_triples, dtype=torch.long, device=device)
+    result = evaluator.evaluate(triples_t)
+    metrics = result.metrics()
     print(
         f"{split_name.capitalize()} metrics | "
         f"mrr={metrics['MRR']:.4f} "

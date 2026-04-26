@@ -19,7 +19,7 @@ from typing import List, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from kge_kernels.eval import CandidateProvider, evaluate
+from kge_kernels.eval import RankingEvaluator, SamplerCandidates, kge_default_scorer
 from kge_kernels.scoring import Sampler
 from kge_kernels.losses import NSSALoss
 from kge_kernels.models import TransE
@@ -122,12 +122,14 @@ def main() -> None:
         num_entities=num_entities, num_relations=num_relations,
         device=torch.device("cpu"), min_entity_idx=0,
     )
-    provider = CandidateProvider(sampler, num_entities=num_entities, k=None)
-    metrics = evaluate(
-        model, torch.tensor(test_triples, dtype=torch.long),
-        provider, scheme="both", batch_size=64,
+    candidates = SamplerCandidates(sampler, k=None)
+    ev = RankingEvaluator(
+        scorer=lambda q, p, m: kge_default_scorer(model, q, p, m),
+        candidates=candidates,
+        batch_size=64, modes=("head", "tail"),
         device=torch.device("cpu"), compile=False,
     )
+    metrics = ev.evaluate(torch.tensor(test_triples, dtype=torch.long)).metrics()
     print("Test metrics (exhaustive filtered ranking):")
     for k, v in metrics.items():
         print(f"  {k:>8}: {v:.4f}")

@@ -5,9 +5,10 @@ from torch import nn
 
 from kge_kernels.eval import (
     CandidatePool,
-    CandidateProvider,
     EvalResults,
-    evaluate,
+    RankingEvaluator,
+    SamplerCandidates,
+    kge_default_scorer,
     rrf,
     zscore_fusion,
 )
@@ -121,33 +122,36 @@ def test_zscore_fusion():
 
 
 def test_evaluate_sampled_mode():
-    """evaluate() with sampled CandidateProvider returns valid metrics."""
+    """RankingEvaluator with sampled SamplerCandidates returns valid metrics."""
     model = _FakeModel(num_entities=20)
     sampler = _make_sampler(num_entities=20)
     queries = torch.tensor([[0, 10, 15], [1, 12, 18]], dtype=torch.long)
-    provider = CandidateProvider(sampler, num_entities=20, k=10)
-    results = evaluate(
-        model, queries, provider,
-        scheme="tail", batch_size=2,
-        seed=42, device=torch.device("cpu"), compile=False,
+    candidates = SamplerCandidates(sampler, k=10)
+    ev = RankingEvaluator(
+        scorer=lambda q, p, m: kge_default_scorer(model, q, p, m),
+        candidates=candidates,
+        batch_size=2, modes=("tail",), seed=42,
+        device=torch.device("cpu"), compile=False,
     )
-    assert "MRR" in results
-    assert results["MRR"] > 0
+    metrics = ev.evaluate(queries).metrics()
+    assert "MRR" in metrics
+    assert metrics["MRR"] > 0
 
 
 def test_evaluate_exhaustive_mode():
-    """evaluate() with exhaustive CandidateProvider returns valid metrics."""
+    """RankingEvaluator with exhaustive SamplerCandidates returns valid metrics."""
     model = _FakeModel(num_entities=10)
     sampler = _make_sampler(num_entities=10)
     queries = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.long)
-    provider = CandidateProvider(sampler, num_entities=10, k=None)
-    results = evaluate(
-        model, queries, provider,
-        scheme="both", batch_size=2,
-        device=torch.device("cpu"), compile=False,
+    candidates = SamplerCandidates(sampler, k=None)
+    ev = RankingEvaluator(
+        scorer=lambda q, p, m: kge_default_scorer(model, q, p, m),
+        candidates=candidates,
+        batch_size=2, device=torch.device("cpu"), compile=False,
     )
-    assert "MRR" in results
-    assert 0.0 <= results["MRR"] <= 1.0
+    metrics = ev.evaluate(queries).metrics()
+    assert "MRR" in metrics
+    assert 0.0 <= metrics["MRR"] <= 1.0
 
 
 def test_eval_results_to_dict():

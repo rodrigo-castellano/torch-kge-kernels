@@ -1,54 +1,45 @@
-"""Eval-time scoring helpers.
+"""Default scorer + memory heuristic for tkk-native KGE models.
 
-Free functions over a tkk-native KGE model. Owned by the eval pipeline
-rather than the model — the model exposes only ``score(h, r, t)`` (the
-math), and these wrap it with the gather + memory-budget logic the eval
-loop needs.
-
-Subclasses with a different scoring path (e.g. ns's ``ReasonerModel``
-candidate-pool replay) override by defining their own ``eval_scores``
-method on the model; :func:`kge_kernels.eval.evaluate.evaluate` prefers
-``model.eval_scores`` when present and falls back to this free function
-otherwise.
+Free functions, not methods. The :class:`~kge_kernels.eval.RankingEvaluator`
+takes any callable matching :type:`~kge_kernels.eval.ScoreFn`; for a plain
+KGE model with a ``score(h, r, t)`` API, wrap it in :func:`kge_default_scorer`.
+For a model that has its own ``eval_scores`` method (ns ``ReasonerModel``,
+DpRL ``PPOScorer``), pass the bound method directly.
 """
 from __future__ import annotations
 
-from typing import Literal
-
 from torch import Tensor, nn
 
+from .candidates import Mode
 
-Mode = Literal["tail", "head"]
 
-
-def eval_scores(
+def kge_default_scorer(
     model: nn.Module,
     q_buf: Tensor,     # [B, 3]  int64, columns (r, h, t)
-    cand_buf: Tensor,  # [B, C]  int64, entity indices to score
+    pool_buf: Tensor,  # [B, P]  int64, entity indices to score
     mode: Mode,
-) -> Tensor:           # [B, C]  float
-    """Score candidates against a query batch — the unified eval hook.
+) -> Tensor:           # [B, P]  float
+    """Default scorer for tkk-native KGE models with ``model.score(h, r, t)``.
 
-    The compile boundary for :func:`kge_kernels.eval.evaluate.evaluate`.
-    Shapes are fixed across calls (``B``, ``C`` constant within a single
-    :func:`evaluate` call) so this traces into one CUDA graph.
+    Three steps in one expression:
 
-    Uses the matmul fast path inside ``model.score``: with ``t=None``
-    (or ``h=None``) every model computes all-entity scores ``[B, |E|]``
-    in one BLAS call, and we gather the ``C`` candidates here.
+    1. **Reshuffle**: ``q_buf`` columns are ``(r, h, t)``; ``model.score``
+       takes ``(h, r, t)``.
+    2. **Mode dispatch**: pass ``None`` for the corrupted side, triggering
+       the model's all-entities matmul fast path → ``[B, |E|]``.
+    3. **Gather**: pull the ``P`` candidate columns from ``[B, |E|]`` via
+       ``pool_buf``.
 
-    ``mode`` is a Python string, not a tensor: ``torch.compile``
-    specialises one graph per value, keeping the compiled region
-    branch-free.
+    Mode is a Python string fixed per compile — every call inside a
+    given ``RankingEvaluator`` invocation has the same value, so
+    ``torch.compile`` specializes on it without a tensor branch.
     """
     r = q_buf[:, 0]
     if mode == "tail":
-        h = q_buf[:, 1]
-        all_scores = model.score(h, r, None)                   # [B, |E|]
+        all_scores = model.score(q_buf[:, 1], r, None)
     else:
-        t = q_buf[:, 2]
-        all_scores = model.score(None, r, t)                   # [B, |E|]
-    return all_scores.gather(1, cand_buf)                      # [B, C]
+        all_scores = model.score(None, r, q_buf[:, 2])
+    return all_scores.gather(1, pool_buf)
 
 
 def recommended_eval_batch_size(
@@ -56,15 +47,15 @@ def recommended_eval_batch_size(
     num_entities: int,
     budget_gb: float = 2.0,
 ) -> int:
-    """Largest safe compile-graph batch size for :func:`eval_scores`.
+    """Largest safe compile-graph batch size for :func:`kge_default_scorer`.
 
-    Default assumes matmul-style ``[B, |E|]`` output (ComplEx,
-    DistMult, TransE, ModE, TuckER): peak intermediate is bounded by
+    Default assumes matmul-style ``[B, |E|]`` output (ComplEx, DistMult,
+    TransE, ModE, TuckER): peak intermediate is bounded by
     ``B × |E| × 4 bytes``, so ``B ≤ budget_gb × 2^30 / (4|E|)``.
 
     RotatE-family broadcasts to a ``[B, |E|, half_dim]`` intermediate —
-    one dimension larger. We detect them via ``getattr(model,
-    'half_dim', None)`` and factor it into the budget.
+    one dimension larger. Detect via ``getattr(model, 'half_dim', None)``
+    and factor it into the budget.
     """
     half_dim = getattr(model, "half_dim", None)
     budget_b = budget_gb * (1 << 30)
@@ -75,4 +66,4 @@ def recommended_eval_batch_size(
     return max(16, min(4096, int(budget_b / max(bytes_per_B, 1))))
 
 
-__all__ = ["Mode", "eval_scores", "recommended_eval_batch_size"]
+__all__ = ["kge_default_scorer", "recommended_eval_batch_size"]
