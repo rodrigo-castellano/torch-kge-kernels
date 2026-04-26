@@ -10,6 +10,7 @@ here. ``grounder`` provides the ``ResolutionOp`` (its ``ProofState`` and
 """
 from __future__ import annotations
 
+from .atom_classification import classify_atoms
 from .atom_repr import KGEBothAtom, KGEEmbedAtom, KGEScoreAtom, MLPAtom
 from .protocols import (
     AtomRepr,
@@ -25,6 +26,8 @@ from .query_repr import (
     MaxQueryRepr,
     MeanQueryRepr,
     MLPSumQueryRepr,
+    PolicyRolloutQueryRepr,
+    ProofScoreQueryRepr,
     SumQueryRepr,
 )
 from .repr import Repr
@@ -45,8 +48,14 @@ from .state_repr import (
 )
 from .traj_repr import (
     BestCumulativeTrajRepr,
+    BestEverStateScoreTrajRepr,
+    BestPrefixAvgTrajRepr,
     CumulativeLogTrajRepr,
+    FinalStateScoresTrajRepr,
+    FinalStepLogScoreTrajRepr,
     MinStepTrajRepr,
+    MultiRepr,
+    MultiTrajRepr,
     PolicyProductTrajRepr,
     SBRBodyMinTrajRepr,
     TNormTrajRepr,
@@ -66,7 +75,8 @@ __all__ = [
     "Select",
     "StateRepr",
     "TrajRepr",
-    # Atom reprs
+    # Atom classification + reprs
+    "classify_atoms",
     "KGEBothAtom",
     "KGEEmbedAtom",
     "KGEScoreAtom",
@@ -79,8 +89,14 @@ __all__ = [
     "TNormStateRepr",
     # Traj reprs
     "BestCumulativeTrajRepr",
+    "BestEverStateScoreTrajRepr",
+    "BestPrefixAvgTrajRepr",
     "CumulativeLogTrajRepr",
+    "FinalStateScoresTrajRepr",
+    "FinalStepLogScoreTrajRepr",
     "MinStepTrajRepr",
+    "MultiRepr",
+    "MultiTrajRepr",
     "PolicyProductTrajRepr",
     "SBRBodyMinTrajRepr",
     "TNormTrajRepr",
@@ -90,6 +106,8 @@ __all__ = [
     "MLPSumQueryRepr",
     "MaxQueryRepr",
     "MeanQueryRepr",
+    "PolicyRolloutQueryRepr",
+    "ProofScoreQueryRepr",
     "SumQueryRepr",
     # Select
     "BeamSelect",
