@@ -5,7 +5,6 @@ from .checkpoint import evaluate_checkpoint
 from .eval_hooks import kge_default_scorer, recommended_eval_batch_size
 from .pool import CandidatePool
 from .ranking import (
-    StreamingRankingMetrics,
     compute_ranks,
     metrics_from_ranks,
     rrf,
@@ -23,7 +22,6 @@ __all__ = [
     "RankingResult",
     "SamplerCandidates",
     "ScoreFn",
-    "StreamingRankingMetrics",
     "compute_ranks",
     "evaluate_checkpoint",
     "kge_default_scorer",

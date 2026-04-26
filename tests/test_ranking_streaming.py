@@ -5,10 +5,8 @@ import math
 
 import torch
 
-from kge_kernels.eval import (
-    StreamingRankingMetrics,
-    metrics_from_ranks,
-)
+from kge_kernels.eval import metrics_from_ranks
+from kge_kernels.training import StreamingRankingMetrics
 
 # ═══════════════════════════════════════════════════════════════════════
 # metrics_from_ranks with ks parameter

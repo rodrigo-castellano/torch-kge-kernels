@@ -40,6 +40,7 @@ from .loop import (
     wrap_model_for_training,
 )
 from .loss import train_step
+from .metrics import StreamingRankingMetrics
 from .pipeline import train_model
 
 __all__ = [
@@ -59,6 +60,8 @@ __all__ = [
     "train_kge",
     "train_step",
     "wrap_model_for_training",
+    # Streaming metrics for training-time observability
+    "StreamingRankingMetrics",
     # Full pipeline
     "train_model",
     # Checkpoints
