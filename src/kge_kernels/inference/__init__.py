@@ -8,6 +8,7 @@ from .loader import (
     _get_backend_class,
     current_backend,
     find_latest_run,
+    make_query_scorer,
     normalize_backend,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "_get_backend_class",
     "current_backend",
     "find_latest_run",
+    "make_query_scorer",
     "normalize_backend",
 ]

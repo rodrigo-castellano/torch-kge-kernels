@@ -9,7 +9,7 @@ import subprocess
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -536,3 +536,24 @@ def current_backend(engine: Optional[KGEInference] = None) -> str:
     if engine is not None:
         return engine.backend
     return "pytorch"
+
+
+def make_query_scorer(kge_engine: Any) -> Callable[[Tensor], Tensor]:
+    """Return a callable that scores ``[B, 3]`` (pred, head, tail) queries.
+
+    Output is sigmoid-normalised: ``[B] -> (0, 1)``. The closure defers
+    model lookup so lazy checkpoint loading still works — the engine is
+    forced to load on first call if needed.
+    """
+
+    @torch.no_grad()
+    def scorer(queries: Tensor) -> Tensor:
+        model = kge_engine.model
+        if model is None:
+            model = kge_engine._build_and_load_model()
+            kge_engine.model = model
+        return torch.sigmoid(
+            model.score(queries[:, 1], queries[:, 0], queries[:, 2])
+        )
+
+    return scorer
