@@ -80,12 +80,13 @@ def test_load_triples_with_mappings(tmp_path):
     path.write_text("alice\tknows\tbob\nbob\tknows\tcarol\n")
     triple_ids, e2id, r2id = load_triples_with_mappings(str(path))
     assert len(triple_ids) == 2
-    # Entity ids assigned in discovery order: alice=0, bob=1, carol=2
-    assert e2id == {"alice": 0, "bob": 1, "carol": 2}
-    assert r2id == {"knows": 0}
+    # Entity ids assigned in discovery order, 1-based (id 0 reserved for padding):
+    # alice=1, bob=2, carol=3
+    assert e2id == {"alice": 1, "bob": 2, "carol": 3}
+    assert r2id == {"knows": 1}
     # Triple format is (r, h, t)
-    assert triple_ids[0] == (0, 0, 1)
-    assert triple_ids[1] == (0, 1, 2)
+    assert triple_ids[0] == (1, 1, 2)
+    assert triple_ids[1] == (1, 2, 3)
 
 
 # ═══════════════════════════════════════════════════════════════════════

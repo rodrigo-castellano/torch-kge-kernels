@@ -29,7 +29,7 @@ from ..data import (
     load_domain_file,
     load_triples_with_mappings,
 )
-from ..data.paths import resolve_split_path, resolve_train_path
+from ..data import resolve_split_path, resolve_train_path
 from ..eval.checkpoint import evaluate_ranking
 from ..losses import NSSALoss
 from ..models.factory import build_training_model
@@ -138,8 +138,14 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         split_filename=cfg.test_split,
     )
     print(f"Loading triples from {train_file} ...")
+    # tkk standalone uses a dense 0-based id space (no padding sentinel) —
+    # its models, sampler, and evaluator size everything to exactly
+    # ``num_entities`` / ``num_relations``. ns / DpRL consume the same
+    # data via ``KnowledgeBase`` with ``padding_idx=0`` (id 0 reserved)
+    # so the shift convention lives in one parameter at the loader.
     train_triples, e2id, r2id = load_triples_with_mappings(
         train_file, extra_paths=[p for p in (_valid_p, _test_p) if p],
+        padding_idx=None,
     )
     if not train_triples:
         raise ValueError("No triples found for training")

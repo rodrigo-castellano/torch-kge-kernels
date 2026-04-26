@@ -1,25 +1,19 @@
 """Knowledge-graph dataset utilities.
 
-Pure-Python helpers shared by DpRL, torch-ns, and any future KGE consumer.
+Public API surface:
 
-The high-level entry point is :class:`KnowledgeBase` — an extensible
-base class that runs the full canonical loading pipeline (vocabulary
-discovery, split encoding, filter maps, domain mappings) so consumers
-only need to subclass and add their domain-specific structures.
+- :class:`KnowledgeBase` — base loader running the full canonical
+  pipeline (vocabulary discovery, split encoding, filter maps, domain
+  mappings, optional materialize). Subclass to add consumer-specific
+  structures (DpRL's RL extras, ns's reasoner-side bookkeeping).
+- :class:`MaterializedSplit` — generic ``(queries, labels, depths)``
+  tensor bundle returned by ``materialize`` for one split.
+- File parsers — see :mod:`kge_kernels.data.loaders`.
+- Triple-set transforms — see :mod:`kge_kernels.data.transforms`.
 
-Lower-level building blocks remain available for callers that need more
-control:
-
-  ``TripleExample``                 — named triple (head, relation, tail)
-  ``load_triples``                  — parse TSV/CSV/Prolog triple files
-  ``load_triples_with_mappings``    — load + assign entity/relation ids
-  ``encode_split_triples``          — encode a split using an existing vocab
-  ``add_reciprocal_triples``        — double the triple set with inverse relations
-  ``build_filter_maps``             — filtered-ranking head/tail sets
-  ``build_relation_domains``        — per-relation observed head/tail domains
-  ``load_dataset_split``            — resolve ``<root>/<dataset>/<split>``
-  ``resolve_train_path``            — pick explicit path or resolve via convention
-  ``resolve_split_path``            — resolve optional eval split
+Id assignment is **1-based**: id ``0`` is reserved as the padding
+sentinel across tkk standalone training, ns reasoner training, and
+DpRL RL.
 """
 from __future__ import annotations
 
@@ -28,15 +22,15 @@ from .loaders import (
     TripleExample,
     detect_triple_format,
     encode_split_triples,
+    load_dataset_split,
+    load_depth_file,
+    load_domain_file,
     load_probabilistic_facts,
     load_rules_file,
     load_triples,
     load_triples_with_mappings,
     parse_atom_str,
     parse_prolog_rule,
-)
-from .paths import (
-    load_dataset_split,
     resolve_split_path,
     resolve_train_path,
 )
@@ -46,9 +40,6 @@ from .transforms import (
     build_relation_domains,
     build_relation_domains_from_file,
     filter_queries_by_predicates,
-    iter_queries_with_depth,
-    load_depth_file,
-    load_domain_file,
 )
 
 __all__ = [
@@ -62,7 +53,6 @@ __all__ = [
     "detect_triple_format",
     "encode_split_triples",
     "filter_queries_by_predicates",
-    "iter_queries_with_depth",
     "load_dataset_split",
     "load_depth_file",
     "load_domain_file",

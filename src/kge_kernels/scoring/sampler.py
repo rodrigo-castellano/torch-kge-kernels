@@ -1,13 +1,87 @@
-"""Fully vectorized corruption sampler shared across projects."""
+"""Fully vectorized corruption sampler shared across projects.
+
+Public surface:
+
+- :class:`Sampler` — the core class with ``corrupt_with_mask`` /
+  ``corrupt`` / Bernoulli mode / domain-restricted pools / filtered
+  lookup over a known-positives index.
+- :func:`corrupt` — module-level entry point that wraps any
+  :class:`SupportsCorruptWithMask` implementation and returns the
+  shared :class:`CorruptionOutput` dataclass.
+- :func:`corrupt_to_lists`, :func:`corrupt_with_topup` — Python-list
+  on-the-fly corruption helpers for ``Dataset.__getitem__``-style use.
+- :func:`compute_bernoulli_probs` — per-relation head/tail Bernoulli
+  probabilities for ``mode="bernoulli"`` corruption.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+import random
+from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
+from torch import Tensor as _Tensor
 
 from .types import CorruptionOutput, LongTensor, SamplerConfig, SupportsCorruptWithMask, Tensor
-from .utils import _mix_hash
+
+
+# ============================================================================
+# Internal hashing utilities
+# ============================================================================
+
+
+def _mix_hash(triples: LongTensor, b_e: int, b_r: int) -> LongTensor:
+    """Pack ``(r, h, t)`` triples into sortable 64-bit hash values.
+
+    The arithmetic bases are provided by the caller so the mapping stays
+    unique for that caller's entity and relation ranges without relying
+    on fixed bit widths.
+    """
+    h = triples[..., 1].to(dtype=triples.dtype)
+    r = triples[..., 0].to(dtype=triples.dtype)
+    t = triples[..., 2].to(dtype=triples.dtype)
+    return ((h * b_r) + r) * b_e + t
+
+
+def compute_bernoulli_probs(triples_rht: LongTensor, num_relations: int) -> _Tensor:
+    """Per-relation head-corruption probabilities for Bernoulli sampling.
+
+    Args:
+        triples_rht: ``[N, 3]`` triples in ``(r, h, t)`` format.
+        num_relations: Total number of relations.
+
+    Returns:
+        ``[num_relations]`` float tensor of head-corruption probabilities,
+        clamped to ``[0.05, 0.95]``.
+    """
+    t = triples_rht.cpu().long()
+    rels = t[:, 0]
+    heads = t[:, 1]
+    tails = t[:, 2]
+    N = t.shape[0]
+
+    ones = torch.ones(N, dtype=torch.float32)
+    triple_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(0, rels, ones)
+
+    max_ent = max(heads.max().item(), tails.max().item()) + 1
+
+    rh_rels = torch.unique(rels * max_ent + heads) // max_ent
+    unique_head_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
+        0, rh_rels, torch.ones(rh_rels.shape[0], dtype=torch.float32)
+    )
+
+    rt_rels = torch.unique(rels * max_ent + tails) // max_ent
+    unique_tail_counts = torch.zeros(num_relations, dtype=torch.float32).scatter_add_(
+        0, rt_rels, torch.ones(rt_rels.shape[0], dtype=torch.float32)
+    )
+
+    # tph = tails per head, hpt = heads per tail
+    tph = triple_counts / unique_head_counts.clamp(min=1)
+    hpt = triple_counts / unique_tail_counts.clamp(min=1)
+
+    denom = tph + hpt
+    probs = torch.where(denom > 0, tph / denom, torch.full_like(denom, 0.5))
+    return probs.clamp(0.05, 0.95)
 
 
 class Sampler:
@@ -450,4 +524,106 @@ def corrupt(
     return CorruptionOutput(negatives=negatives, valid_mask=valid_mask)
 
 
-__all__ = ["Sampler", "SamplerConfig", "corrupt"]
+# ============================================================================
+# On-the-fly corruption helpers (Python-list output for Dataset.__getitem__)
+# ============================================================================
+
+
+def corrupt_to_lists(
+    neg: torch.Tensor, valid: torch.Tensor,
+) -> List[List[Tuple[int, int, int]]]:
+    """Convert ``(neg [B, K, 3], valid [B, K])`` to a Python list of valid rows.
+
+    Drops every entry whose ``valid`` flag is False; preserves per-query
+    grouping. Returns rows in ``(r, h, t)`` order matching the sampler's
+    public tensor format.
+    """
+    out: List[List[Tuple[int, int, int]]] = []
+    for triples, mask in zip(neg.tolist(), valid.tolist()):
+        out.append([
+            tuple(map(int, triple))
+            for triple, keep in zip(triples, mask) if keep
+        ])
+    return out
+
+
+def corrupt_with_topup(
+    sampler: "Sampler",
+    queries: List[Tuple[int, int, int]],
+    *,
+    num_negatives: Optional[int],
+    mode: str,
+    max_retries: int = 4,
+) -> List[List[Tuple[int, int, int]]]:
+    """Generate ``num_negatives`` valid negatives per query, with retry + duplicate fallback.
+
+    Wraps :meth:`Sampler.corrupt_with_mask` (with ``filter=True, unique=False``)
+    and retries up to ``max_retries`` times, doubling the draw count each
+    pass to maximize the chance of filling every row. If after the retries
+    some rows are still short, falls back to an unfiltered exhaustive draw
+    and tops up via :func:`random.choices` from each query's own pool.
+
+    ``num_negatives=None`` skips topup entirely and returns the variable-length
+    valid rows from a single exhaustive draw — used by ranking eval where
+    "all candidates" is the desired output, not a fixed-K bundle.
+
+    Returns a list of length ``len(queries)`` where each row has exactly
+    ``num_negatives`` entries (or as close as the sampler can deliver in
+    extreme small-domain edge cases).
+    """
+    if not queries:
+        return []
+    queries_tensor = torch.tensor(queries, dtype=torch.long)
+
+    if num_negatives is None:
+        neg, valid = sampler.corrupt_with_mask(
+            queries_tensor, num_negatives=None, mode=mode,
+            device=torch.device("cpu"), filter=True, unique=False,
+        )
+        return corrupt_to_lists(neg, valid)
+
+    target = num_negatives
+    gathered: List[List[Tuple[int, int, int]]] = [[] for _ in queries]
+    pending = list(range(len(queries)))
+
+    for _ in range(max_retries):
+        if not pending:
+            break
+        sub = queries_tensor[pending]
+        remaining = [target - len(gathered[idx]) for idx in pending]
+        draw_k = max(1, max(remaining)) * 2
+        neg, valid = sampler.corrupt_with_mask(
+            sub, num_negatives=draw_k, mode=mode,
+            device=torch.device("cpu"), filter=True, unique=False,
+        )
+        rows = corrupt_to_lists(neg, valid)
+        next_pending: List[int] = []
+        for idx, row, need in zip(pending, rows, remaining):
+            if row:
+                gathered[idx].extend(row[:need])
+            if len(gathered[idx]) < target:
+                next_pending.append(idx)
+        pending = next_pending
+
+    if pending:
+        fallback = corrupt_with_topup(
+            sampler, [queries[idx] for idx in pending],
+            num_negatives=None, mode=mode,
+        )
+        for idx, row in zip(pending, fallback):
+            if not row:
+                continue
+            need = target - len(gathered[idx])
+            gathered[idx].extend(random.choices(row, k=need))
+
+    return [row[:target] for row in gathered]
+
+
+__all__ = [
+    "Sampler",
+    "SamplerConfig",
+    "compute_bernoulli_probs",
+    "corrupt",
+    "corrupt_to_lists",
+    "corrupt_with_topup",
+]

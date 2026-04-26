@@ -40,18 +40,19 @@ import torch
 
 from .loaders import (
     TripleExample,
+    _iter_queries_with_depth,
     encode_split_triples,
+    load_domain_file,
     load_probabilistic_facts as _load_probabilistic_facts_file,
     load_rules_file,
     load_triples,
     load_triples_with_mappings,
+    parse_atom_str,
 )
 from .transforms import (
     build_filter_maps,
     build_relation_domains_from_file,
     filter_queries_by_predicates,
-    iter_queries_with_depth,
-    load_domain_file,
 )
 
 
@@ -94,10 +95,16 @@ class KnowledgeBase:
     """
 
     # ---- vocabulary (alphabetical, stable across runs) -----------------
+    # ``padding_idx`` is the single source of truth for the id-space
+    # convention; defaults to ``0`` (id 0 reserved, real ids ``1..N``)
+    # to match DpRL / SB3 / ns. Pass ``padding_idx=None`` to
+    # ``__init__`` for dense 0-based ids ``0..N-1`` (used by tkk's
+    # standalone training pipeline).
     entity2id: Dict[str, int] = field(default_factory=dict)
     relation2id: Dict[str, int] = field(default_factory=dict)
     num_entities: int = 0
     num_relations: int = 0
+    padding_idx: int = 0
     # ``constants`` / ``predicates`` are alphabetical sorted entity / relation
     # lists for deterministic iteration. ``constants_set`` /
     # ``predicates_set`` are frozensets for O(1) membership. After
@@ -175,8 +182,15 @@ class KnowledgeBase:
         domain_file: Optional[str] = None,
         permissive: bool = False,
         valid_size: Optional[int] = None,
+        padding_idx: Optional[int] = 0,
     ) -> None:
         self._reset()
+        self.padding_idx = padding_idx if padding_idx is not None else 0
+        # ``padding_idx=None`` means "no padding sentinel; dense 0-based
+        # ids". We still expose ``self.padding_idx`` (defaulted to 0 in
+        # that case) so downstream code can read a single attribute, but
+        # internally the loader uses ``_padding_idx`` to drive the shift.
+        self._padding_idx = padding_idx
         if dataset_name is None:
             # Lazy-init: subclass will call ``self.load_dataset(...)`` (or
             # equivalently :meth:`_load_dataset`) after its own setup.
@@ -195,7 +209,8 @@ class KnowledgeBase:
 
         Called from ``__init__`` so lazy-loading subclasses can construct
         ``super().__init__()`` and still see well-defined empty containers
-        before they trigger an actual load.
+        before they trigger an actual load. ``padding_idx`` is set by
+        ``__init__`` after ``_reset`` and is not touched here.
         """
         self.entity2id = {}
         self.relation2id = {}
@@ -281,6 +296,7 @@ class KnowledgeBase:
         ]
         train_idx, ent2id, rel2id = load_triples_with_mappings(
             train_path, extra_paths=extras, permissive=permissive,
+            padding_idx=getattr(self, "_padding_idx", 0),
         )
         self.entity2id = ent2id
         self.relation2id = rel2id
@@ -372,34 +388,15 @@ class KnowledgeBase:
                     self.entity2domain_idx, self.domain2idx,
                 )
 
-    # ---- factory hooks (subclass overrides for typed objects) ---------
-
-    def make_atom(self, atom_tuple: Tuple[str, ...]) -> Any:
-        """Convert a ``(predicate, *args)`` tuple to a typed atom.
-
-        Default: returns the tuple unchanged. Subclasses override to
-        construct their domain-specific atom type — e.g. DpRL returns a
-        ``Term(predicate, args)``.
-        """
-        return atom_tuple
-
-    def make_rule(self, head: Any, body: List[Any]) -> Any:
-        """Combine a head atom + body atoms into a typed rule.
-
-        Default: returns ``(head, body)``. Subclasses override to construct
-        their domain-specific rule type.
-        """
-        return (head, body)
-
-    # ---- generic loaders that compose primitives + factory hooks ------
+    # ---- typed-data loaders -------------------------------------------
 
     def load_facts(
         self,
         *,
         filepath: Optional[str] = None,
         skip_predicate_prefixes: Tuple[str, ...] = (),
-    ) -> List[Any]:
-        """Convert background facts to typed atoms via :meth:`make_atom`.
+    ) -> List[Tuple[str, ...]]:
+        """Return background facts as ``(predicate, head, tail)`` tuples.
 
         With no ``filepath``: pulls from ``self.known`` (already loaded
         by :meth:`_load_dataset`). With explicit ``filepath``: re-parses
@@ -412,12 +409,11 @@ class KnowledgeBase:
             triples = self.known
         else:
             triples = load_triples(filepath, format_hint="prolog", permissive=True)
-        out: List[Any] = []
-        for triple in triples:
-            if any(triple.relation.startswith(p) for p in skip_predicate_prefixes):
-                continue
-            out.append(self.make_atom((triple.relation, triple.head, triple.tail)))
-        return out
+        return [
+            (triple.relation, triple.head, triple.tail)
+            for triple in triples
+            if not any(triple.relation.startswith(p) for p in skip_predicate_prefixes)
+        ]
 
     def load_rules(
         self,
@@ -426,7 +422,7 @@ class KnowledgeBase:
         uppercase_args: bool = False,
         limit: Optional[int] = None,
         force_hard_rules: bool = False,
-    ) -> List[Any]:
+    ) -> List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]]:
         """Load rules into ``self.rules_str`` + parallel name/weight lists.
 
         Populates these handler attributes (in order):
@@ -438,24 +434,17 @@ class KnowledgeBase:
         - ``self.rule_var_domains: OrderedDict[str, str]`` — variable
           domains from ``var2domain`` preamble (empty if no preamble).
 
-        File parsing — Prolog ``:-``/``->`` formats, ``rN:weight:`` prefix,
-        ``var2domain X dom1 ...`` preamble, atom tokenization — lives in
-        :func:`load_rules_file` so all consumers share one parser.
-
         Args:
             filepath: Path to the rule file.
             uppercase_args: Pass through to the parser (uppercase every
                 atom argument). SB3-parity in DpRL.
-            limit: If not None, stop reading after ``limit`` rules
-                (matches legacy ns ``RuleLoader.load(filepath, num_rules)``).
+            limit: Stop reading after ``limit`` rules (matches legacy ns
+                ``RuleLoader.load(filepath, num_rules)``).
             force_hard_rules: Override every parsed weight with 1.0.
 
         Returns:
-            A list whose shape is decided by the :meth:`make_rule` factory
-            hook (default: ``(head_tuple, body_list)`` tuples). Subclasses
-            that override the hook (e.g. DpRL returning ``Rule(Term, ...)``)
-            get their typed list back. The string-form is always available
-            on ``self.rules_str`` regardless of factory output.
+            ``rules_str`` — list of ``(head_tuple, body_list)`` pairs.
+            Same shape as :attr:`rules_str`.
         """
         specs, var_to_domain = load_rules_file(
             filepath, uppercase_args=uppercase_args,
@@ -465,19 +454,15 @@ class KnowledgeBase:
         rules_str: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = []
         rule_names: List[Optional[str]] = []
         rule_weights: List[float] = []
-        typed: List[Any] = []
         for spec in specs:
             rules_str.append((spec.head, spec.body))
             rule_names.append(spec.name)
             rule_weights.append(1.0 if force_hard_rules else spec.weight)
-            head_atom = self.make_atom(spec.head)
-            body_atoms = [self.make_atom(b) for b in spec.body]
-            typed.append(self.make_rule(head_atom, body_atoms))
         self.rules_str = rules_str
         self.rule_names = rule_names
         self.rule_weights = rule_weights
         self.rule_var_domains = var_to_domain
-        return typed
+        return rules_str
 
     def load_queries_with_depth(
         self,
@@ -485,27 +470,23 @@ class KnowledgeBase:
         *,
         limit: Optional[int] = None,
         depth_filter: Optional[Set[int]] = None,
-    ) -> Tuple[List[Any], List[int]]:
+    ) -> Tuple[List[Tuple[str, ...]], List[int]]:
         """Load queries with depth annotations; return ``(atoms, depths)``.
 
-        Wraps :func:`iter_queries_with_depth` (line iterator) and applies
-        the depth filter and atom-count limit. Each query string is
-        parsed into a ``(predicate, *args)`` tuple via the same atom
-        parser used by rule loading (lines that fail to parse are
-        silently skipped). The tuple is then routed through
-        :meth:`make_atom` so subclasses get their typed atom.
+        Iterates the ``<query> <depth>`` sidecar file, applies the depth
+        filter and atom-count limit, and parses each query string into a
+        ``(predicate, *args)`` tuple. Lines that fail to parse are
+        silently skipped.
         """
-        from .loaders import parse_atom_str
-
-        atoms: List[Any] = []
+        atoms: List[Tuple[str, ...]] = []
         depths: List[int] = []
-        for query_str, query_depth in iter_queries_with_depth(filepath):
+        for query_str, query_depth in _iter_queries_with_depth(filepath):
             if depth_filter is not None and query_depth not in depth_filter:
                 continue
             atom_tuple = parse_atom_str(query_str)
             if atom_tuple is None:
                 continue
-            atoms.append(self.make_atom(atom_tuple))
+            atoms.append(atom_tuple)
             depths.append(query_depth)
             if limit is not None and len(atoms) >= limit:
                 break
@@ -519,14 +500,12 @@ class KnowledgeBase:
         patterns: Optional[List[str]] = None,
         topk_limit: Optional[int] = None,
         score_threshold: Optional[float] = None,
-    ) -> List[Any]:
+    ) -> List[Tuple[str, ...]]:
         """Discover the probabilistic-facts file for ``dataset_name`` and load it.
 
         Searches ``base_dir`` for the first file that matches one of
         ``patterns`` (defaulting to a few common conventions). Returns an
-        empty list if no file is found. Atom tuples from
-        :func:`load_probabilistic_facts` are passed through
-        :meth:`make_atom`.
+        empty list if no file is found.
         """
         if patterns is None:
             patterns = [
@@ -545,23 +524,9 @@ class KnowledgeBase:
         )
         if path is None:
             return []
-        tuples = _load_probabilistic_facts_file(
+        return _load_probabilistic_facts_file(
             path, topk_limit=topk_limit, score_threshold=score_threshold,
         )
-        return [self.make_atom(t) for t in tuples]
-
-    def filter_queries_by_rule_heads(
-        self,
-        query_tuples: List[Tuple[str, ...]],
-        rule_head_predicates: Set[str],
-    ) -> Tuple[List[Tuple[str, ...]], List[int]]:
-        """Drop queries whose predicate is not a rule head.
-
-        Thin convenience over :func:`filter_queries_by_predicates` —
-        callers re-align their parallel arrays (atoms, depths, labels)
-        using the returned ``kept_indices``.
-        """
-        return filter_queries_by_predicates(query_tuples, rule_head_predicates)
 
     def discover_vocabulary(
         self,
@@ -726,29 +691,18 @@ class KnowledgeBase:
                         depths = [-1] * len(queries)
                 else:
                     queries, depths = [], []
-                # Typed list (factory-returned objects)
+                # ``load_queries_with_depth`` already returns parsed
+                # ``(predicate, *args)`` tuples in file order, so the
+                # str-form list is the same payload — no second pass.
                 setattr(self, f"{split}_queries", queries)
-                # String-form parallel list (for materialize + filter)
-                from .loaders import parse_atom_str
-                queries_str: List[Tuple[str, ...]] = []
-                if os.path.isfile(full_path):
-                    for q_str, q_depth in iter_queries_with_depth(full_path):
-                        if depth_set is not None and q_depth not in depth_set:
-                            continue
-                        atom_tuple = parse_atom_str(q_str)
-                        if atom_tuple is None:
-                            continue
-                        queries_str.append(atom_tuple)
-                        if limit is not None and len(queries_str) >= limit:
-                            break
-                setattr(self, f"{split}_queries_str", queries_str)
+                setattr(self, f"{split}_queries_str", list(queries))
                 setattr(self, f"{split}_depths", list(depths))
-                setattr(self, f"{split}_labels", [1] * len(queries_str))
+                setattr(self, f"{split}_labels", [1] * len(queries))
 
         # 5. Filter queries by rule heads.
         if filter_queries_by_rule_heads and self.rules_str:
             rule_head_preds = {head[0] for head, _body in self.rules_str}
-            filtered_str, kept = self.filter_queries_by_rule_heads(
+            filtered_str, kept = filter_queries_by_predicates(
                 self.train_queries_str, rule_head_preds,
             )
             if len(kept) < len(self.train_queries_str):
@@ -1041,7 +995,10 @@ class KnowledgeBase:
             domain2idx=(self.domain2idx or None),
             entity2domain=(self.entity2domain_idx or None),
             order_negatives=order_negatives,
-            min_entity_idx=0,
+            # ``min_entity_idx`` is derived from the padding convention:
+            # when id 0 is reserved for padding, the entity pool starts
+            # at 1; otherwise it starts at 0.
+            min_entity_idx=1 if self.padding_idx == 0 else 0,
         )
 
     def split_idx(self, split: str) -> List[Tuple[int, int, int]]:

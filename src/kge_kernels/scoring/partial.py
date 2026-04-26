@@ -7,7 +7,6 @@ from typing import Tuple
 import torch
 from torch import Tensor
 
-from .backend import _score_all_heads, _score_all_tails
 from .types import KGEBackend
 
 
@@ -82,9 +81,9 @@ def _partial_score_chunked(
         chunk = kge_ents[start:end]
         rel_exp = kge_rel.expand(chunk.shape[0])
         if role == 0:
-            raw = _score_all_tails(backend, chunk, rel_exp)
+            raw = backend.score_all_tails(chunk, rel_exp)
         else:
-            raw = _score_all_heads(backend, rel_exp, chunk)
+            raw = backend.score_all_heads(rel_exp, chunk)
         result[start:end] = raw.max(dim=1).values
 
     return result
@@ -222,8 +221,8 @@ class LazyPartialScorer:
                 ents = valid_kge[start:end]
                 idx = valid_indices[start:end]
                 rel = kge_rel.expand(ents.shape[0])
-                self.max_tail_score[im_pred, idx] = _score_all_tails(self.backend, ents, rel).max(dim=1).values
-                self.max_head_score[im_pred, idx] = _score_all_heads(self.backend, rel, ents).max(dim=1).values
+                self.max_tail_score[im_pred, idx] = self.backend.score_all_tails(ents, rel).max(dim=1).values
+                self.max_head_score[im_pred, idx] = self.backend.score_all_heads(rel, ents).max(dim=1).values
             self._cached_tail[im_pred, valid_indices] = True
             self._cached_head[im_pred, valid_indices] = True
             self._computed.add(im_pred)
@@ -312,9 +311,9 @@ class LazyPartialScorer:
                 chunk_im = im_ents_valid[start:end]
                 rel = kge_rel.expand(chunk_kge.shape[0])
                 if role == "tail":
-                    s = _score_all_tails(self.backend, chunk_kge, rel)
+                    s = self.backend.score_all_tails(chunk_kge, rel)
                 else:
-                    s = _score_all_heads(self.backend, rel, chunk_kge)
+                    s = self.backend.score_all_heads(rel, chunk_kge)
                 table[p_im, chunk_im] = s.max(dim=1).values
                 cache[p_im, chunk_im] = True
 

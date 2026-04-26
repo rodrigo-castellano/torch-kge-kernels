@@ -1,70 +1,46 @@
-"""Triple-set transforms: reciprocal augmentation, filter maps, domains."""
+"""Pure-functional triple-set transforms.
+
+Operate on plain ``[(r, h, t), ...]`` lists of integer-indexed triples;
+no I/O, no class state. Used by :class:`KnowledgeBase` (filter maps,
+domain restriction) and by tkk's training / eval pipelines for the
+reciprocal-relation augmentation and observed-domain restriction
+needed at training time.
+
+File parsers (``load_domain_file``, ``load_depth_file``) live in
+:mod:`kge_kernels.data.loaders`.
+"""
 from __future__ import annotations
 
-import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Sequence, Set, Tuple
 
 
-def load_domain_file(
-    path: str,
-    entity2id: Optional[Dict[str, int]] = None,
-) -> Tuple[Dict[str, List[Any]], Dict[Any, str]]:
-    """Parse a ``domain_name entity1 entity2 ...`` file into dicts.
+def filter_queries_by_predicates(
+    query_tuples: Sequence[Tuple[str, ...]],
+    allowed_predicates: Set[str],
+) -> Tuple[List[Tuple[str, ...]], List[int]]:
+    """Keep only queries whose predicate is in ``allowed_predicates``.
 
-    Each line lists a domain name followed by entity names belonging to
-    it. Lines whose first token contains ``:`` and no whitespace before
-    the colon are treated as predicate-domain mappings (``pred:head:tail``)
-    and silently skipped — that legacy format coexists with entity-domain
-    lines in some DpRL datasets.
+    Used by rule-based filtering: queries whose head predicate doesn't
+    match any rule head are unsolvable for a proof-based reasoner, so
+    they're dropped before training. Content-agnostic — callers decide
+    what set of predicates to allow.
 
-    Two modes (selected by ``entity2id``):
-
-    - **Indexed mode** (``entity2id`` provided): returns
-      ``(domain2idx: dict[str, list[int]], entity2domain: dict[int, str])``.
-      Unknown entities (not in ``entity2id``) are silently skipped so
-      callers can pass a vocabulary that's a subset of the file's
-      entities. This is the path tkk's training pipeline uses.
-
-    - **String mode** (``entity2id=None``): returns
-      ``(domain2entities: dict[str, list[str]], entity2domain: dict[str, str])``
-      with raw entity names. Useful for consumers that need to read
-      domains *before* id-assignment (ns's ``KGCDataHandler``, DpRL's
-      ``DataHandler._load_domain_mapping``).
-
-    If ``path`` does not exist the function returns empty dicts in either
-    mode. Callers that require the file to exist should check before
-    calling.
+    Returns:
+        ``(filtered_queries, kept_indices)`` where ``kept_indices`` lists
+        the positions in the original sequence that survived filtering, in
+        order. Callers can use it to re-align parallel arrays (depths,
+        labels, etc.) without re-iterating.
     """
-    domain2members: Dict[str, List[Any]] = {}
-    entity2domain: Dict[Any, str] = {}
-    if not os.path.isfile(path):
-        return domain2members, entity2domain
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Skip predicate domain lines like ``pred:head_dom:tail_dom``
-            # that some DpRL dataset variants emit alongside the
-            # ``domain_name entity1 ...`` lines.
-            first = stripped.split(None, 1)[0]
-            if ":" in first:
-                continue
-            parts = stripped.split()
-            if len(parts) < 2:
-                continue
-            domain_name = parts[0]
-            if entity2id is None:
-                members: List[Any] = list(parts[1:])
-            else:
-                members = [entity2id[c] for c in parts[1:] if c in entity2id]
-            if not members:
-                continue
-            domain2members[domain_name] = members
-            for member in members:
-                entity2domain.setdefault(member, domain_name)
-    return domain2members, entity2domain
+    filtered: List[Tuple[str, ...]] = []
+    kept_indices: List[int] = []
+    for i, q in enumerate(query_tuples):
+        if not q:
+            continue
+        if q[0] in allowed_predicates:
+            filtered.append(q)
+            kept_indices.append(i)
+    return filtered, kept_indices
 
 
 def add_reciprocal_triples(
@@ -132,14 +108,13 @@ def build_relation_domains_from_file(
     entity2domain: Dict[int, str],
     domain2idx: Dict[str, List[int]],
 ) -> Tuple[Dict[int, Set[int]], Dict[int, Set[int]]]:
-    """Build per-relation domain sets using the domain-file memberships.
+    """Build per-relation domain sets using domain-file memberships.
 
-    Unlike :func:`build_relation_domains`, which only includes entities
-    *observed* in a given position, this function looks up the domain of
-    each position's entities and returns **all** entities belonging to
-    that domain.  This matches the evaluation protocol of ns-old's
-    ``_IndexedCorruptionAdapter``, which draws exhaustive corruption
-    candidates from the full domain file pool.
+    Unlike :func:`build_relation_domains` (observed-only), this function
+    looks up the domain of each position's entities and returns **all**
+    entities belonging to that domain. Matches ns-old's
+    ``_IndexedCorruptionAdapter`` evaluation protocol, which draws
+    exhaustive corruption candidates from the full domain file pool.
 
     Falls back to observed entities for relations whose entities have no
     domain mapping.
@@ -164,81 +139,10 @@ def build_relation_domains_from_file(
     return head_domain, tail_domain
 
 
-def iter_queries_with_depth(path: str):
-    """Yield ``(query_string, depth)`` pairs from a sidecar file.
-
-    The file format is one entry per line, ``<query> <depth>`` (depth as
-    the last whitespace-separated token), with empty / ``%``-comment
-    lines skipped. Lines without a trailing integer yield ``-1`` for
-    depth so callers can distinguish "annotated depth=k" from "no depth
-    given".
-
-    Used by:
-    - ns's per-test-query depth metric breakdowns (which only needs the
-      flat depth list — see :func:`load_depth_file`).
-    - DpRL's ``DataHandler._load_queries_from_file`` which also needs the
-      query-string side of the pair so it can build ``Term`` objects.
-    """
-    with open(path) as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("%"):
-                continue
-            parts = stripped.rsplit(None, 1)
-            if len(parts) == 2:
-                try:
-                    yield parts[0], int(parts[1])
-                    continue
-                except ValueError:
-                    pass
-            yield stripped, -1
-
-
-def filter_queries_by_predicates(
-    query_tuples: Sequence[Tuple[str, ...]],
-    allowed_predicates: Set[str],
-) -> Tuple[List[Tuple[str, ...]], List[int]]:
-    """Keep only queries whose predicate is in ``allowed_predicates``.
-
-    Used by rule-based filtering: queries whose head predicate doesn't
-    match any rule head are unsolvable for a proof-based reasoner, so
-    they're dropped before training. The function is content-agnostic —
-    callers decide what set of predicates to allow.
-
-    Returns:
-        ``(filtered_queries, kept_indices)`` where ``kept_indices`` lists
-        the positions in the original sequence that survived filtering, in
-        order. Callers can use it to re-align parallel arrays (depths,
-        labels, etc.) without re-iterating.
-    """
-    filtered: List[Tuple[str, ...]] = []
-    kept_indices: List[int] = []
-    for i, q in enumerate(query_tuples):
-        if not q:
-            continue
-        if q[0] in allowed_predicates:
-            filtered.append(q)
-            kept_indices.append(i)
-    return filtered, kept_indices
-
-
-def load_depth_file(path: str) -> List[int]:
-    """Parse a ``<query> <depth>`` sidecar into a list of depths.
-
-    Thin wrapper over :func:`iter_queries_with_depth` for callers (ns)
-    that only need the depth column. Returns a flat list aligned with
-    the file's non-empty / non-comment lines.
-    """
-    return [depth for _, depth in iter_queries_with_depth(path)]
-
-
 __all__ = [
     "add_reciprocal_triples",
     "build_filter_maps",
     "build_relation_domains",
     "build_relation_domains_from_file",
     "filter_queries_by_predicates",
-    "iter_queries_with_depth",
-    "load_depth_file",
-    "load_domain_file",
 ]

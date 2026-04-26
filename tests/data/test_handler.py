@@ -21,9 +21,11 @@ def _write_tiny_dataset(tmp_path):
 def test_handler_loads_canonical_pipeline(tmp_path):
     base_path, name = _write_tiny_dataset(tmp_path)
     h = KnowledgeBase(name, base_path)
-    # Alphabetical id assignment: alice=0, bob=1, carol=2, dave=3, eve=4
-    assert h.entity2id == {"alice": 0, "bob": 1, "carol": 2, "dave": 3, "eve": 4}
-    assert h.relation2id == {"knows": 0}
+    # Alphabetical id assignment, 1-based (id 0 reserved for padding):
+    # alice=1, bob=2, carol=3, dave=4, eve=5
+    assert h.entity2id == {"alice": 1, "bob": 2, "carol": 3, "dave": 4, "eve": 5}
+    assert h.relation2id == {"knows": 1}
+    assert h.padding_idx == 0
     assert h.num_entities == 5
     assert h.num_relations == 1
     assert len(h.train_idx) == 2
@@ -48,8 +50,9 @@ def test_build_sampler_uses_loaded_id_space(tmp_path):
     assert isinstance(sampler, Sampler)
     assert sampler.num_entities == h.num_entities
     assert sampler.num_relations == h.num_relations
-    # Filter index covers ALL ground triples (train + valid + test + facts)
-    pos = torch.tensor([[0, 0, 1]], dtype=torch.long)  # knows(alice, bob)
+    # Filter index covers ALL ground triples (train + valid + test + facts).
+    # 1-based ids: knows=1, alice=1, bob=2.
+    pos = torch.tensor([[1, 1, 2]], dtype=torch.long)  # knows(alice, bob)
     neg, valid = sampler.corrupt_with_mask(pos, num_negatives=10, mode="tail")
     rows = [tuple(t.tolist()) for t, k in zip(neg[0], valid[0]) if k]
     # Filter should remove every known (knows, alice, *) triple
@@ -64,7 +67,8 @@ def test_build_sampler_picks_up_domain_info(tmp_path):
     h = KnowledgeBase(name, base_path, domain_file="domain.txt")
     sampler = h.build_sampler()
     # Domain-restricted corruption: tail of (knows, alice, bob) stays in 'people'.
-    pos = torch.tensor([[0, 0, 1]], dtype=torch.long)
+    # 1-based ids: knows=1, alice=1, bob=2.
+    pos = torch.tensor([[1, 1, 2]], dtype=torch.long)
     neg, valid = sampler.corrupt_with_mask(pos, num_negatives=10, mode="tail")
     rows = [tuple(t.tolist()) for t, k in zip(neg[0], valid[0]) if k]
     people_ids = {h.entity2id[n] for n in ("alice", "bob", "carol")}

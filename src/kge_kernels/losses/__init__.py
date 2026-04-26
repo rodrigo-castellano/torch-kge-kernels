@@ -29,6 +29,8 @@ from .ranking_losses import (
     L2LossRagged,
     NSSALoss,
     PairwiseCrossEntropyRagged,
+    differentiable_mrr_loss,
+    pairwise_ranking_loss,
 )
 
 
@@ -95,4 +97,6 @@ __all__ = [
     "PairwiseCrossEntropyRagged",
     "WeightedBinaryCrossEntropy",
     "build_loss",
+    "differentiable_mrr_loss",
+    "pairwise_ranking_loss",
 ]

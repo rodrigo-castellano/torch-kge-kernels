@@ -117,9 +117,66 @@ class NSSALoss(nn.Module):
         return pos_loss + neg_loss
 
 
+def differentiable_mrr_loss(
+    scores: Tensor,
+    target_idx: Tensor,
+    temperature: float = 1.0,
+) -> Tensor:
+    """Differentiable approximation of MRR loss via softmax ranking.
+
+    Given ``[B, K]`` scores per candidate and ``[B]`` indices of the
+    correct candidate, compute a smooth proxy for ``-MRR`` using the
+    softmax probability of the target. Suitable for fitting bridge
+    modules (see :class:`kge_kernels.scoring.bridges.NeuralBridgeTrainer`).
+
+    Args:
+        scores: Per-candidate scores, higher is better.
+        target_idx: Index of the correct candidate per row.
+        temperature: Softmax temperature; lower → sharper ranking.
+
+    Returns:
+        Scalar loss; minimizing it pushes the target toward rank 1.
+    """
+    probs = F.softmax(scores / temperature, dim=-1)
+    correct_probs = probs.gather(1, target_idx.unsqueeze(1)).squeeze(1)
+    return -correct_probs.mean()
+
+
+def pairwise_ranking_loss(
+    scores: Tensor,
+    target_idx: Tensor,
+    margin: float = 1.0,
+) -> Tensor:
+    """Margin-based pairwise ranking loss.
+
+    Pushes the positive score above every negative score by at least
+    ``margin``: ``mean(relu(margin - (pos - neg)))`` aggregated over all
+    negatives in each row. Complements
+    :class:`PairwiseCrossEntropyRagged` (BCE-based, no margin) for
+    callers that want the classic margin formulation.
+
+    Args:
+        scores: ``[B, K]`` per-candidate scores.
+        target_idx: ``[B]`` index of the correct candidate per row.
+        margin: Required minimum gap between positive and each negative.
+
+    Returns:
+        Scalar loss.
+    """
+    B, K = scores.shape
+    pos_scores = scores.gather(1, target_idx.unsqueeze(1))
+    mask = torch.ones(B, K, dtype=torch.bool, device=scores.device)
+    mask.scatter_(1, target_idx.unsqueeze(1), False)
+    neg_scores = scores[mask].view(B, K - 1)
+    diff = pos_scores - neg_scores
+    return F.relu(margin - diff).mean()
+
+
 __all__ = [
     "HingeLossRagged",
     "L2LossRagged",
     "NSSALoss",
     "PairwiseCrossEntropyRagged",
+    "differentiable_mrr_loss",
+    "pairwise_ranking_loss",
 ]

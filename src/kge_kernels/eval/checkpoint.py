@@ -78,7 +78,7 @@ def evaluate_checkpoint(
         encode_split_triples,
         load_triples_with_mappings,
     )
-    from ..data.paths import resolve_split_path, resolve_train_path
+    from ..data import resolve_split_path, resolve_train_path
     from ..models.factory import build_training_model
     from ..training.checkpoints import (
         config_from_payload,
@@ -98,7 +98,9 @@ def evaluate_checkpoint(
     device = torch.device("cuda" if torch.cuda.is_available() and not cfg.cpu else "cpu")
     train_file = resolve_train_path(cfg.train_path, cfg.dataset, cfg.data_root, cfg.train_split)
     print(f"Loading triples from {train_file} ...")
-    triples, e2id, r2id = load_triples_with_mappings(train_file)
+    # tkk standalone uses dense 0-based ids; see ``training/pipeline.py``
+    # for the full rationale.
+    triples, e2id, r2id = load_triples_with_mappings(train_file, padding_idx=None)
     if not triples:
         raise ValueError("No triples found for evaluation")
 
