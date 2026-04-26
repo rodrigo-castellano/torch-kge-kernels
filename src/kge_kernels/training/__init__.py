@@ -39,6 +39,7 @@ from .loop import (
     train_kge,
     wrap_model_for_training,
 )
+from .loss import train_step
 from .pipeline import train_model
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "set_seed",
     "train_epoch",
     "train_kge",
+    "train_step",
     "wrap_model_for_training",
     # Full pipeline
     "train_model",

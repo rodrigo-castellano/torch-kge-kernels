@@ -141,7 +141,8 @@ from .models import (
     build_training_model,
 )
 
-# Scoring pipeline (kge_score, sampler, partial, types)
+# Scoring pipeline (sampler, partial, types). KGE scoring itself is the
+# model's own ``score(h, r, t)`` method — see kge_kernels.models.
 from .scoring import (
     CorruptionOutput,
     LazyPartialScorer,
@@ -149,7 +150,6 @@ from .scoring import (
     SamplerConfig,
     compute_bernoulli_probs,
     corrupt,
-    kge_score,
     precompute_partial_scores,
     score_partial_atoms,
 )
@@ -173,7 +173,6 @@ __all__ = [
     "SamplerConfig",
     "compute_bernoulli_probs",
     "corrupt",
-    "kge_score",
     "precompute_partial_scores",
     "score_partial_atoms",
     # Logging

@@ -291,8 +291,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             k=eval_negs if eval_negs else None,
         )
         scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-        recommended_B = mdl.recommended_eval_batch_size(num_entities) \
-            if hasattr(mdl, "recommended_eval_batch_size") else 256
+        from ..eval.scoring import recommended_eval_batch_size
+        recommended_B = recommended_eval_batch_size(mdl, num_entities)
         metrics = evaluate(
             mdl, triples_tensor, provider,
             scheme=scheme_map.get(cfg.corruption_scheme, "both"),
@@ -522,8 +522,8 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 k=eval_negs if eval_negs else None,
             )
             scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-            recommended_B = model.recommended_eval_batch_size(num_entities) \
-                if hasattr(model, "recommended_eval_batch_size") else 256
+            from ..eval.scoring import recommended_eval_batch_size as _rec_B
+            recommended_B = _rec_B(model, num_entities)
             return _u_evaluate(
                 model, triples_t, provider,
                 scheme=scheme_map.get(cfg.corruption_scheme, "both"),

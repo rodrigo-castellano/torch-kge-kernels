@@ -7,10 +7,11 @@ The compile-boundary-agnostic outer loop that both tkk's
    from the sampler via :func:`iterate_epoch_batches`.
 2. Copy into preallocated static buffers, padding the tail of partial
    last batches with zeros and gating via ``pos_valid``.
-3. Call the compiled ``model.train_step(pos, neg, mask, pos_valid)`` —
-   the model's hook that builds its preferred atom layout (static-flat
-   ``[B + B*K, 3]`` for KGE, static-pool ``[B*(1+K), 3]`` for reasoners)
-   and returns the scalar loss.
+3. Call the compiled training step — either ``model.train_step(...)``
+   if the model defines one (e.g. ns's ``ReasonerModel`` building a
+   static-pool ``[B*(1+K), 3]`` for the grounder), or the default
+   :func:`kge_kernels.training.train_step` (mask-aware BCE on
+   ``model.score``) for plain KGE-only models.
 4. Backward + optimizer step in eager — still CUDA-graph-safe because
    ``zero_grad(set_to_none=False)`` keeps ``.grad`` addresses stable
    and shapes never vary.
@@ -30,6 +31,7 @@ import torch
 from torch import Tensor, nn
 
 from .batching import iterate_epoch_batches
+from .loss import train_step as _default_train_step
 
 __all__ = ["train_epoch", "clear_train_cache"]
 
@@ -85,8 +87,15 @@ class _TrainState:
             for _b in (self.pos_buf, self.neg_buf, self.mask_buf, self.pos_valid_buf):
                 torch._dynamo.mark_static_address(_b)
 
-        def _step(pos: Tensor, neg: Tensor, mask: Tensor, pos_valid: Tensor) -> Tensor:
-            return model.train_step(pos, neg, mask, pos_valid)
+        # Prefer the model's own train_step when present (e.g. ns
+        # ReasonerModel for the static-pool atom layout); otherwise use
+        # the default mask-aware BCE on top of model.score.
+        if hasattr(model, "train_step"):
+            def _step(pos: Tensor, neg: Tensor, mask: Tensor, pos_valid: Tensor) -> Tensor:
+                return model.train_step(pos, neg, mask, pos_valid)
+        else:
+            def _step(pos: Tensor, neg: Tensor, mask: Tensor, pos_valid: Tensor) -> Tensor:
+                return _default_train_step(model, pos, neg, mask, pos_valid)
 
         if compile_enabled:
             # ``mode='reduce-overhead'`` matches DpRL's PPO compile mode:

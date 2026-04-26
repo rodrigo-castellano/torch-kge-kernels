@@ -25,9 +25,11 @@ Invariants
    never appear as candidates. Handled by the sampler's filter/domain
    machinery, not by the evaluator.
 
-5. **Fullgraph-compile compatible**. The per-chunk scoring function —
-   ``model.eval_scores(q_buf, cand_buf, mode)`` — runs with fixed-shape
-   inputs and outputs. Compile boundary sits there. The Python loop
+5. **Fullgraph-compile compatible**. The per-chunk scoring function
+   (``model.eval_scores`` if defined, else
+   :func:`kge_kernels.eval.eval_scores` over ``model.score``) runs with
+   fixed-shape inputs and outputs. Compile boundary sits there. The
+   Python loop
    over batches × modes × chunks runs eager.
 
 Shape contract
@@ -325,12 +327,21 @@ class _EvalState:
         # One compiled scorer per corruption mode. Mode is baked in via
         # closure so each compile specialises one direction; the model
         # reference is captured once here and lives for the state's
-        # lifetime.
+        # lifetime. Prefer ``model.eval_scores`` if the model defines it
+        # (e.g. ns ReasonerModel for the candidate-pool replay path),
+        # else use the default :func:`kge_kernels.eval.eval_scores` over
+        # ``model.score``.
+        from .scoring import eval_scores as _default_eval_scores
+        if hasattr(model, "eval_scores"):
+            _scores = model.eval_scores
+        else:
+            def _scores(q, cand, m):
+                return _default_eval_scores(model, q, cand, m)
         self.score_fns = {}
         for mode in self.modes:
             def _make(m=mode):
                 def _score(q: Tensor, cand: Tensor) -> Tensor:
-                    return model.eval_scores(q, cand, m)
+                    return _scores(q, cand, m)
                 return _score
             fn = _make()
             if compile_enabled:

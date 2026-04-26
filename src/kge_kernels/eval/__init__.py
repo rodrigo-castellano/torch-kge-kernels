@@ -12,6 +12,7 @@ from .ranking import (
     zscore_fusion,
 )
 from .results import EvalResults
+from .scoring import eval_scores, recommended_eval_batch_size
 from .unified import (
     CandidateProvider,
     Mode,
@@ -32,10 +33,12 @@ __all__ = [
     "StreamingRankingMetrics",
     "clear_eval_cache",
     "compute_ranks",
+    "eval_scores",
     "evaluate",
     "evaluate_checkpoint",
     "evaluate_ranking",
     "ranking_metrics",
+    "recommended_eval_batch_size",
     "rrf",
     "zscore_fusion",
 ]

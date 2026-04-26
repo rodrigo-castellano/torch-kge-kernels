@@ -1,4 +1,4 @@
-"""Partial-atom scoring utilities built on top of :func:`kge_score`."""
+"""Partial-atom scoring utilities built on top of ``model.score``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,6 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from torch import Tensor
-
-from .kge import kge_score
 
 
 @torch.no_grad()
@@ -35,7 +33,8 @@ def precompute_partial_scores(
             unmapped entities.
         batch_chunk: Number of entities scored per chunk in the batched
             exhaustive calls.
-        sigmoid: forwarded to :func:`kge_score`.
+        sigmoid: if True, apply ``torch.sigmoid`` to ``model.score``'s
+            raw output before taking the per-relation max.
 
     Returns:
         ``(max_tail_score, max_head_score)``, both of shape ``[P_im, E_im]``.
@@ -90,9 +89,11 @@ def _partial_score_chunked(
         chunk = kge_ents[start:end]
         rel_exp = kge_rel.expand(chunk.shape[0])
         if role == 0:
-            raw = kge_score(model, chunk, rel_exp, None, sigmoid=sigmoid)
+            raw = model.score(chunk, rel_exp, None)
         else:
-            raw = kge_score(model, None, rel_exp, chunk, sigmoid=sigmoid)
+            raw = model.score(None, rel_exp, chunk)
+        if sigmoid:
+            raw = torch.sigmoid(raw)
         result[start:end] = raw.max(dim=1).values
 
     return result
@@ -225,12 +226,13 @@ class LazyPartialScorer:
                 ents = valid_kge[start:end]
                 idx = valid_indices[start:end]
                 rel = kge_rel.expand(ents.shape[0])
-                self.max_tail_score[im_pred, idx] = kge_score(
-                    self.model, ents, rel, None, sigmoid=self.sigmoid,
-                ).max(dim=1).values
-                self.max_head_score[im_pred, idx] = kge_score(
-                    self.model, None, rel, ents, sigmoid=self.sigmoid,
-                ).max(dim=1).values
+                tail = self.model.score(ents, rel, None)
+                head = self.model.score(None, rel, ents)
+                if self.sigmoid:
+                    tail = torch.sigmoid(tail)
+                    head = torch.sigmoid(head)
+                self.max_tail_score[im_pred, idx] = tail.max(dim=1).values
+                self.max_head_score[im_pred, idx] = head.max(dim=1).values
             self._cached_tail[im_pred, valid_indices] = True
             self._cached_head[im_pred, valid_indices] = True
             self._computed.add(im_pred)
@@ -319,9 +321,11 @@ class LazyPartialScorer:
                 chunk_im = im_ents_valid[start:end]
                 rel = kge_rel.expand(chunk_kge.shape[0])
                 if role == "tail":
-                    s = kge_score(self.model, chunk_kge, rel, None, sigmoid=self.sigmoid)
+                    s = self.model.score(chunk_kge, rel, None)
                 else:
-                    s = kge_score(self.model, None, rel, chunk_kge, sigmoid=self.sigmoid)
+                    s = self.model.score(None, rel, chunk_kge)
+                if self.sigmoid:
+                    s = torch.sigmoid(s)
                 table[p_im, chunk_im] = s.max(dim=1).values
                 cache[p_im, chunk_im] = True
 

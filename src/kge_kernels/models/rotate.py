@@ -38,41 +38,16 @@ from . import ops
 from .base import KGEModel
 
 
-class _RotateMemoryMixin:
-    """Memory-aware eval batch size for RotatE-family models.
-
-    All-tails / all-heads broadcast to a ``[B, |E|, half_dim]``
-    intermediate — one dimension larger than the default matmul-style
-    ``[B, |E|]`` assumed by the base class. Override the budget to
-    include that factor so callers in the unified eval path (ns, tkk)
-    don't OOM on rotate-style models with many entities.
-
-    On family (|E| ≈ 3k, half_dim = 100, budget 2 GB) this returns
-    B ≤ ~1700; on wn18rr (|E| ≈ 40k) it returns B ≤ ~130.
-    """
-
-    def recommended_eval_batch_size(
-        self, num_entities: int, budget_gb: float = 2.0,
-    ) -> int:
-        half_dim = getattr(self, "half_dim", None) or (self.dim // 2)
-        bytes_per_B = 4 * int(num_entities) * int(half_dim)  # [B, E, H] float32
-        budget_b = budget_gb * (1 << 30)
-        return max(8, min(2048, int(budget_b / max(bytes_per_B, 1))))
-
-
-class _RotateLossMixin:
-    """Train-step hook override for RotatE variants: sigmoid+BCE instead
-    of ``binary_cross_entropy_with_logits``. The raw RotatE score is
-    ``gamma - ||h rot r - t||`` which can be large in magnitude; fusing
-    sigmoid inside BCE saturates and zeroes the gradient for confident
-    negatives. Explicit sigmoid + BCE matches ns-old's training dynamics
-    and tkk's pipeline ``_bce_fn`` behavior for RotatE/RotatENS.
-    """
-    _train_loss_is_from_logits = False
-
-
-class _RotateBase(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
+class _RotateBase(KGEModel):
     """Shared RotatE plumbing.
+
+    Sets ``_train_loss_is_from_logits = False`` so
+    :func:`kge_kernels.training.train_step` uses sigmoid+BCE instead of
+    BCE-with-logits — the raw RotatE score ``γ - ||h rot r - t||`` is
+    large enough that BCE-with-logits saturates the gradient on confident
+    negatives. Memory-aware eval batch sizing is handled by
+    :func:`kge_kernels.eval.recommended_eval_batch_size`, which detects
+    the RotatE family via the ``half_dim`` attribute.
 
     Subclasses must set ``self.relation_embeddings`` (or ``rel_phase``)
     in their own ``__init__`` and implement:
@@ -85,6 +60,8 @@ class _RotateBase(_RotateMemoryMixin, _RotateLossMixin, KGEModel):
         per-chunk sqrt-then-sum). RotatENS overrides to do a single
         final sqrt over accumulated squared diffs.
     """
+
+    _train_loss_is_from_logits = False
 
     def __init__(
         self,
