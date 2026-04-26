@@ -81,19 +81,36 @@ class RankingResult:
             out[mode] = metrics_from_ranks(row_ranks, ks=ks)
         return out
 
+    def metrics_per_group(
+        self,
+        group_ids: Tensor,
+        ks: Tuple[int, ...] = (1, 3, 10),
+    ) -> Dict[int, Dict[str, float]]:
+        """One MRR + Hits@k per group, where ``group_ids`` is any
+        ``[N]`` integer tensor — depths, types, custom labels, etc.
+
+        Generic grouping primitive. Per-relation, per-depth, etc. are
+        all the same call with a different ``group_ids``::
+
+            result.metrics_per_group(query_depths)
+            result.metrics_per_group(triples[:, 0])           # per-relation
+            result.metrics_per_group(some_difficulty_label)
+        """
+        gids = group_ids.cpu()
+        out: Dict[int, Dict[str, float]] = {}
+        for g in gids.unique().tolist():
+            row_mask = (gids == g)
+            sub_ranks = self.ranks[:, row_mask]
+            sub_valid = self.valid[:, row_mask]
+            flat = sub_ranks[sub_valid]
+            out[int(g)] = metrics_from_ranks(flat, ks=ks)
+        return out
+
     def metrics_per_relation(
         self, ks: Tuple[int, ...] = (1, 3, 10)
     ) -> Dict[int, Dict[str, float]]:
         """One MRR + Hits@k per relation. Groups by ``triples[:, 0]``."""
-        rels = self.triples[:, 0].cpu()
-        out: Dict[int, Dict[str, float]] = {}
-        for r in rels.unique().tolist():
-            row_mask = (rels == r)
-            sub_ranks = self.ranks[:, row_mask]
-            sub_valid = self.valid[:, row_mask]
-            flat = sub_ranks[sub_valid]
-            out[int(r)] = metrics_from_ranks(flat, ks=ks)
-        return out
+        return self.metrics_per_group(self.triples[:, 0], ks=ks)
 
 
 class RankingEvaluator:
