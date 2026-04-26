@@ -1,8 +1,14 @@
-"""Evaluation framework: unified evaluator, ranking metrics, corruption pools,
-rank fusion, and checkpoint evaluation."""
+"""Evaluation framework: single ``evaluate()`` entry point + ranking primitives."""
 
 from .checkpoint import evaluate_checkpoint, evaluate_ranking
-from .evaluator import Evaluator, FusionFn, ScorerFn
+from .eval_hooks import eval_scores, recommended_eval_batch_size
+from .evaluate import (
+    CandidateProvider,
+    Mode,
+    ScoresModel,
+    clear_eval_cache,
+    evaluate,
+)
 from .pool import CandidatePool
 from .ranking import (
     StreamingRankingMetrics,
@@ -12,23 +18,12 @@ from .ranking import (
     zscore_fusion,
 )
 from .results import EvalResults
-from .scoring import eval_scores, recommended_eval_batch_size
-from .unified import (
-    CandidateProvider,
-    Mode,
-    ScoresModel,
-    clear_eval_cache,
-    evaluate,
-)
 
 __all__ = [
     "CandidatePool",
     "CandidateProvider",
     "EvalResults",
-    "Evaluator",
-    "FusionFn",
     "Mode",
-    "ScorerFn",
     "ScoresModel",
     "StreamingRankingMetrics",
     "clear_eval_cache",

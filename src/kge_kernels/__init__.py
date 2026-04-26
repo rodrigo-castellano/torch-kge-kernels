@@ -47,10 +47,12 @@ from .data import (
 # Evaluation (includes ranking metrics)
 from .eval import (
     CandidatePool,
+    CandidateProvider,
     EvalResults,
-    Evaluator,
     StreamingRankingMetrics,
+    clear_eval_cache,
     compute_ranks,
+    evaluate,
     evaluate_checkpoint,
     evaluate_ranking,
     ranking_metrics,
@@ -154,10 +156,12 @@ from .scoring import (
 __all__ = [
     # Evaluation + ranking
     "CandidatePool",
+    "CandidateProvider",
     "EvalResults",
-    "Evaluator",
     "StreamingRankingMetrics",
+    "clear_eval_cache",
     "compute_ranks",
+    "evaluate",
     "evaluate_checkpoint",
     "evaluate_ranking",
     "ranking_metrics",

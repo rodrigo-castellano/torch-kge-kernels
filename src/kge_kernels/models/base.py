@@ -45,7 +45,7 @@ building a ``[B*(1+K), 3]`` pool for the grounder) override the
 training / eval hooks by **defining their own ``train_step`` /
 ``eval_scores`` methods on the model**: tkk's
 :func:`kge_kernels.training.train_epoch` and
-:func:`kge_kernels.eval.unified.evaluate` prefer ``model.train_step`` /
+:func:`kge_kernels.eval.evaluate.evaluate` prefer ``model.train_step`` /
 ``model.eval_scores`` when present, and fall back to the free-function
 defaults otherwise.
 """

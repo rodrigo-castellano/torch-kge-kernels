@@ -7,7 +7,7 @@ loop needs.
 
 Subclasses with a different scoring path (e.g. ns's ``ReasonerModel``
 candidate-pool replay) override by defining their own ``eval_scores``
-method on the model; :func:`kge_kernels.eval.unified.evaluate` prefers
+method on the model; :func:`kge_kernels.eval.evaluate.evaluate` prefers
 ``model.eval_scores`` when present and falls back to this free function
 otherwise.
 """
@@ -29,7 +29,7 @@ def eval_scores(
 ) -> Tensor:           # [B, C]  float
     """Score candidates against a query batch — the unified eval hook.
 
-    The compile boundary for :func:`kge_kernels.eval.unified.evaluate`.
+    The compile boundary for :func:`kge_kernels.eval.evaluate.evaluate`.
     Shapes are fixed across calls (``B``, ``C`` constant within a single
     :func:`evaluate` call) so this traces into one CUDA graph.
 

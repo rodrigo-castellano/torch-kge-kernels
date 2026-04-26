@@ -3,7 +3,7 @@
 import torch
 from torch import nn
 
-from kge_kernels.eval import CandidatePool, EvalResults, Evaluator, rrf, zscore_fusion
+from kge_kernels.eval import CandidatePool, EvalResults, evaluate_ranking, rrf, zscore_fusion
 from kge_kernels.scoring import Sampler
 
 
@@ -113,40 +113,34 @@ def test_zscore_fusion():
     assert per_q_mean.abs().max().item() < 0.5
 
 
-def test_evaluator_sampled_mode():
-    """Evaluator with sampled corruptions returns valid metrics."""
+def test_evaluate_ranking_sampled_mode():
+    """evaluate_ranking with sampled corruptions returns valid metrics."""
     model = _FakeModel(num_entities=20)
     sampler = _make_sampler(num_entities=20)
-
-    evaluator = Evaluator(
-        model, num_entities=20,
-        num_corruptions=10,
+    queries = [(0, 10, 15), (1, 12, 18)]
+    results = evaluate_ranking(
+        model, queries, num_entities=20,
+        head_filter={}, tail_filter={},
+        device=torch.device("cpu"),
+        eval_num_corruptions=10,
         sampler=sampler,
         corruption_scheme="tail",
         seed=42,
-        device=torch.device("cpu"),
     )
-
-    queries = torch.tensor([
-        [0, 10, 15],
-        [1, 12, 18],
-    ], dtype=torch.long)
-
-    results = evaluator.evaluate(queries)
     assert "MRR" in results
     assert results["MRR"] > 0
 
 
-def test_evaluator_exhaustive_mode():
-    """Evaluator with exhaustive mode returns valid metrics."""
+def test_evaluate_ranking_exhaustive_mode():
+    """evaluate_ranking with exhaustive mode returns valid metrics."""
     model = _FakeModel(num_entities=10)
-    evaluator = Evaluator(
-        model, num_entities=10,
-        num_corruptions=0,  # exhaustive
+    queries = [(0, 3, 7), (1, 4, 8)]
+    results = evaluate_ranking(
+        model, queries, num_entities=10,
+        head_filter={}, tail_filter={},
         device=torch.device("cpu"),
+        eval_num_corruptions=0,  # exhaustive
     )
-    queries = torch.tensor([[0, 3, 7], [1, 4, 8]], dtype=torch.long)
-    results = evaluator.evaluate(queries)
     assert "MRR" in results
     assert 0.0 <= results["MRR"] <= 1.0
 

@@ -282,7 +282,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
         ``cfg.eval_chunk_size`` is only a lower bound; the model's
         recommendation is the cap.
         """
-        from ..eval.unified import CandidateProvider, evaluate
+        from ..eval.evaluate import CandidateProvider, evaluate
         sampler = _eval_sampler[0]
         triples_tensor = torch.tensor(valid_t, dtype=torch.long, device=device)
         eval_negs = getattr(cfg, "eval_num_corruptions", 0) or None
@@ -291,7 +291,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
             k=eval_negs if eval_negs else None,
         )
         scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-        from ..eval.scoring import recommended_eval_batch_size
+        from ..eval.eval_hooks import recommended_eval_batch_size
         recommended_B = recommended_eval_batch_size(mdl, num_entities)
         metrics = evaluate(
             mdl, triples_tensor, provider,
@@ -522,7 +522,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
     # ranks against entities that can validly fill the slot).
     def _final_eval(split_label, triples):
         if _eval_sampler[0] is not None and not use_domain_eval:
-            from ..eval.unified import CandidateProvider, evaluate as _u_evaluate
+            from ..eval.evaluate import CandidateProvider, evaluate as _u_evaluate
             triples_t = torch.tensor(triples, dtype=torch.long, device=device)
             eval_negs = cfg.eval_num_corruptions or None
             provider = CandidateProvider(
@@ -530,7 +530,7 @@ def train_model(cfg: TrainConfig) -> TrainArtifacts:
                 k=eval_negs if eval_negs else None,
             )
             scheme_map = {"tail": "tail", "head": "head", "both": "both"}
-            from ..eval.scoring import recommended_eval_batch_size as _rec_B
+            from ..eval.eval_hooks import recommended_eval_batch_size as _rec_B
             recommended_B = _rec_B(model, num_entities)
             return _u_evaluate(
                 model, triples_t, provider,

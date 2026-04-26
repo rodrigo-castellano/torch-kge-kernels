@@ -332,7 +332,7 @@ class _EvalState:
         # (e.g. ns ReasonerModel for the candidate-pool replay path),
         # else use the default :func:`kge_kernels.eval.eval_scores` over
         # ``model.score``.
-        from .scoring import eval_scores as _default_eval_scores
+        from .eval_hooks import eval_scores as _default_eval_scores
         if hasattr(model, "eval_scores"):
             _scores = model.eval_scores
         else:
