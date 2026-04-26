@@ -3,13 +3,12 @@
 Five modules:
 
 - :mod:`.types` — shared dataclasses + protocol (``KGEBackend``,
-  ``CorruptionOutput``, ``ScoreOutput``, ``SamplerConfig``,
-  ``SupportsCorruptWithMask``).
+  ``CorruptionOutput``, ``SamplerConfig``, ``SupportsCorruptWithMask``).
 - :mod:`.sampler` — vectorized corruption (filter, domain pools,
   Bernoulli) plus on-the-fly Python-list helpers.
 - :mod:`.kge` — KGE scoring entry points: model adapter, low-level
   triple / all-tail / all-head kernels, atom-type classification,
-  remap-aware triple scoring, unified ``score()``.
+  remap-aware triple scoring.
 - :mod:`.partial` — partial-atom scoring (precomputed tables + lazy
   per-batch caching).
 - :mod:`.bridges` — learnable RL+KGE score fusion modules (Linear /
@@ -32,8 +31,6 @@ from .kge import (
     kge_score_all_tails_dchunked,
     kge_score_triples,
     kge_score_triples_remapped,
-    precompute_partial_scores as precompute_partial_scores_from_model,
-    score,
 )
 from .partial import (
     LazyPartialScorer,
@@ -54,7 +51,6 @@ from .types import (
     SamplerConfig,
     ScoreAllHeadsFn,
     ScoreAllTailsFn,
-    ScoreOutput,
     ScoreTriplesFn,
     SupportsCorruptWithMask,
 )
@@ -67,7 +63,6 @@ __all__ = [
     "SamplerConfig",
     "ScoreAllHeadsFn",
     "ScoreAllTailsFn",
-    "ScoreOutput",
     "ScoreTriplesFn",
     "SupportsCorruptWithMask",
     # Sampler
@@ -85,11 +80,9 @@ __all__ = [
     "kge_score_all_tails_dchunked",
     "kge_score_triples",
     "kge_score_triples_remapped",
-    "precompute_partial_scores",
-    "precompute_partial_scores_from_model",
-    "score",
     # Partial scoring
     "LazyPartialScorer",
+    "precompute_partial_scores",
     "score_partial_atoms",
     # Bridges
     "GatedBridge",

@@ -65,20 +65,11 @@ class CorruptionOutput:
     valid_mask: torch.BoolTensor
 
 
-@dataclass(frozen=True)
-class ScoreOutput:
-    """Result returned by the public scoring entry point."""
-
-    scores: Tensor
-    valid_mask: torch.BoolTensor | None = None
-
-
 __all__ = [
     "KGEBackend",
     "CorruptionOutput",
     "LongTensor",
     "SamplerConfig",
-    "ScoreOutput",
     "ScoreAllHeadsFn",
     "ScoreAllTailsFn",
     "ScoreTriplesFn",

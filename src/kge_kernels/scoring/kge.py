@@ -1,32 +1,25 @@
 """KGE scoring entry points.
 
-Three layers:
+Two layers:
 
-1. **Low-level kernels** (``_score_*``) — operate on a :class:`KGEBackend`
-   (explicit callables for triple / all-tail / all-head scoring). No model
-   inspection, no normalization. Used by partial-atom scoring and any caller
-   that already has a backend.
-2. **Model adapter** (``kge_score_*``, ``build_backend``) — accept raw
-   ``nn.Module`` objects, unwrap ``DataParallel`` / ``torch.compile``, dispatch
-   to the model's scoring method, and apply sigmoid normalization. The hot
-   public API used by ns / DpRL.
-3. **Public entry points** (``score``, ``classify_atoms``,
-   ``kge_score_triples_remapped``) — composite operations: full triple ranking
-   with optional sampled corruptions; pure-tensor atom-type classification;
-   remap-aware triple scoring with fallback to a neutral score for unmapped
-   atoms.
+1. **Model adapter** (``build_backend``, ``kge_score_*``) — accept raw
+   ``nn.Module`` objects, unwrap ``DataParallel`` / ``torch.compile``,
+   dispatch to the model's scoring method, and apply sigmoid
+   normalization. The hot public API used by ns / DpRL.
+2. **Composite helpers** (``classify_atoms``, ``kge_score_triples_remapped``)
+   — pure-tensor atom-type classification (used by partial-atom scoring
+   and proof-state evaluators) and remap-aware triple scoring with a
+   neutral fallback for unmapped atoms.
 """
 from __future__ import annotations
 
-from typing import Literal, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .partial import precompute_partial_scores as _precompute_partial_scores_backend
-from .sampler import corrupt as _generate_corruptions
-from .types import KGEBackend, ScoreOutput, SupportsCorruptWithMask
+from .types import KGEBackend
 
 
 # ============================================================================
@@ -162,23 +155,6 @@ def kge_score_all_heads_dchunked(
     return _score_all_heads_sigmoid(actual, r, t)
 
 
-def precompute_partial_scores(
-    kge_model: nn.Module,
-    pred_remap: Tensor,
-    const_remap: Tensor,
-    batch_chunk: int = 64,
-) -> Tuple[Tensor, Tensor]:
-    """Precompute partial-score tables via the model adapter.
-
-    Thin wrapper over the backend-aware
-    :func:`kge_kernels.scoring.partial.precompute_partial_scores` that
-    builds the backend internally.
-    """
-    return _precompute_partial_scores_backend(
-        build_backend(kge_model), pred_remap, const_remap, batch_chunk=batch_chunk,
-    )
-
-
 # ============================================================================
 # Atom-type classification (proof-state-shape tensors)
 # ============================================================================
@@ -275,112 +251,6 @@ def kge_score_triples_remapped(
     return scores
 
 
-# ============================================================================
-# Public unified scoring entry point
-# ============================================================================
-
-
-def _score_k_tails(
-    backend: KGEBackend,
-    h: Tensor,
-    r: Tensor,
-    t: Tensor,
-    sampler: SupportsCorruptWithMask,
-    num_corruptions: int,
-) -> Tuple[Tensor, Tensor]:
-    """Score a positive tail query against sampled tail corruptions."""
-    queries = torch.stack([r, h, t], dim=1)
-    corruption = _generate_corruptions(
-        sampler, queries, num_corruptions=num_corruptions, mode="tail",
-    )
-    neg = corruption.negatives
-    valid = corruption.valid_mask
-    k = neg.shape[1]
-    pos_scores = backend.score_triples(h, r, t)
-    neg_h = neg[:, :, 1].reshape(-1)
-    neg_r = neg[:, :, 0].reshape(-1)
-    neg_t = neg[:, :, 2].reshape(-1)
-    neg_scores = backend.score_triples(neg_h, neg_r, neg_t).view(h.shape[0], k)
-    neg_scores[~valid] = float("-inf")
-    return torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1), valid
-
-
-def _score_k_heads(
-    backend: KGEBackend,
-    h: Tensor,
-    r: Tensor,
-    t: Tensor,
-    sampler: SupportsCorruptWithMask,
-    num_corruptions: int,
-) -> Tuple[Tensor, Tensor]:
-    """Score a positive head query against sampled head corruptions."""
-    queries = torch.stack([r, h, t], dim=1)
-    corruption = _generate_corruptions(
-        sampler, queries, num_corruptions=num_corruptions, mode="head",
-    )
-    neg = corruption.negatives
-    valid = corruption.valid_mask
-    k = neg.shape[1]
-    pos_scores = backend.score_triples(h, r, t)
-    neg_h = neg[:, :, 1].reshape(-1)
-    neg_r = neg[:, :, 0].reshape(-1)
-    neg_t = neg[:, :, 2].reshape(-1)
-    neg_scores = backend.score_triples(neg_h, neg_r, neg_t).view(h.shape[0], k)
-    neg_scores[~valid] = float("-inf")
-    return torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1), valid
-
-
-def score(
-    backend: KGEBackend,
-    triples: Tensor,
-    *,
-    mode: Literal["triples", "head", "tail"] = "triples",
-    num_corruptions: int | None = None,
-    sampler: SupportsCorruptWithMask | None = None,
-) -> ScoreOutput:
-    """Public scoring entry point for triple, sampled, or exhaustive scoring.
-
-    Args:
-        backend: Explicit scoring backend.
-        triples: Query triples in ``(r, h, t)`` format, shape ``[B, 3]``.
-        mode: ``triples`` for direct triple scores, ``head`` for head ranking,
-            or ``tail`` for tail ranking.
-        num_corruptions: ``None`` means exhaustive head/tail scoring. A
-            positive integer means sampled scoring against ``K`` corruptions.
-        sampler: Required when ``num_corruptions`` is not ``None``.
-
-    Returns:
-        ``ScoreOutput``. Direct triple scoring returns ``[B]``. Exhaustive head
-        or tail scoring returns ``[B, E]``. Sampled scoring returns ``[B, 1+K]``
-        with the positive score in column 0 and a ``valid_mask`` for the
-        sampled negatives.
-    """
-    r = triples[:, 0]
-    h = triples[:, 1]
-    t = triples[:, 2]
-
-    if mode == "triples":
-        return ScoreOutput(scores=backend.score_triples(h, r, t))
-
-    if num_corruptions is None:
-        if mode == "tail":
-            return ScoreOutput(scores=backend.score_all_tails(h, r))
-        if mode == "head":
-            return ScoreOutput(scores=backend.score_all_heads(r, t))
-        raise ValueError(f"Unsupported score mode: {mode}")
-
-    if sampler is None:
-        raise ValueError("Sampled scoring requires a sampler")
-
-    if mode == "tail":
-        scores, valid_mask = _score_k_tails(backend, h, r, t, sampler, num_corruptions)
-        return ScoreOutput(scores=scores, valid_mask=valid_mask)
-    if mode == "head":
-        scores, valid_mask = _score_k_heads(backend, h, r, t, sampler, num_corruptions)
-        return ScoreOutput(scores=scores, valid_mask=valid_mask)
-    raise ValueError(f"Unsupported score mode: {mode}")
-
-
 __all__ = [
     "build_backend",
     "classify_atoms",
@@ -390,6 +260,4 @@ __all__ = [
     "kge_score_all_tails_dchunked",
     "kge_score_triples",
     "kge_score_triples_remapped",
-    "precompute_partial_scores",
-    "score",
 ]
