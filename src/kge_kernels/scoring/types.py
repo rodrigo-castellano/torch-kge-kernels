@@ -3,29 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 import torch
 from torch import Tensor
 
 LongTensor = torch.LongTensor
-ScoreTriplesFn = Callable[[Tensor, Tensor, Tensor], Tensor]
-ScoreAllTailsFn = Callable[[Tensor, Tensor], Tensor]
-ScoreAllHeadsFn = Callable[[Tensor, Tensor], Tensor]
-
-
-@dataclass(frozen=True)
-class KGEBackend:
-    """Explicit scoring backend used by the shared kernels.
-
-    Consumers provide these callables so the shared repo does not need to know
-    anything about model classes, parameter layouts, normalization policy, or
-    framework-specific wrappers.
-    """
-
-    score_triples: ScoreTriplesFn
-    score_all_tails: ScoreAllTailsFn
-    score_all_heads: ScoreAllHeadsFn
 
 
 @dataclass(frozen=True)
@@ -66,13 +49,9 @@ class CorruptionOutput:
 
 
 __all__ = [
-    "KGEBackend",
     "CorruptionOutput",
     "LongTensor",
     "SamplerConfig",
-    "ScoreAllHeadsFn",
-    "ScoreAllTailsFn",
-    "ScoreTriplesFn",
     "SupportsCorruptWithMask",
     "Tensor",
 ]

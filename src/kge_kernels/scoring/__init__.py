@@ -1,37 +1,24 @@
-"""Scoring pipeline: types, KGE entry points, sampler, partial scoring, bridges.
+"""Scoring pipeline: types, KGE entry point, sampler, partial scoring.
 
-Five modules:
+Four modules:
 
-- :mod:`.types` — shared dataclasses + protocol (``KGEBackend``,
-  ``CorruptionOutput``, ``SamplerConfig``, ``SupportsCorruptWithMask``).
+- :mod:`.types` — shared dataclasses + protocol (``CorruptionOutput``,
+  ``SamplerConfig``, ``SupportsCorruptWithMask``).
 - :mod:`.sampler` — vectorized corruption (filter, domain pools,
   Bernoulli) plus on-the-fly Python-list helpers.
-- :mod:`.kge` — KGE scoring entry points: model adapter, low-level
-  triple / all-tail / all-head kernels, atom-type classification,
-  remap-aware triple scoring.
+- :mod:`.kge` — single ``kge_score`` entry point: triple scoring,
+  exhaustive head/tail ranking, optional sigmoid normalization, optional
+  chunked-D for memory-efficient ranking.
 - :mod:`.partial` — partial-atom scoring (precomputed tables + lazy
-  per-batch caching).
-- :mod:`.bridges` — learnable RL+KGE score fusion modules (Linear /
-  Gated / PerPredicate / MLP) plus the trainer.
+  per-batch caching) on top of :func:`kge_score`.
+
+RL+KGE fusion bridges and proof-state-shape atom classification live in
+the consumer repos (DpRL ``kge_module/bridges`` and
+``kge_module/scoring`` respectively) — they depend on caller-side
+conventions, not tkk's KGE math.
 """
 
-from .bridges import (
-    GatedBridge,
-    LinearBridge,
-    MLPBridge,
-    NeuralBridgeTrainer,
-    PerPredicateBridge,
-)
-from .kge import (
-    build_backend,
-    classify_atoms,
-    kge_score_all_heads,
-    kge_score_all_heads_dchunked,
-    kge_score_all_tails,
-    kge_score_all_tails_dchunked,
-    kge_score_triples,
-    kge_score_triples_remapped,
-)
+from .kge import kge_score
 from .partial import (
     LazyPartialScorer,
     precompute_partial_scores,
@@ -46,24 +33,16 @@ from .sampler import (
 )
 from .types import (
     CorruptionOutput,
-    KGEBackend,
     LongTensor,
     SamplerConfig,
-    ScoreAllHeadsFn,
-    ScoreAllTailsFn,
-    ScoreTriplesFn,
     SupportsCorruptWithMask,
 )
 
 __all__ = [
     # Types
     "CorruptionOutput",
-    "KGEBackend",
     "LongTensor",
     "SamplerConfig",
-    "ScoreAllHeadsFn",
-    "ScoreAllTailsFn",
-    "ScoreTriplesFn",
     "SupportsCorruptWithMask",
     # Sampler
     "Sampler",
@@ -71,23 +50,10 @@ __all__ = [
     "corrupt",
     "corrupt_to_lists",
     "corrupt_with_topup",
-    # KGE entry points
-    "build_backend",
-    "classify_atoms",
-    "kge_score_all_heads",
-    "kge_score_all_heads_dchunked",
-    "kge_score_all_tails",
-    "kge_score_all_tails_dchunked",
-    "kge_score_triples",
-    "kge_score_triples_remapped",
+    # KGE entry point
+    "kge_score",
     # Partial scoring
     "LazyPartialScorer",
     "precompute_partial_scores",
     "score_partial_atoms",
-    # Bridges
-    "GatedBridge",
-    "LinearBridge",
-    "MLPBridge",
-    "NeuralBridgeTrainer",
-    "PerPredicateBridge",
 ]

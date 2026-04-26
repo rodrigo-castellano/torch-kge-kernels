@@ -141,16 +141,15 @@ from .models import (
     build_training_model,
 )
 
-# Scoring pipeline (adapter, sampler, partial, types, utils)
+# Scoring pipeline (kge_score, sampler, partial, types)
 from .scoring import (
     CorruptionOutput,
-    KGEBackend,
     LazyPartialScorer,
     Sampler,
     SamplerConfig,
-    build_backend,
     compute_bernoulli_probs,
     corrupt,
+    kge_score,
     precompute_partial_scores,
     score_partial_atoms,
 )
@@ -169,13 +168,12 @@ __all__ = [
     "zscore_fusion",
     # Scoring pipeline
     "CorruptionOutput",
-    "KGEBackend",
     "LazyPartialScorer",
     "Sampler",
     "SamplerConfig",
-    "build_backend",
     "compute_bernoulli_probs",
     "corrupt",
+    "kge_score",
     "precompute_partial_scores",
     "score_partial_atoms",
     # Logging

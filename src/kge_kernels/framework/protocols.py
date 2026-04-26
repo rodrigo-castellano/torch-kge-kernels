@@ -45,10 +45,10 @@ class AtomRepr(Protocol):
     The leading shape of the output ``Repr`` matches the leading shape of
     the inputs (typically ``[B, C, D, M]`` or ``[B, C, G_body]``).
 
-    ``model`` is whatever scoring backend the implementation needs (a
-    ``KGEModel`` from ``kge_kernels.models`` or a ``KGEBackend``). It is
-    passed positionally so the same primitive can be reused with different
-    backends without subclassing.
+    ``model`` is the tkk-native KGE model (anything inheriting from
+    ``kge_kernels.models.base.KGEBase``). It is passed positionally so
+    the same primitive can be reused with different models without
+    subclassing.
     """
 
     def __call__(self, preds: Tensor, subjs: Tensor, objs: Tensor, model) -> Repr: ...

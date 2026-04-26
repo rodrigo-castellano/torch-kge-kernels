@@ -1,21 +1,24 @@
-"""Partial-atom scoring utilities built on top of the shared scoring kernels."""
+"""Partial-atom scoring utilities built on top of :func:`kge_score`."""
 
 from __future__ import annotations
 
 from typing import Tuple
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
-from .types import KGEBackend
+from .kge import kge_score
 
 
 @torch.no_grad()
 def precompute_partial_scores(
-    backend: KGEBackend,
+    model: nn.Module,
     pred_remap: Tensor,
     const_remap: Tensor,
     batch_chunk: int = 64,
+    *,
+    sigmoid: bool = True,
 ) -> Tuple[Tensor, Tensor]:
     """Precompute partial-atom lookup tables for grounding-style use cases.
 
@@ -25,13 +28,14 @@ def precompute_partial_scores(
     - the best score over all possible heads for ``pred(?, entity)``
 
     Args:
-        backend: Explicit scoring backend.
+        model: tkk-native KGE model.
         pred_remap: Predicate remap tensor of shape ``[P_im]`` with ``-1`` for
             unmapped predicates.
         const_remap: Entity remap tensor of shape ``[E_im]`` with ``-1`` for
             unmapped entities.
         batch_chunk: Number of entities scored per chunk in the batched
-            exhaustive backend calls.
+            exhaustive calls.
+        sigmoid: forwarded to :func:`kge_score`.
 
     Returns:
         ``(max_tail_score, max_head_score)``, both of shape ``[P_im, E_im]``.
@@ -55,8 +59,12 @@ def precompute_partial_scores(
     kge_ents = const_remap[valid_ents]
     for im_pred in valid_preds:
         kge_rel = pred_remap[im_pred]
-        tail_scores = _partial_score_chunked(backend, kge_ents, kge_rel, role=0, batch_chunk=batch_chunk)
-        head_scores = _partial_score_chunked(backend, kge_ents, kge_rel, role=1, batch_chunk=batch_chunk)
+        tail_scores = _partial_score_chunked(
+            model, kge_ents, kge_rel, role=0, batch_chunk=batch_chunk, sigmoid=sigmoid,
+        )
+        head_scores = _partial_score_chunked(
+            model, kge_ents, kge_rel, role=1, batch_chunk=batch_chunk, sigmoid=sigmoid,
+        )
         max_tail_score[im_pred, valid_ents] = tail_scores
         max_head_score[im_pred, valid_ents] = head_scores
 
@@ -64,11 +72,12 @@ def precompute_partial_scores(
 
 
 def _partial_score_chunked(
-    backend: KGEBackend,
+    model: nn.Module,
     kge_ents: Tensor,
     kge_rel: Tensor,
     role: int,
     batch_chunk: int,
+    sigmoid: bool,
 ) -> Tensor:
     """Compute best head/tail completions for a chunk of entities."""
 
@@ -81,9 +90,9 @@ def _partial_score_chunked(
         chunk = kge_ents[start:end]
         rel_exp = kge_rel.expand(chunk.shape[0])
         if role == 0:
-            raw = backend.score_all_tails(chunk, rel_exp)
+            raw = kge_score(model, chunk, rel_exp, None, sigmoid=sigmoid)
         else:
-            raw = backend.score_all_heads(rel_exp, chunk)
+            raw = kge_score(model, None, rel_exp, chunk, sigmoid=sigmoid)
         result[start:end] = raw.max(dim=1).values
 
     return result
@@ -152,45 +161,40 @@ class LazyPartialScorer:
     Call ``ensure_for_derived_states(derived_states, derived_counts)`` before
     each scoring step. The scorer then uses ``max_tail_score`` / ``max_head_score``
     as pure lookup tables (CUDA-graph safe).
-
-    Usage::
-
-        lps = LazyPartialScorer(backend, pred_remap, const_remap, constant_no, padding_idx)
-        # Before each step:
-        lps.ensure_for_derived_states(state.derived_states, state.derived_counts)
-        # score_partial_atoms uses lps.max_tail_score / lps.max_head_score
     """
 
     def __init__(
         self,
-        backend: KGEBackend,
+        model: nn.Module,
         pred_remap: Tensor,
         const_remap: Tensor,
         constant_no: int,
         padding_idx: int,
         true_pred_idx: int = -1,
         false_pred_idx: int = -1,
+        *,
+        sigmoid: bool = True,
     ) -> None:
         device = const_remap.device
         P_im = pred_remap.shape[0]
         E_im = const_remap.shape[0]
 
-        self.backend = backend
+        self.model = model
         self.pred_remap = pred_remap
         self.const_remap = const_remap
         self.constant_no = constant_no
         self.padding_idx = padding_idx
         self.true_pred_idx = true_pred_idx
         self.false_pred_idx = false_pred_idx
+        self.sigmoid = sigmoid
         self.max_tail_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
         self.max_head_score = torch.zeros(P_im, E_im, dtype=torch.float32, device=device)
 
         self._cached_tail = torch.zeros(P_im, E_im, dtype=torch.bool, device=device)
         self._cached_head = torch.zeros(P_im, E_im, dtype=torch.bool, device=device)
-        self._computed: set = set()  # predicates fully precomputed (for ensure())
+        self._computed: set = set()
         self._n_computed = 0
 
-        # Auto-tune batch chunk to ~2GB peak
         E_kge = (const_remap >= 0).sum().item()
         self._batch_chunk = max(1, min(512, int(2e9 / (max(E_kge, 1) * 4 * 1024))))
 
@@ -221,8 +225,12 @@ class LazyPartialScorer:
                 ents = valid_kge[start:end]
                 idx = valid_indices[start:end]
                 rel = kge_rel.expand(ents.shape[0])
-                self.max_tail_score[im_pred, idx] = self.backend.score_all_tails(ents, rel).max(dim=1).values
-                self.max_head_score[im_pred, idx] = self.backend.score_all_heads(rel, ents).max(dim=1).values
+                self.max_tail_score[im_pred, idx] = kge_score(
+                    self.model, ents, rel, None, sigmoid=self.sigmoid,
+                ).max(dim=1).values
+                self.max_head_score[im_pred, idx] = kge_score(
+                    self.model, None, rel, ents, sigmoid=self.sigmoid,
+                ).max(dim=1).values
             self._cached_tail[im_pred, valid_indices] = True
             self._cached_head[im_pred, valid_indices] = True
             self._computed.add(im_pred)
@@ -311,9 +319,9 @@ class LazyPartialScorer:
                 chunk_im = im_ents_valid[start:end]
                 rel = kge_rel.expand(chunk_kge.shape[0])
                 if role == "tail":
-                    s = self.backend.score_all_tails(chunk_kge, rel)
+                    s = kge_score(self.model, chunk_kge, rel, None, sigmoid=self.sigmoid)
                 else:
-                    s = self.backend.score_all_heads(rel, chunk_kge)
+                    s = kge_score(self.model, None, rel, chunk_kge, sigmoid=self.sigmoid)
                 table[p_im, chunk_im] = s.max(dim=1).values
                 cache[p_im, chunk_im] = True
 

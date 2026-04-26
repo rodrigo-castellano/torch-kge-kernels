@@ -126,8 +126,8 @@ def differentiable_mrr_loss(
 
     Given ``[B, K]`` scores per candidate and ``[B]`` indices of the
     correct candidate, compute a smooth proxy for ``-MRR`` using the
-    softmax probability of the target. Suitable for fitting bridge
-    modules (see :class:`kge_kernels.scoring.bridges.NeuralBridgeTrainer`).
+    softmax probability of the target. Suitable for fitting RL+KGE
+    fusion bridges or any per-query ranker.
 
     Args:
         scores: Per-candidate scores, higher is better.

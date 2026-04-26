@@ -6,11 +6,12 @@ A ``KGEModel`` is a torch ``nn.Module`` that knows how to:
   - score all heads for ``(r, t)`` → ``score_all_heads(r, t) -> [N, E]``
   - compose a fused embedding    → ``compose(h, r, t) -> [N, E]``
 
-The first three methods plug directly into ``KGEBackend`` (the existing
-``kge_kernels.scoring`` protocol). The ``compose`` method is what
-``KGEEmbedAtom`` consumes — it's the fused per-atom embedding (TransE's
-``h+r-t``, ComplEx's bilinear form, etc.) that used to be duplicated in
-``DpRL.kge_experiments.nn.atom_embedders`` and ``torch-ns.ns_lib.nn.kge_layers``.
+The first three methods plug directly into the unified scoring entry
+point :func:`kge_kernels.scoring.kge_score`. The ``compose`` method is
+what ``KGEEmbedAtom`` consumes — it's the fused per-atom embedding
+(TransE's ``h+r-t``, ComplEx's bilinear form, etc.) that used to be
+duplicated in ``DpRL.kge_experiments.nn.atom_embedders`` and
+``torch-ns.ns_lib.nn.kge_layers``.
 
 ``score(h, r, t=None)`` is a convenience dispatch provided by the base:
 ``t is None`` → all tails, ``h is None`` → all heads, otherwise specific

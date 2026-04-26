@@ -1,33 +1,47 @@
 import torch
+import torch.nn as nn
 
-from kge_kernels.scoring import KGEBackend, precompute_partial_scores, score_partial_atoms
+from kge_kernels.scoring import precompute_partial_scores, score_partial_atoms
 
 
-def _make_backend() -> KGEBackend:
-    def score_triples(h, r, t):
+class _StubModel(nn.Module):
+    """Minimal model exposing the tkk score(h, r, t) dispatch contract."""
+
+    def score_triples(self, h, r, t):
         return h.float() + 2.0 * r.float() - t.float()
 
-    def score_all_tails(h, r):
+    def score_all_tails(self, h, r):
         all_tails = torch.arange(4, device=h.device).unsqueeze(0).expand(h.shape[0], -1)
-        return score_triples(h.unsqueeze(1).expand_as(all_tails), r.unsqueeze(1).expand_as(all_tails), all_tails)
+        return self.score_triples(
+            h.unsqueeze(1).expand_as(all_tails),
+            r.unsqueeze(1).expand_as(all_tails),
+            all_tails,
+        )
 
-    def score_all_heads(r, t):
+    def score_all_heads(self, r, t):
         all_heads = torch.arange(4, device=t.device).unsqueeze(0).expand(t.shape[0], -1)
-        return score_triples(all_heads, r.unsqueeze(1).expand_as(all_heads), t.unsqueeze(1).expand_as(all_heads))
+        return self.score_triples(
+            all_heads,
+            r.unsqueeze(1).expand_as(all_heads),
+            t.unsqueeze(1).expand_as(all_heads),
+        )
 
-    return KGEBackend(
-        score_triples=score_triples,
-        score_all_tails=score_all_tails,
-        score_all_heads=score_all_heads,
-    )
+    def score(self, h, r, t):
+        if h is not None and t is not None:
+            return self.score_triples(h, r, t)
+        if t is None:
+            return self.score_all_tails(h, r)
+        return self.score_all_heads(r, t)
 
 
-def test_precompute_partial_scores_matches_backend_maxima():
-    backend = _make_backend()
+def test_precompute_partial_scores_matches_model_maxima():
+    model = _StubModel()
     pred_remap = torch.tensor([0, 1])
     const_remap = torch.tensor([0, 1, 2])
 
-    max_tail_score, max_head_score = precompute_partial_scores(backend, pred_remap, const_remap, batch_chunk=2)
+    max_tail_score, max_head_score = precompute_partial_scores(
+        model, pred_remap, const_remap, batch_chunk=2, sigmoid=False,
+    )
 
     expected_tail = torch.tensor(
         [
