@@ -2,7 +2,6 @@
 
 from .candidates import CandidateSource, Mode, SamplerCandidates
 from .checkpoint import evaluate_checkpoint
-from .pool import CandidatePool
 from .ranking import (
     compute_ranks,
     metrics_from_ranks,
@@ -13,7 +12,6 @@ from .ranking_evaluator import RankingEvaluator, RankingResult, ScoreFn
 from .results import EvalResults
 
 __all__ = [
-    "CandidatePool",
     "CandidateSource",
     "EvalResults",
     "Mode",

@@ -46,7 +46,6 @@ from .data import (
 
 # Evaluation (includes ranking metrics)
 from .eval import (
-    CandidatePool,
     CandidateSource,
     EvalResults,
     RankingEvaluator,
@@ -156,7 +155,6 @@ from .scoring import (
 
 __all__ = [
     # Evaluation + ranking
-    "CandidatePool",
     "CandidateSource",
     "EvalResults",
     "RankingEvaluator",

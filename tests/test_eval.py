@@ -4,7 +4,6 @@ import torch
 from torch import nn
 
 from kge_kernels.eval import (
-    CandidatePool,
     EvalResults,
     RankingEvaluator,
     SamplerCandidates,
@@ -50,31 +49,6 @@ def _make_sampler(num_entities: int = 50, num_relations: int = 5) -> Sampler:
         device=device,
         min_entity_idx=1,
     )
-
-
-def test_candidate_pool_build():
-    """CandidatePool.build produces correct shape with positive at slot 0."""
-    sampler = _make_sampler()
-    queries = torch.tensor([[0, 1, 2], [1, 3, 4]], dtype=torch.long)
-    pool = CandidatePool.build(queries, sampler, n_corruptions=10, mode="tail")
-
-    assert pool.K == 11
-    assert pool.CQ == 2
-    assert pool.pool.shape == (22, 3)
-    assert pool.pool_size == 22
-
-    pool_3d = pool.pool.view(pool.K, pool.CQ, 3)
-    assert torch.equal(pool_3d[0, 0], queries[0])
-    assert torch.equal(pool_3d[0, 1], queries[1])
-
-
-def test_candidate_pool_valid_mask():
-    """valid_mask correctly identifies padded entries."""
-    sampler = _make_sampler(num_entities=5)
-    queries = torch.tensor([[0, 1, 2]], dtype=torch.long)
-    pool = CandidatePool.build(queries, sampler, n_corruptions=20, mode="tail")
-    assert pool.valid_mask.shape == (1, 21)
-    assert pool.valid_mask[0, 0].item()
 
 
 def test_rrf_seeded_reproducible():
