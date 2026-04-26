@@ -443,9 +443,10 @@ def evaluate(
     _valid_tmp = state.valid_tmp
     score_fns = state.score_fns
 
-    # Preserve and restore training mode.
-    was_training = model.training
-    model.eval()
+    # Preserve and restore training mode (only relevant for nn.Module scorers).
+    was_training = getattr(model, "training", False)
+    if hasattr(model, "eval") and callable(model.eval):
+        model.eval()
     try:
         tie_gen = torch.Generator(device=device).manual_seed(seed)
         all_ranks: list[Tensor] = []
@@ -499,7 +500,7 @@ def evaluate(
             return {"MRR": 0.0, "Hits@1": 0.0, "Hits@3": 0.0, "Hits@10": 0.0}
         return ranking_metrics(torch.cat(all_ranks))
     finally:
-        if was_training:
+        if was_training and hasattr(model, "train") and callable(model.train):
             model.train()
 
 
