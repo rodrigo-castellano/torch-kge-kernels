@@ -1,6 +1,8 @@
 """ConvE: 2D convolution over reshaped ``(entity, relation)`` embeddings."""
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -60,16 +62,21 @@ class ConvE(KGEModel):
         x = F.relu(self.hidden_drop(self.fc(x.view(x.shape[0], -1))))
         return x
 
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        x = self._conv_project(h, r)
-        return (x * self.entity_embeddings(t)).sum(dim=-1)
-
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        x = self._conv_project(h, r)
-        return x @ self.entity_embeddings.weight.T
-
-    def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
-        # Brute-force fallback — ConvE's projection is asymmetric in h.
+    def score(
+        self,
+        h: Optional[Tensor],
+        r: Tensor,
+        t: Optional[Tensor],
+        *,
+        d_chunk: Optional[int] = None,
+    ) -> Tensor:
+        if h is not None and t is not None:
+            x = self._conv_project(h, r)
+            return (x * self.entity_embeddings(t)).sum(dim=-1)
+        if t is None:
+            # all-tails matmul fast path
+            return self._conv_project(h, r) @ self.entity_embeddings.weight.T
+        # h is None: brute-force per-head — ConvE's projection is asymmetric in h.
         batch_size = t.shape[0]
         num_ent = self.entity_embeddings.num_embeddings
         device = t.device
@@ -81,7 +88,7 @@ class ConvE(KGEModel):
             else r.unsqueeze(1).expand_as(all_h).reshape(-1)
         )
         t_exp = t.unsqueeze(1).expand_as(all_h).reshape(-1)
-        return self.score_triples(h_exp, r_exp, t_exp).view(batch_size, num_ent)
+        return self.score(h_exp, r_exp, t_exp).view(batch_size, num_ent)
 
     def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         """Fused ConvE feature: projected (h, r) combined with t element-wise."""

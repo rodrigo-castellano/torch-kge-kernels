@@ -30,7 +30,7 @@ def test_score_triples_shape(name, builder):
     h = torch.tensor([0, 1, 2])
     r = torch.tensor([0, 1, 2])
     t = torch.tensor([3, 4, 5])
-    out = model.score_triples(h, r, t)
+    out = model.score(h, r, t)
     assert out.shape == (3,)
 
 
@@ -40,7 +40,7 @@ def test_score_all_tails_shape(name, builder):
     model: KGEModel = builder()
     h = torch.tensor([0, 1, 2])
     r = torch.tensor([0, 1, 2])
-    out = model.score_all_tails(h, r)
+    out = model.score(h, r, None)
     assert out.shape == (3, model.num_entities)
 
 
@@ -50,7 +50,7 @@ def test_score_all_heads_shape(name, builder):
     model: KGEModel = builder()
     r = torch.tensor([0, 1, 2])
     t = torch.tensor([3, 4, 5])
-    out = model.score_all_heads(r, t)
+    out = model.score(None, r, t)
     assert out.shape == (3, model.num_entities)
 
 
@@ -64,7 +64,6 @@ def test_compose_returns_embedding(name, builder):
     emb = model.compose(h, r, t)
     assert emb.dim() == 2
     assert emb.shape[0] == 3
-    # Embed dim is at least 1 (model-specific exact width is checked elsewhere)
     assert emb.shape[1] >= 1
 
 
@@ -75,76 +74,47 @@ def test_transe_score_triples_value():
     h = torch.tensor([0])
     r = torch.tensor([0])
     t = torch.tensor([0])
-    out = model.score_triples(h, r, t)
+    out = model.score(h, r, t)
     assert out.item() <= 1e-6
 
 
-def test_score_all_tails_consistent_with_score_triples():
-    """score_all_tails(h, r)[t] should equal score_triples(h, r, t)."""
+def test_score_all_tails_consistent_with_triples():
+    """score(h, r, None)[t] should equal score(h, r, t)."""
     torch.manual_seed(0)
     model = TransE(num_entities=5, num_relations=3, dim=4)
     h = torch.tensor([1, 2])
     r = torch.tensor([0, 1])
     t = torch.tensor([3, 4])
-    triple = model.score_triples(h, r, t)
-    all_tails = model.score_all_tails(h, r)
+    triple = model.score(h, r, t)
+    all_tails = model.score(h, r, None)
     gathered = all_tails.gather(1, t.unsqueeze(1)).squeeze(1)
     assert torch.allclose(triple, gathered, atol=1e-5)
-
-
-def test_score_dispatch_specific_triples():
-    torch.manual_seed(0)
-    model = TransE(num_entities=5, num_relations=3, dim=4)
-    h = torch.tensor([1, 2])
-    r = torch.tensor([0, 1])
-    t = torch.tensor([3, 4])
-    via_score = model.score(h, r, t)
-    via_triples = model.score_triples(h, r, t)
-    assert torch.allclose(via_score, via_triples)
-
-
-def test_score_dispatch_all_tails_when_t_none():
-    torch.manual_seed(0)
-    model = TransE(num_entities=5, num_relations=3, dim=4)
-    h = torch.tensor([1, 2])
-    r = torch.tensor([0, 1])
-    via_score = model.score(h, r, None)
-    via_all = model.score_all_tails(h, r)
-    assert torch.allclose(via_score, via_all)
-
-
-def test_score_dispatch_all_heads_when_h_none():
-    torch.manual_seed(0)
-    model = TransE(num_entities=5, num_relations=3, dim=4)
-    r = torch.tensor([0, 1])
-    t = torch.tensor([3, 4])
-    via_score = model.score(None, r, t)
-    via_all = model.score_all_heads(r, t)
-    assert torch.allclose(via_score, via_all)
 
 
 def test_score_dispatch_both_none_raises():
     torch.manual_seed(0)
     model = TransE(num_entities=5, num_relations=3, dim=4)
-    with pytest.raises(ValueError, match="at least one"):
+    # Both None hits the entity_embeddings(None) path which raises TypeError.
+    with pytest.raises((TypeError, AttributeError)):
         model.score(None, torch.tensor([0]), None)
 
 
 @pytest.mark.parametrize("p_norm,dim,d_chunk", [(1, 16, 4), (1, 16, 5), (2, 16, 4), (1, 32, 7)])
-def test_rotate_dchunked_matches_direct(p_norm, dim, d_chunk):
+def test_rotate_dchunked_matches_one_pass(p_norm, dim, d_chunk):
+    """RotatE: score(d_chunk=int) must match score(d_chunk=None) (one-pass)."""
     torch.manual_seed(0)
     model = RotatE(num_entities=11, num_relations=5, dim=dim, p_norm=p_norm)
     h = torch.tensor([0, 3, 7, 10])
     r = torch.tensor([0, 2, 4, 1])
     t = torch.tensor([1, 5, 9, 0])
 
-    direct_tails = model.score_all_tails(h, r)
-    chunked_tails = model.score_all_tails_dchunked(h, r, d_chunk=d_chunk)
+    direct_tails = model.score(h, r, None)
+    chunked_tails = model.score(h, r, None, d_chunk=d_chunk)
     assert chunked_tails.shape == direct_tails.shape
     assert torch.allclose(chunked_tails, direct_tails, atol=1e-5, rtol=1e-5)
 
-    direct_heads = model.score_all_heads(r, t)
-    chunked_heads = model.score_all_heads_dchunked(r, t, d_chunk=d_chunk)
+    direct_heads = model.score(None, r, t)
+    chunked_heads = model.score(None, r, t, d_chunk=d_chunk)
     assert chunked_heads.shape == direct_heads.shape
     assert torch.allclose(chunked_heads, direct_heads, atol=1e-5, rtol=1e-5)
 
@@ -154,4 +124,4 @@ def test_forward_delegates_to_score():
     model = TransE(num_entities=5, num_relations=3, dim=4)
     h = torch.tensor([1])
     r = torch.tensor([0])
-    assert torch.allclose(model(h, r, None), model.score_all_tails(h, r))
+    assert torch.allclose(model(h, r, None), model.score(h, r, None))

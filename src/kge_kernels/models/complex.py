@@ -14,6 +14,8 @@ for the complex Hermitian product.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 from torch import Tensor, nn
 
@@ -40,30 +42,35 @@ class ComplEx(KGEModel):
         nn.init.uniform_(self.entity_embeddings.weight, -0.05, 0.05)
         nn.init.uniform_(self.relation_embeddings.weight, -0.05, 0.05)
 
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        return ops.complex_hermitian_real_vec(
-            self.entity_embeddings(h),
-            self.relation_embeddings(r),
-            self.entity_embeddings(t),
-        ).sum(dim=-1)
+    def score(
+        self,
+        h: Optional[Tensor],
+        r: Tensor,
+        t: Optional[Tensor],
+        *,
+        d_chunk: Optional[int] = None,
+    ) -> Tensor:
+        if h is not None and t is not None:
+            return ops.complex_hermitian_real_vec(
+                self.entity_embeddings(h),
+                self.relation_embeddings(r),
+                self.entity_embeddings(t),
+            ).sum(dim=-1)
 
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        h_re, h_im = ops.complex_split(self.entity_embeddings(h))
         r_re, r_im = ops.complex_split(self.relation_embeddings(r))
         all_re = self.entity_embeddings.weight[:, :self.half_dim]
         all_im = self.entity_embeddings.weight[:, self.half_dim:]
-        return (
-            (h_re * r_re) @ all_re.T
-            + (h_im * r_re) @ all_im.T
-            + (h_re * r_im) @ all_im.T
-            - (h_im * r_im) @ all_re.T
-        )
-
-    def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
+        if t is None:
+            # all-tails matmul fast path
+            h_re, h_im = ops.complex_split(self.entity_embeddings(h))
+            return (
+                (h_re * r_re) @ all_re.T
+                + (h_im * r_re) @ all_im.T
+                + (h_re * r_im) @ all_im.T
+                - (h_im * r_im) @ all_re.T
+            )
+        # h is None: all-heads matmul fast path (different sign pattern from conj on t)
         t_re, t_im = ops.complex_split(self.entity_embeddings(t))
-        r_re, r_im = ops.complex_split(self.relation_embeddings(r))
-        all_re = self.entity_embeddings.weight[:, :self.half_dim]
-        all_im = self.entity_embeddings.weight[:, self.half_dim:]
         return (
             (r_re * t_re) @ all_re.T
             + (r_re * t_im) @ all_im.T

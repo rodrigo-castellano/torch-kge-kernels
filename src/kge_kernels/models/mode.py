@@ -6,6 +6,7 @@ Compose = r * h - t
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
 from torch import Tensor, nn
@@ -37,21 +38,26 @@ class ModE(KGEModel):
         nn.init.uniform_(self.entity_embeddings.weight, -bound, bound)
         nn.init.uniform_(self.relation_embeddings.weight, -bound, bound)
 
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        diff = self.relation_embeddings(r) * self.entity_embeddings(h) - self.entity_embeddings(t)
-        return -torch.norm(diff, p=self.p, dim=-1)
-
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        rh = self.relation_embeddings(r) * self.entity_embeddings(h)         # [B, dim]
-        diff = rh.unsqueeze(1) - self.entity_embeddings.weight.unsqueeze(0)  # [B, E, dim]
-        return -torch.norm(diff, p=self.p, dim=-1)
-
-    def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
-        # r * h_i for all h_i, then subtract t
-        r_emb = self.relation_embeddings(r)                       # [B, dim]
-        all_h = self.entity_embeddings.weight.unsqueeze(0)        # [1, E, dim]
-        rh = r_emb.unsqueeze(1) * all_h                           # [B, E, dim]
-        t_emb = self.entity_embeddings(t).unsqueeze(1)            # [B, 1, dim]
+    def score(
+        self,
+        h: Optional[Tensor],
+        r: Tensor,
+        t: Optional[Tensor],
+        *,
+        d_chunk: Optional[int] = None,
+    ) -> Tensor:
+        r_emb = self.relation_embeddings(r)
+        if h is not None and t is not None:
+            diff = r_emb * self.entity_embeddings(h) - self.entity_embeddings(t)
+            return -torch.norm(diff, p=self.p, dim=-1)
+        if t is None:
+            rh = r_emb * self.entity_embeddings(h)                              # [B, dim]
+            diff = rh.unsqueeze(1) - self.entity_embeddings.weight.unsqueeze(0)  # [B, E, dim]
+            return -torch.norm(diff, p=self.p, dim=-1)
+        # h is None: r * h_i for all h_i, then subtract t
+        all_h = self.entity_embeddings.weight.unsqueeze(0)                       # [1, E, dim]
+        rh = r_emb.unsqueeze(1) * all_h                                          # [B, E, dim]
+        t_emb = self.entity_embeddings(t).unsqueeze(1)                           # [B, 1, dim]
         diff = rh - t_emb
         return -torch.norm(diff, p=self.p, dim=-1)
 

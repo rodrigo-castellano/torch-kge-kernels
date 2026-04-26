@@ -28,12 +28,8 @@ def _flatten_for_lookup(preds: Tensor, subjs: Tensor, objs: Tensor):
 
 
 def _score_triples(model, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-    """Dispatch to whichever scoring method the model exposes."""
-    if hasattr(model, "score_triples"):
-        return model.score_triples(h, r, t)
-    if hasattr(model, "score"):
-        return model.score(h, r, t)
-    raise AttributeError(f"AtomRepr model {type(model).__name__} has no score_triples/score method")
+    """Score triples via the model's unified ``score(h, r, t)``."""
+    return model.score(h, r, t)
 
 
 def _compose(model, h: Tensor, r: Tensor, t: Tensor) -> Tensor:

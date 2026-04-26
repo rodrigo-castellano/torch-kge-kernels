@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 from torch import Tensor, nn
 
@@ -25,20 +26,22 @@ class DistMult(KGEModel):
         nn.init.uniform_(self.entity_embeddings.weight, -bound, bound)
         nn.init.uniform_(self.relation_embeddings.weight, -bound, bound)
 
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        return (
-            self.entity_embeddings(h)
-            * self.relation_embeddings(r)
-            * self.entity_embeddings(t)
-        ).sum(dim=-1)
-
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        hr = self.entity_embeddings(h) * self.relation_embeddings(r)
-        return hr @ self.entity_embeddings.weight.T
-
-    def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
-        rt = self.entity_embeddings(t) * self.relation_embeddings(r)
-        return rt @ self.entity_embeddings.weight.T
+    def score(
+        self,
+        h: Optional[Tensor],
+        r: Tensor,
+        t: Optional[Tensor],
+        *,
+        d_chunk: Optional[int] = None,
+    ) -> Tensor:
+        r_emb = self.relation_embeddings(r)
+        if h is not None and t is not None:
+            return (self.entity_embeddings(h) * r_emb * self.entity_embeddings(t)).sum(dim=-1)
+        if t is None:
+            # all-tails matmul fast path
+            return (self.entity_embeddings(h) * r_emb) @ self.entity_embeddings.weight.T
+        # h is None: all-heads (DistMult is symmetric, same matmul)
+        return (self.entity_embeddings(t) * r_emb) @ self.entity_embeddings.weight.T
 
     def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
         """Fused DistMult embedding: h * r * t (element-wise)."""

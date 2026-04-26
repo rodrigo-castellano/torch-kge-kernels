@@ -247,36 +247,14 @@ class Evaluator:
         introduce artificial ties that collapse Hits@1."""
         if r.dim() == 0:
             r = r.expand(h.shape[0])
-        if hasattr(model, "score"):
-            return model.score(h, r, None)
-        if hasattr(model, "score_all_tails"):
-            return model.score_all_tails(h, r)
-        B = h.shape[0]
-        E = self.num_entities
-        all_t = torch.arange(E, device=h.device).unsqueeze(0).expand(B, -1)
-        h_exp = h.unsqueeze(1).expand(B, E).reshape(-1)
-        r_exp = r.expand(B * E) if r.dim() == 0 else r.unsqueeze(1).expand(B, E).reshape(-1)
-        t_exp = all_t.reshape(-1)
-        raw = model.score_triples(h_exp, r_exp, t_exp) if hasattr(model, "score_triples") else model.score_atoms(r_exp, h_exp, t_exp)
-        return raw.view(B, E)
+        return model.score(h, r, None)
 
     def _score_all_heads(self, model: nn.Module, r: Tensor, t: Tensor) -> Tensor:
         """Score all entities as heads for (r, t) pairs. See ``_score_all_tails``
         for why we return raw logits rather than sigmoid probabilities."""
         if r.dim() == 0:
             r = r.expand(t.shape[0])
-        if hasattr(model, "score"):
-            return model.score(None, r, t)
-        if hasattr(model, "score_all_heads"):
-            return model.score_all_heads(r, t)
-        B = t.shape[0]
-        E = self.num_entities
-        all_h = torch.arange(E, device=t.device).unsqueeze(0).expand(B, -1)
-        h_exp = all_h.reshape(-1)
-        r_exp = r.expand(B * E) if r.dim() == 0 else r.unsqueeze(1).expand(B, E).reshape(-1)
-        t_exp = t.unsqueeze(1).expand(B, E).reshape(-1)
-        raw = model.score_triples(h_exp, r_exp, t_exp) if hasattr(model, "score_triples") else model.score_atoms(r_exp, h_exp, t_exp)
-        return raw.view(B, E)
+        return model.score(None, r, t)
 
     # ------------------------------------------------------------------
     # Sampled evaluation (corruption-pool based)
@@ -463,8 +441,8 @@ class Evaluator:
     def _score_pool(self, pool: Tensor) -> Dict[str, Tensor]:
         """Score candidate pool. Override in subclass for compiled scoring.
 
-        Default implementation calls ``self.model.score_triples(h, r, t)``
-        with sub-batching and optional padding.
+        Default implementation calls ``self.model.score(h, r, t)`` with
+        sub-batching and optional padding.
         """
         P = pool.shape[0]
         B = self.batch_size if self.batch_size > 0 else P
@@ -486,15 +464,7 @@ class Evaluator:
             # entries may contain OOB indices; they are masked out later.
             h = h.clamp(0, self.num_entities - 1)
             t = t.clamp(0, self.num_entities - 1)
-            if hasattr(actual_model, "score"):
-                raw = actual_model.score(h, r, t)
-            elif hasattr(actual_model, "score_triples"):
-                raw = actual_model.score_triples(h, r, t)
-            elif hasattr(actual_model, "score_atoms"):
-                raw = actual_model.score_atoms(r, h, t)
-            else:
-                raise AttributeError("Model requires score(), score_triples(), or score_atoms()")
-            scores = torch.sigmoid(raw)
+            scores = torch.sigmoid(actual_model.score(h, r, t))
 
             if self.batch_size > 0 and actual_B < B:
                 scores = scores[:actual_B]

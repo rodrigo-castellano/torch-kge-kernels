@@ -1,30 +1,54 @@
 """Abstract base class for KGE models in tkk.
 
-A ``KGEModel`` is a torch ``nn.Module`` that knows how to:
-  - score specific triples       → ``score_triples(h, r, t) -> [N]``
-  - score all tails for ``(h, r)`` → ``score_all_tails(h, r) -> [N, E]``
-  - score all heads for ``(r, t)`` → ``score_all_heads(r, t) -> [N, E]``
-  - compose a fused embedding    → ``compose(h, r, t) -> [N, E]``
+A ``KGEModel`` is a ``torch.nn.Module`` with the following contract.
+**Every method below is part of the contract** — callers (training
+pipeline, eval pipeline, scoring helpers) may rely on any of them.
+Some are abstract (subclass must implement); the rest have a default
+implementation in this base class.
 
-The first three methods plug directly into the unified scoring entry
-point :func:`kge_kernels.scoring.kge_score`. The ``compose`` method is
-what ``KGEEmbedAtom`` consumes — it's the fused per-atom embedding
-(TransE's ``h+r-t``, ComplEx's bilinear form, etc.) that used to be
-duplicated in ``DpRL.kge_experiments.nn.atom_embedders`` and
-``torch-ns.ns_lib.nn.kge_layers``.
+Why training/eval orchestration lives on the model (and not as free
+functions over a model): they are the model's ``torch.compile`` boundary.
+Subclasses with a different atom layout (reasoners that build a
+``[B*(1+K), 3]`` pool for the grounder rather than the static-flat
+``[B + B*K, 3]`` KGE-only pool) override the methods to keep one
+compiled graph per model. Free functions can't do that polymorphic
+dispatch, so the contract bakes in the override points.
 
-``score(h, r, t=None)`` is a convenience dispatch provided by the base:
-``t is None`` → all tails, ``h is None`` → all heads, otherwise specific
-triples. This matches the call convention used by DpRL's inference and
-evaluation paths.
+Required attributes (set in ``__init__``):
+  - ``num_entities: int``
+  - ``num_relations: int``
+  - ``dim: int``
+  - ``entity_embeddings: nn.Embedding``  (the entity table)
 
-``eval_scores(q_buf, cand_buf, mode)`` is the unified-eval hook consumed
-by :mod:`kge_kernels.eval.unified` — a ``[B, 3]`` query batch plus a
-``[B, C]`` candidate-entity matrix returns ``[B, C]`` scores. The base
-implementation expands to per-atom ``score_triples`` so every subclass
-works out of the box; a subclass that wants a faster specialisation
-(e.g. one matmul for exhaustive mode via ``score_all_tails``) can
-override. Same shape contract either way.
+Abstract — subclass MUST implement:
+  - ``score(h, r, t, *, d_chunk=None) -> Tensor`` — single scoring entry
+    point. ``h, r, t`` all bound: returns ``[B]`` triple scores.
+    ``t=None``: returns ``[B, E]`` ranking against all tails. ``h=None``:
+    returns ``[B, E]`` ranking against all heads. ``d_chunk=None``
+    (default) means score every entity in one pass; an integer enables
+    memory-chunked scoring on models that support it (RotatE / RotatENS).
+  - ``compose(h, r, t) -> Tensor`` — fused per-atom embedding consumed
+    by ``KGEEmbedAtom`` (the layer that turns atoms into MLP features).
+  - ``reset_parameters() -> None`` — re-init weights (called from
+    ``__init__`` and from external repro/seed setups).
+
+Provided by base — override only when a model needs to:
+  - ``train_step(pos, neg, mask, pos_valid) -> scalar`` — unified
+    compile-boundary training loss. Default: mask-aware BCE on top of
+    ``score``. RotatE/RotatENS flip ``_train_loss_is_from_logits=False``
+    so the default uses sigmoid+BCE instead of BCE-with-logits. ns's
+    ``ReasonerModel`` overrides for the reasoner atom-pool layout.
+  - ``eval_scores(q_buf, cand_buf, mode) -> [B, C]`` — unified eval hook
+    consumed by :mod:`kge_kernels.eval.unified`. Default: calls
+    ``score(h, r, None)`` / ``score(None, r, t)`` and gathers the ``C``
+    candidates per query. ns's ``ReasonerModel`` overrides for the
+    candidate-pool replay path.
+  - ``recommended_eval_batch_size(num_entities, budget_gb=2.0) -> int``
+    — memory hint used by the eval pipeline to pick a safe ``B``.
+    Default assumes matmul-style ``[B, |E|]`` peak; RotatE overrides to
+    factor in ``half_dim``.
+  - ``forward(h, r, t) -> Tensor`` — ``nn.Module`` convention; delegates
+    to ``score``.
 """
 from __future__ import annotations
 
@@ -40,50 +64,49 @@ Mode = Literal["tail", "head"]
 
 
 class KGEModel(nn.Module):
-    """Base class for KGE models with the four required scoring methods."""
+    """Base class for KGE models. See module docstring for the contract."""
 
     num_entities: int
     num_relations: int
     dim: int
 
     @abstractmethod
-    def score_triples(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        """Score a batch of fully ground triples → ``[N]``."""
-
-    @abstractmethod
-    def score_all_tails(self, h: Tensor, r: Tensor) -> Tensor:
-        """Score all entities as tail for each ``(h, r)`` pair → ``[N, E]``."""
-
-    @abstractmethod
-    def score_all_heads(self, r: Tensor, t: Tensor) -> Tensor:
-        """Score all entities as head for each ``(r, t)`` pair → ``[N, E]``."""
-
-    @abstractmethod
-    def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
-        """Fused per-atom embedding ``[N, E]`` consumed by KGEEmbedAtom."""
-
     def score(
         self,
         h: Optional[Tensor],
         r: Tensor,
-        t: Optional[Tensor] = None,
+        t: Optional[Tensor],
+        *,
+        d_chunk: Optional[int] = None,
     ) -> Tensor:
-        """Unified dispatch: specific triples, all tails, or all heads.
+        """Score (h, r, t) triples or rank against all heads/tails.
 
-        - ``h`` and ``t`` both non-None → ``score_triples`` → ``[N]``
-        - ``t is None`` and ``h`` non-None → ``score_all_tails`` → ``[N, E]``
-        - ``h is None`` and ``t`` non-None → ``score_all_heads`` → ``[N, E]``
+        Modes (decided by which of ``h`` / ``t`` are bound):
+
+        - ``h, r, t`` all bound: returns ``[B]`` per-triple scores.
+        - ``h, r`` bound, ``t=None``: returns ``[B, E]`` ranking all tails.
+        - ``h=None``, ``r, t`` bound: returns ``[B, E]`` ranking all heads.
+
+        ``d_chunk``:
+          - ``None`` (default): score all entities in **one pass** (full
+            broadcast / matmul). Use this whenever memory is not the
+            bottleneck.
+          - ``int``: enables memory-chunked exhaustive scoring along the
+            embedding dimension. Currently implemented by RotatE /
+            RotatENS — other models ignore the value and still do
+            one-pass.
         """
-        if h is not None and t is not None:
-            return self.score_triples(h, r, t)
-        if t is None:
-            if h is None:
-                raise ValueError("score() requires at least one of h or t to be non-None")
-            return self.score_all_tails(h, r)
-        return self.score_all_heads(r, t)
 
-    # -- Override this to pick a different loss (e.g. sigmoid+BCE for
-    # -- RotatE whose raw scores saturate BCE_with_logits on large KGs).
+    @abstractmethod
+    def compose(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
+        """Fused per-atom embedding ``[B, *]`` consumed by KGEEmbedAtom."""
+
+    @abstractmethod
+    def reset_parameters(self) -> None:
+        """Re-initialise weights."""
+
+    # Read by ``train_step``. Override on subclasses that need
+    # sigmoid+BCE instead of BCE-with-logits (RotatE family).
     _train_loss_is_from_logits: bool = True
 
     def train_step(
@@ -93,33 +116,23 @@ class KGEModel(nn.Module):
         mask: Tensor,          # [B, K]       which negatives are valid
         pos_valid: Tensor,     # [B]          which positives are real (not tail-pad)
     ) -> Tensor:               # scalar loss
-        """Unified training-step hook — the single compile boundary for
-        per-batch loss computation shared by ns and tkk trainers.
+        """Unified training-step hook — the compile boundary for per-batch
+        loss computation. Mask-aware BCE on top of ``score``.
 
         Every shape is a compile-time constant: ``[B, 3]``, ``[B, K, 3]``,
-        ``[B, K]``, ``[B]`` never vary. Mask-aware BCE reduction gates
-        invalid negatives (``mask=False``) and padded positives
-        (``pos_valid=False``, only non-trivial for the last partial
-        batch of an epoch). This makes the whole method
-        ``torch.compile(fullgraph=True, mode='reduce-overhead')``
-        compatible — one CUDA graph per model, reused across every
-        training step.
+        ``[B, K]``, ``[B]`` never vary, so this traces into one CUDA graph
+        per ``(model, B, K)`` combo and replays across every step.
 
-        The cost vs the old lean ``cat([pos, neg[mask]])`` path is
-        scoring ``K`` atoms per row instead of ``mask.sum(dim=1)`` per
-        row — typically 0-10% extra FLOPs when filter/unique evict a
-        few candidates. That's the price of fullgraph compile.
-
-        Subclasses can override for model-specific layouts (e.g.
-        reasoners building a ``[B*(1+K), 3]`` atom pool for the
-        grounder) — see ``ns.experiments.model.ReasonerModel``.
+        Subclasses with a different atom layout (e.g. ns's
+        ``ReasonerModel`` building a ``[B*(1+K), 3]`` pool for the
+        grounder) override to keep their own compiled graph.
         """
         B, K, _ = neg.shape
         # Flat, static-shape atom layout: [B + B*K, 3], cols (r, h, t).
         neg_flat = neg.reshape(B * K, 3)
         all_items = torch.cat([pos, neg_flat], dim=0)
-        # score_triples consumes (h, r, t); items are in (r, h, t).
-        scores = self.score_triples(all_items[:, 1], all_items[:, 0], all_items[:, 2])
+        # score consumes (h, r, t); items are in (r, h, t).
+        scores = self.score(all_items[:, 1], all_items[:, 0], all_items[:, 2])
         pos_scores = scores[:B]                          # [B]
         neg_scores = scores[B:]                          # [B*K]
 
@@ -146,15 +159,8 @@ class KGEModel(nn.Module):
 
         Default assumes matmul-style ``[B, |E|]`` output (ComplEx,
         DistMult, TransE, ModE, TuckER): peak intermediate is bounded
-        by ``B × |E| × 4 bytes``, so ``B ≤ budget_gb × 2^30 / (4|E|)``.
-        RotatE overrides because its ``score_all_heads`` broadcasts a
-        ``[B, |E|, half_dim]`` intermediate — memory scales with
-        ``half_dim`` too.
-
-        Callers in the unified eval path use this to pick the compile-
-        graph B so a long sweep doesn't OOM on the first matmul. Outer-
-        loop chunking inside :func:`kge_kernels.eval.unified.evaluate`
-        iterates over all triples in chunks of this size.
+        by ``B × |E| × 4 bytes``. RotatE overrides to factor in
+        ``half_dim`` (its broadcast is ``[B, |E|, half_dim]``).
         """
         bytes_per_B = 4 * int(num_entities)                 # [B, |E|] float32
         budget_b = budget_gb * (1 << 30)
@@ -166,60 +172,22 @@ class KGEModel(nn.Module):
         cand_buf: Tensor,  # [B, C]  int64, entity indices to score
         mode: Mode,
     ) -> Tensor:           # [B, C]  float
-        """Score candidates against a query batch — unified eval hook.
+        """Score candidates against a query batch — the compile boundary
+        for :func:`kge_kernels.eval.unified.evaluate`.
 
-        The compile boundary for :func:`kge_kernels.eval.unified.evaluate`.
-        Shapes are fixed across calls (``B``, ``C`` constant within a
-        single :func:`evaluate` call) so this traces into one CUDA graph.
-
-        Uses the matmul fast path when available: ``score_all_tails`` /
-        ``score_all_heads`` compute all-entity scores ``[B, |E|]`` in
-        one BLAS call, and we gather the ``C`` candidates. For large
-        candidate sets this is orders of magnitude faster than per-atom
-        ``score_triples`` (one matmul vs ``B*C`` embedding lookups +
-        per-dim math).
-
-        The matmul path expects the full candidate pool per call — so
-        :func:`evaluate` must pass ``chunk_size = K_fixed`` (one chunk
-        covers all candidates). Caller-side chunking is still supported
-        via the per-atom fallback below for models that don't expose
-        ``score_all_tails`` (e.g., reasoners that would need to re-run
-        grounding per entity).
-
-        ``mode`` is a Python string, not a tensor: ``torch.compile``
-        specialises one graph per value, keeping the compiled region
-        branch-free.
+        Calls ``score`` with the matmul fast path (``[B, |E|]`` in one
+        BLAS call) and gathers the ``C`` candidates per query. Subclasses
+        with a different scoring path (e.g. ns's ``ReasonerModel``
+        candidate-pool replay) override.
         """
-        B, C = cand_buf.shape
         r = q_buf[:, 0]
         if mode == "tail":
             h = q_buf[:, 1]
-            all_scores = self.score_all_tails(h, r)                # [B, |E|]
+            all_scores = self.score(h, r, None)                    # [B, |E|]
         else:
             t = q_buf[:, 2]
-            all_scores = self.score_all_heads(r, t)                # [B, |E|]
-        # Gather the C candidate scores per query. ``cand_buf`` is
-        # already clamped to valid entity indices by the provider; the
-        # validity mask outside this call zeroes out pad slots before
-        # ranking.
+            all_scores = self.score(None, r, t)                    # [B, |E|]
         return all_scores.gather(1, cand_buf)                      # [B, C]
-
-    def embed_entities(self, indices: Tensor) -> Tensor:
-        """Return the full entity representation for the given indices.
-
-        For models with a single entity embedding table (TransE, DistMult,
-        ModE, TuckER): returns ``entity_embeddings(indices)``.
-        For models with split real/imaginary tables (ComplEx, RotatE):
-        returns ``cat(ent_re(indices), ent_im(indices), dim=-1)``.
-
-        Override in subclasses with non-standard embedding layout.
-        """
-        if hasattr(self, "entity_embeddings"):
-            return self.entity_embeddings(indices)
-        if hasattr(self, "ent_re") and hasattr(self, "ent_im"):
-            import torch
-            return torch.cat([self.ent_re(indices), self.ent_im(indices)], dim=-1)
-        raise NotImplementedError("Subclass must implement embed_entities or have entity_embeddings / ent_re+ent_im")
 
     def forward(
         self,

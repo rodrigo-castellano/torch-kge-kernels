@@ -16,12 +16,9 @@ class _FakeModel(nn.Module):
         self.dim = 4
         self._param = nn.Parameter(torch.zeros(1))  # need at least one param
 
-    def score_triples(self, h, r, t):
-        return h.float() + r.float() * 2.0 + t.float()
-
-    def score(self, h, r, t=None):
+    def score(self, h, r, t, *, d_chunk=None):
         if h is not None and t is not None:
-            return self.score_triples(h, r, t)
+            return h.float() + r.float() * 2.0 + t.float()
         r_f = r.float()
         if r_f.dim() == 0:
             r_f = r_f.unsqueeze(0)
