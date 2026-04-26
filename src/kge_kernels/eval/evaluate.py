@@ -301,9 +301,12 @@ class CandidateProvider:
                 dim=1,
             )
         elif K > self.K_fixed:
-            # Shouldn't happen for correctly-sized sampler; clip defensively.
-            cand_entities = cand_entities[:, : self.K_fixed]
-            mask = mask[:, : self.K_fixed]
+            raise RuntimeError(
+                f"Sampler returned K={K} candidates but provider expected "
+                f"K_fixed={self.K_fixed}. The sampler's domain / pool size "
+                f"is misconfigured — fix the upstream sampler instead of "
+                f"clipping."
+            )
 
         # Per-relation domain restriction (e.g. countries: head of relation r
         # must be in head_domain[r]). Applied after sampling so we mask
