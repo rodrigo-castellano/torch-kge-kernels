@@ -11,10 +11,11 @@ Output leading shape:
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from .repr import Repr
@@ -161,10 +162,112 @@ class ConcatStateRepr(nn.Module):
         return Repr(embeddings=flat)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Hybrid Φ/Ψ aggregator (DCR)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class PhiPsiStateRepr(nn.Module):
+    """DCR's per-rule Φ/Ψ message aggregator (framework.pdf §6.2).
+
+    For each body atom ``b`` at depth ``d`` in proof ``p`` with rule
+    index ``r = rule_idx[B, P, d]``::
+
+        e' = Φ_r(e(b), o(b))             # embedding × score → embedding'
+        m  = Ψ_r(e(b), e')               # embedding × embedding' → score'
+
+    Then aggregate ``m`` over atoms in the body via t-norm (min or product).
+
+    Per-rule MLPs are stored as ``[R, ...]`` parameter tensors and
+    gathered by ``rule_idx``. Memory cost scales with ``num_rules``;
+    for typical KG datasets (R ≤ 10) this is fine.
+
+    Requires ``atom_repr`` to have BOTH ``embeddings`` and ``scores``
+    — DCR is the hybrid-regime row of framework.pdf §11. Pair with
+    :class:`KGEBothAtom` upstream.
+    """
+
+    def __init__(
+        self,
+        num_rules: int,
+        embed_dim: int,
+        *,
+        hidden_dim: Optional[int] = None,
+        tnorm: Literal["min", "product"] = "product",
+    ) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError("num_rules must be >= 1")
+        if tnorm not in ("min", "product"):
+            raise ValueError(f"Unknown t-norm: {tnorm}")
+        h = hidden_dim or embed_dim
+        self.num_rules = num_rules
+        self.embed_dim = embed_dim
+        self.tnorm = tnorm
+        # Φ_r: concat([E], [1]) → E. Stored as grouped linear params.
+        self.phi_l1 = nn.Parameter(torch.empty(num_rules, embed_dim + 1, h))
+        self.phi_b1 = nn.Parameter(torch.zeros(num_rules, h))
+        self.phi_l2 = nn.Parameter(torch.empty(num_rules, h, embed_dim))
+        self.phi_b2 = nn.Parameter(torch.zeros(num_rules, embed_dim))
+        # Ψ_r: concat([E], [E]) → 1.
+        self.psi_l1 = nn.Parameter(torch.empty(num_rules, 2 * embed_dim, h))
+        self.psi_b1 = nn.Parameter(torch.zeros(num_rules, h))
+        self.psi_l2 = nn.Parameter(torch.empty(num_rules, h, 1))
+        self.psi_b2 = nn.Parameter(torch.zeros(num_rules, 1))
+        for p in (self.phi_l1, self.phi_l2, self.psi_l1, self.psi_l2):
+            nn.init.kaiming_uniform_(p, a=5 ** 0.5)
+
+    def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
+        if not atom_repr.has_embeddings or not atom_repr.has_scores:
+            raise ValueError(
+                "PhiPsiStateRepr requires atom_repr with both embeddings and scores"
+            )
+        emb = atom_repr.embeddings           # [B, C, D, M, E] or [B, C, G, E]
+        sc = atom_repr.scores                # [B, C, D, M]    or [B, C, G]
+        rule_idx = evidence.rule_idx         # [B, C, D]       or [B, C]
+
+        # Broadcast rule_idx to atom leading shape (add the M/G dim).
+        rule_atom = rule_idx.unsqueeze(-1).expand(emb.shape[:-1])
+
+        # Φ_r(e, s) → e'
+        es = torch.cat([emb, sc.unsqueeze(-1)], dim=-1)              # [..., E+1]
+        phi_l1_g = self.phi_l1[rule_atom]                            # [..., E+1, h]
+        phi_b1_g = self.phi_b1[rule_atom]                            # [..., h]
+        h1 = F.relu(torch.einsum("...e,...eh->...h", es, phi_l1_g) + phi_b1_g)
+        phi_l2_g = self.phi_l2[rule_atom]                            # [..., h, E]
+        phi_b2_g = self.phi_b2[rule_atom]                            # [..., E]
+        e_prime = torch.einsum("...h,...he->...e", h1, phi_l2_g) + phi_b2_g
+
+        # Ψ_r(e, e') → m (scalar score per atom)
+        ee = torch.cat([emb, e_prime], dim=-1)                        # [..., 2E]
+        psi_l1_g = self.psi_l1[rule_atom]                            # [..., 2E, h]
+        psi_b1_g = self.psi_b1[rule_atom]
+        h2 = F.relu(torch.einsum("...e,...eh->...h", ee, psi_l1_g) + psi_b1_g)
+        psi_l2_g = self.psi_l2[rule_atom]                            # [..., h, 1]
+        psi_b2_g = self.psi_b2[rule_atom]                            # [..., 1]
+        msg = torch.einsum("...h,...hk->...k", h2, psi_l2_g) + psi_b2_g
+        msg = torch.sigmoid(msg.squeeze(-1))                         # [..., M] in [0,1]
+
+        # T-norm over atoms (last leading dim).
+        mask = _per_atom_validity_mask(tuple(msg.shape), evidence, msg.device)
+        if self.tnorm == "min":
+            big = torch.finfo(msg.dtype).max
+            masked = torch.where(mask, msg, torch.full_like(msg, big))
+            reduced = masked.min(dim=-1).values
+            any_valid = mask.any(dim=-1)
+            reduced = torch.where(any_valid, reduced, torch.zeros_like(reduced))
+        else:  # product
+            ones = torch.ones_like(msg)
+            masked = torch.where(mask, msg, ones)
+            reduced = masked.prod(dim=-1)
+        return Repr(scores=reduced)
+
+
 __all__ = [
     "ConcatStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",
+    "PhiPsiStateRepr",
     "SumStateRepr",
     "TNormStateRepr",
 ]

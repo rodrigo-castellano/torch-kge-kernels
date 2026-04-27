@@ -25,6 +25,7 @@ from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 from .repr import Repr
@@ -543,6 +544,106 @@ class MultiRepr:
             raise ValueError("MultiRepr requires at least one named Repr")
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Rule-MLP per-depth aggregator (R2N)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class RuleMLPTrajRepr(nn.Module):
+    """R2N's per-depth rule-specific MLP + min across depths (framework.pdf §6.3).
+
+    For each (proof, depth) with rule index ``r_d = rule_idx[B, P, d]``::
+
+        e_d = MLP_r(state_repr_embedding_at_depth_d)
+
+    Then aggregate per-proof depth-wise via element-wise min::
+
+        traj_emb = min_d(e_d)
+
+    Requires ``state_repr.embeddings`` with shape ``[B, C, D, E_in]``
+    (one embedding per (proof, depth)). Output shape ``[B, C, E_out]``.
+
+    Per-rule MLPs are stored as ``[R, ...]`` parameter tensors and
+    gathered by ``rule_idx``. Incremental ``init/step`` mode is not
+    implemented because R2N is canonically exhaustive (one batch
+    forward call); use :class:`CumulativeLogTrajRepr` or
+    :class:`PolicyProductTrajRepr` for sequential search instead.
+    """
+
+    def __init__(
+        self,
+        num_rules: int,
+        in_dim: int,
+        out_dim: int,
+        *,
+        hidden_dim: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError("num_rules must be >= 1")
+        h = hidden_dim or out_dim
+        self.num_rules = num_rules
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        # Per-rule two-layer MLP, stored as grouped parameters.
+        self.l1 = nn.Parameter(torch.empty(num_rules, in_dim, h))
+        self.b1 = nn.Parameter(torch.zeros(num_rules, h))
+        self.l2 = nn.Parameter(torch.empty(num_rules, h, out_dim))
+        self.b2 = nn.Parameter(torch.zeros(num_rules, out_dim))
+        nn.init.kaiming_uniform_(self.l1, a=5 ** 0.5)
+        nn.init.kaiming_uniform_(self.l2, a=5 ** 0.5)
+
+    def forward(self, state_repr: Repr, evidence: ProofEvidence) -> Repr:
+        if not state_repr.has_embeddings:
+            raise ValueError("RuleMLPTrajRepr requires state_repr.embeddings")
+        emb = state_repr.embeddings           # [B, C, D, E_in]
+        if emb.dim() != 4:
+            raise ValueError(
+                f"RuleMLPTrajRepr expected state_repr.embeddings shape [B, C, D, E_in]; "
+                f"got {tuple(emb.shape)}. Pair with ConcatStateRepr or similar."
+            )
+        rule_idx = evidence.rule_idx          # [B, C, D]
+        if rule_idx.dim() != 3:
+            raise ValueError(
+                f"RuleMLPTrajRepr expects evidence.rule_idx shape [B, C, D]; got {tuple(rule_idx.shape)}"
+            )
+
+        # Apply per-rule MLP via grouped parameter gather.
+        l1_g = self.l1[rule_idx]              # [B, C, D, in_dim, h]
+        b1_g = self.b1[rule_idx]              # [B, C, D, h]
+        h1 = F.relu(torch.einsum("...e,...eh->...h", emb, l1_g) + b1_g)
+        l2_g = self.l2[rule_idx]              # [B, C, D, h, out_dim]
+        b2_g = self.b2[rule_idx]              # [B, C, D, out_dim]
+        e_d = torch.einsum("...h,...hk->...k", h1, l2_g) + b2_g   # [B, C, D, out_dim]
+
+        # Min over depth dim, masking padded depths with +inf.
+        body_count = evidence.body_count                    # [B, C, D]
+        depth_valid = body_count > 0
+        big = torch.finfo(e_d.dtype).max
+        masked = torch.where(
+            depth_valid.unsqueeze(-1), e_d, torch.full_like(e_d, big),
+        )
+        reduced = masked.min(dim=-2).values                  # [B, C, out_dim]
+        # If all depths invalid, collapse-from-+inf → 0.
+        any_valid = depth_valid.any(dim=-1)
+        reduced = torch.where(
+            any_valid.unsqueeze(-1), reduced, torch.zeros_like(reduced),
+        )
+        return Repr(embeddings=reduced)
+
+    def init(self, B: int, device) -> Repr:
+        raise TypeError(
+            "RuleMLPTrajRepr is batch-only (R2N is exhaustive). Call "
+            "forward(state_repr, evidence) instead."
+        )
+
+    def step(self, accum: Repr, state_repr: Repr, info: Optional[SelectInfo]) -> Repr:
+        raise TypeError(
+            "RuleMLPTrajRepr is batch-only (R2N is exhaustive). Use "
+            "PolicyProductTrajRepr or CumulativeLogTrajRepr for sequential search."
+        )
+
+
 __all__ = [
     "BestCumulativeTrajRepr",
     "BestEverStateScoreTrajRepr",
@@ -554,6 +655,7 @@ __all__ = [
     "MultiRepr",
     "MultiTrajRepr",
     "PolicyProductTrajRepr",
+    "RuleMLPTrajRepr",
     "SBRBodyMinTrajRepr",
     "TNormTrajRepr",
 ]

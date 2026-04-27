@@ -49,6 +49,7 @@ from .state_repr import (
     ConcatStateRepr,
     MaxStateRepr,
     MeanStateRepr,
+    PhiPsiStateRepr,
     SumStateRepr,
     TNormStateRepr,
 )
@@ -63,6 +64,7 @@ from .traj_repr import (
     MultiRepr,
     MultiTrajRepr,
     PolicyProductTrajRepr,
+    RuleMLPTrajRepr,
     SBRBodyMinTrajRepr,
     TNormTrajRepr,
 )
@@ -92,6 +94,7 @@ __all__ = [
     "ConcatStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",
+    "PhiPsiStateRepr",
     "SumStateRepr",
     "TNormStateRepr",
     # Traj reprs
@@ -105,6 +108,7 @@ __all__ = [
     "MultiRepr",
     "MultiTrajRepr",
     "PolicyProductTrajRepr",
+    "RuleMLPTrajRepr",
     "SBRBodyMinTrajRepr",
     "TNormTrajRepr",
     # Query reprs
