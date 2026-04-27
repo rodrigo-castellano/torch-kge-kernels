@@ -2,9 +2,9 @@
 
 Two levels of abstraction:
 
-  - ``train_kge``   — lean inner loop; caller handles validation, early
+  - ``train_kge`` — lean inner loop; caller handles validation, early
     stopping, checkpointing via ``on_epoch_end``.
-  - ``train_model`` — full pipeline: data loading, model construction,
+  - ``pipeline``  — full pipeline: data loading, model construction,
     training, validation, early stopping, final evaluation, checkpoint
     saving.
 
@@ -41,7 +41,7 @@ from .loop import (
 )
 from .loss import train_step
 from .metrics import StreamingRankingMetrics
-from .pipeline import train_model
+from .experiment import pipeline
 
 __all__ = [
     # Config
@@ -63,7 +63,7 @@ __all__ = [
     # Streaming metrics for training-time observability
     "StreamingRankingMetrics",
     # Full pipeline
-    "train_model",
+    "pipeline",
     # Checkpoints
     "build_config_payload",
     "config_from_payload",

@@ -34,14 +34,14 @@ class TrainConfig:
     """
 
     # -- Data paths --
-    # Disk persistence is opt-in: by default ``train_model`` writes nothing.
+    # Disk persistence is opt-in: by default ``pipeline`` writes nothing.
     # Real runs go through :func:`kge_kernels.runs.run_cli` (or its
     # per-run primitive :func:`kge_kernels.runs.run_one`), which
     # supplies the contract path (``output/runs/<experiment>/<run>/``) via
     # :class:`RunContext`. Setting ``save_dir`` directly is for ad-hoc CLI
     # use only and bypasses the shared logging contract — prefer
     # ``run_cli``. The legacy default ``"checkpoints"`` was removed
-    # because it polluted the repo root on every standalone train_model
+    # because it polluted the repo root on every standalone pipeline
     # call (notably from scripts/run_3way_sweep.py).
     save_dir: str | None = None
     run_signature: str | None = None
@@ -149,7 +149,7 @@ KGETrainConfig = TrainConfig
 
 @dataclass
 class TrainArtifacts:
-    """Output of a completed ``train_model`` run.
+    """Output of a completed ``pipeline`` run.
 
     ``config_path`` and ``weights_path`` are only set when ``save_dir`` was
     provided; with the default ``save_dir=None`` they're empty strings and

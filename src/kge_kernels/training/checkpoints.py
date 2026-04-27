@@ -1,8 +1,8 @@
 """KGE checkpoint helpers.
 
 Generic save/load utilities plus higher-level checkpoint management
-for the full ``train_model`` pipeline (best, latest, final checkpoints
-with config payloads).
+for the full ``pipeline`` (kge_kernels.training.experiment) lifecycle
+(best, latest, final checkpoints with config payloads).
 """
 from __future__ import annotations
 

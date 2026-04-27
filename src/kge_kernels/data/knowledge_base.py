@@ -26,7 +26,7 @@ specialized representation on top in their own ``__init__``:
   ``EntityType`` / ``Predicate`` (FOL types) over the loaded triples.
 - DpRL's ``DataHandler`` converts each ``TripleExample`` to a ``Term``
   and adds rule / query / depth-annotation loading.
-- tkk's ``train_model`` consumes the indexed splits + filter maps + domain
+- tkk's ``pipeline`` consumes the indexed splits + filter maps + domain
   structures directly.
 """
 from __future__ import annotations

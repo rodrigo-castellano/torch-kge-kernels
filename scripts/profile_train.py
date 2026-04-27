@@ -10,7 +10,7 @@ import time
 
 from kge_kernels.training.config import TrainConfig
 from kge_kernels.eval.checkpoint import evaluate_checkpoint
-from kge_kernels.training.pipeline import train_model
+from kge_kernels.training.experiment import pipeline
 
 
 def _emit_profile(
@@ -83,7 +83,7 @@ def _run_train(args: argparse.Namespace) -> None:
     profiler = cProfile.Profile()
     start = time.perf_counter()
     profiler.enable()
-    artifacts = train_model(cfg)
+    artifacts = pipeline(cfg)
     profiler.disable()
     elapsed = time.perf_counter() - start
     print(f"Train profiling finished in {elapsed:.2f}s")

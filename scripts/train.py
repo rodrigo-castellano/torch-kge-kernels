@@ -275,7 +275,7 @@ def run(argv: Optional[List[str]] = None) -> List[Dict[str, Any]]:
                 json.dump([result], handle, indent=2)
         return [result]
 
-    from kge_kernels.training.pipeline import train_model
+    from kge_kernels.training.experiment import pipeline
 
     results: List[Dict[str, Any]] = []
     for model_name in parse_models(args):
@@ -289,7 +289,7 @@ def run(argv: Optional[List[str]] = None) -> List[Dict[str, Any]]:
             print()
 
         start = time.time()
-        artifacts = train_model(train_cfg)
+        artifacts = pipeline(train_cfg)
         duration = time.time() - start
 
         result = {
