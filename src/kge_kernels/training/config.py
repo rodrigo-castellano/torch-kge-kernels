@@ -12,6 +12,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from kge_kernels.runs import LoggingConfig, ModelConfig, OutputConfig
+
 
 def _default_data_root() -> str:
     """Shared data repo, overridable via ``DATA_ROOT`` env var."""
@@ -115,6 +117,29 @@ class TrainConfig:
     report_train_mrr: bool = True
     eval_num_corruptions: int = 100
     corruption_scheme: str = "both"  # "head", "tail", or "both"
+
+    # tkk run-bundle policy (output_root / model save mode / etc.).
+    # Default-built; populated by :meth:`logging_config`.
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    # ─────────────────────────────────────────────────────────────────
+    # tkk run-bundle metadata hooks (duck-typed by run_cli)
+    # ─────────────────────────────────────────────────────────────────
+    def family(self) -> str:
+        """Run family — the parent directory under ``output/runs/``."""
+        if self.logging.family:
+            return self.logging.family
+        return self.dataset or "kge"
+
+    def signature(self) -> str:
+        """Stable signature for this run (used as the run-dir name)."""
+        if self.run_signature:
+            return self.run_signature
+        return f"{self.dataset or 'kge'}_{self.model}_seed{self.seed}"
+
+    def logging_config(self) -> LoggingConfig:
+        """Run-bundle policy: where to write + which model save mode."""
+        return self.logging
 
 
 # Backward-compat alias so existing ``from kge_kernels.training import
