@@ -382,7 +382,7 @@ These are exercised end-to-end in `tests/search/test_method_tuples.py`.
 | Repo | Builds the searcher via | Plugs into eval via |
 |---|---|---|
 | **torch-ns** | direct grounder + framework primitives (SBR/DCR/R2N) | `experiments/model.py:KGEModel.eval_scores` (a `ScoreFn` directly) |
-| **DpRL-KGR (PPO)** | `PPOEvaluator.searcher` → `PPOProofScorer(ppo, scoring_method=...)` (a `ProofScorer` subclass with an alternated-buffer compiled rollout) — or `DirectSearcher` for `reasoning_mode="direct_kge"` | `make_scorer_from_searcher(s, mode_key)` |
+| **DpRL-KGR (PPO)** | `PPOEvaluator.searcher` → `PPOProofScorer` (rollout, default) or `KGEFusionScorer` (rollout + external-KGE bridge, when `kge_inference=True`) or `DirectSearcher` (`reasoning_mode="direct_kge"`) | `make_scorer_from_searcher(s, mode_key)` |
 | **DpRL-KGR (Lookahead)** | `LookaheadEvaluator.searcher` → `LookaheadProofScorer(ppo, scoring_method=...)` (subclasses `PPOProofScorer`; KGE-guided rollout) | same |
 
 Common pattern:
