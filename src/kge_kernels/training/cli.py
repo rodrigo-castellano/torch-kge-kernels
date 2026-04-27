@@ -1,21 +1,50 @@
 """CLI entrypoint for standalone KGE pretraining via the shared run_cli driver.
 
-Single thin shim. The actual work happens in
-:func:`kge_kernels.training.experiment.run_experiment` (called per
-(combo × seed) by ``run_cli``); CLI parsing + ``--set`` / ``--grid``
-overrides + grid expansion + per-seed loop come from
-:func:`kge_kernels.runs.run_cli`.
+Owns the run-bundle lifecycle: parses the standard ``--set`` /
+``--grid`` CLI surface (via :func:`kge_kernels.runs.run_cli`), then
+for each (combo × seed) bridges the :class:`RunContext` (paths /
+metrics persistence / model save policy) with the pure trainer in
+:mod:`kge_kernels.training.experiment`.
 
 Run via ``python -m kge_kernels.training.cli --set dataset=family ...``.
-
-Run-bundle metadata (family / signature / logging_config) is provided
-by methods on :class:`TrainConfig` (duck-typed by ``run_cli``).
 """
 from __future__ import annotations
 
+from typing import Mapping
+
 from .config import TrainConfig
-from .experiment import run_experiment
-from ..runs import run_cli
+from .experiment import pipeline
+from ..runs import RunContext, run_cli
+
+
+def run_experiment(ctx: RunContext, cfg: TrainConfig) -> Mapping[str, dict]:
+    """Run-experiment hook for ``run_cli``.
+
+    Wires the run bundle's :class:`RunContext` onto ``cfg`` (saves go
+    through ``ctx.paths.root``), invokes :func:`pipeline`, then
+    forwards the flat metrics dict (``train_mrr`` / ``valid_mrr`` /
+    ``test_mrr`` / etc.) into ``ctx.log_metrics`` split by prefix.
+    """
+    cfg.save_dir = str(ctx.paths.root)
+
+    artifacts = pipeline(cfg)
+    metrics = artifacts.metrics or {}
+
+    # Split flat keys by prefix (train_mrr → split="train", etc.).
+    by_split: dict[str, dict] = {"train": {}, "val": {}, "test": {}}
+    for key, value in metrics.items():
+        for prefix, split in (("train_", "train"), ("valid_", "val"), ("test_", "test")):
+            if key.startswith(prefix):
+                by_split[split][key[len(prefix):]] = value
+                break
+        else:
+            by_split.setdefault("other", {})[key] = value
+
+    for split, md in by_split.items():
+        if md:
+            ctx.log_metrics(md, split=split)
+
+    return by_split
 
 
 def main() -> None:
