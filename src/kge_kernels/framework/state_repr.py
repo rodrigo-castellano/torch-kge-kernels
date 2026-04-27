@@ -25,9 +25,18 @@ from .types import ProofEvidence
 def _per_atom_validity_mask(atom_lead_shape: tuple, evidence: ProofEvidence, device) -> Tensor:
     """Build a per-atom boolean validity mask matching the atom leading shape.
 
-    Structured: ``[B, C, D, M]`` from ``body_count[B, C, D]``.
-    Legacy:     ``[B, C, G_body]`` from ``body_count[B, C]``.
+    First tries ``evidence.body_atom_mask_flat`` (per-atom mask that
+    supports interspersed-padding layouts). Falls back to ``body_count``-
+    derived prefix masks when ``body_atom_mask_flat`` is unavailable or
+    its shape doesn't match.
+
+    Structured fallback: ``[B, C, D, M]`` from ``body_count[B, C, D]``.
+    Legacy fallback:     ``[B, C, G_body]`` from ``body_count[B, C]``.
     """
+    custom = getattr(evidence, "body_atom_mask_flat", None)
+    if isinstance(custom, Tensor) and tuple(custom.shape) == tuple(atom_lead_shape):
+        return custom
+
     body_count = evidence.body_count
     if body_count.dim() == 3:
         # structured: [B, C, D] body_count, atoms-per-depth = M
@@ -94,29 +103,50 @@ class TNormStateRepr(nn.Module):
 
 
 class SumStateRepr(nn.Module):
-    """Sum atom embeddings per body (masking padded atoms to zero)."""
+    """Sum atom values per body (masking padded atoms to zero).
+
+    Polymorphic on ``atom_repr``: sums embeddings if present, otherwise
+    sums scores. Output ``Repr`` carries the same field as the input.
+    """
 
     def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
-        if not atom_repr.has_embeddings:
-            raise ValueError("SumStateRepr requires atom_repr.embeddings")
-        emb = atom_repr.embeddings
-        mask = _per_atom_validity_mask(tuple(emb.shape[:-1]), evidence, emb.device)
-        masked = emb * mask.unsqueeze(-1).to(emb.dtype)
-        return Repr(embeddings=masked.sum(dim=-2))
+        if atom_repr.has_embeddings:
+            emb = atom_repr.embeddings
+            mask = _per_atom_validity_mask(tuple(emb.shape[:-1]), evidence, emb.device)
+            masked = emb * mask.unsqueeze(-1).to(emb.dtype)
+            return Repr(embeddings=masked.sum(dim=-2))
+        if atom_repr.has_scores:
+            sc = atom_repr.scores
+            mask = _per_atom_validity_mask(tuple(sc.shape), evidence, sc.device)
+            masked = sc * mask.to(sc.dtype)
+            return Repr(scores=masked.sum(dim=-1))
+        raise ValueError("SumStateRepr requires atom_repr.embeddings or atom_repr.scores")
 
 
 class MeanStateRepr(nn.Module):
-    """Mean of atom embeddings per body, ignoring padded atoms."""
+    """Mean of atom values per body, ignoring padded atoms.
+
+    Polymorphic on ``atom_repr``: averages embeddings if present,
+    otherwise averages scores. Output ``Repr`` carries the same field
+    as the input.
+    """
 
     def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
-        if not atom_repr.has_embeddings:
-            raise ValueError("MeanStateRepr requires atom_repr.embeddings")
-        emb = atom_repr.embeddings
-        mask = _per_atom_validity_mask(tuple(emb.shape[:-1]), evidence, emb.device)
-        m = mask.unsqueeze(-1).to(emb.dtype)
-        masked_sum = (emb * m).sum(dim=-2)
-        denom = m.sum(dim=-2).clamp(min=1.0)
-        return Repr(embeddings=masked_sum / denom)
+        if atom_repr.has_embeddings:
+            emb = atom_repr.embeddings
+            mask = _per_atom_validity_mask(tuple(emb.shape[:-1]), evidence, emb.device)
+            m = mask.unsqueeze(-1).to(emb.dtype)
+            masked_sum = (emb * m).sum(dim=-2)
+            denom = m.sum(dim=-2).clamp(min=1.0)
+            return Repr(embeddings=masked_sum / denom)
+        if atom_repr.has_scores:
+            sc = atom_repr.scores
+            mask = _per_atom_validity_mask(tuple(sc.shape), evidence, sc.device)
+            m = mask.to(sc.dtype)
+            masked_sum = (sc * m).sum(dim=-1)
+            denom = m.sum(dim=-1).clamp(min=1.0)
+            return Repr(scores=masked_sum / denom)
+        raise ValueError("MeanStateRepr requires atom_repr.embeddings or atom_repr.scores")
 
 
 class MaxStateRepr(nn.Module):

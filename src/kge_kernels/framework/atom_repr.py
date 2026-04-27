@@ -136,18 +136,21 @@ class RemappedKGEScoreAtom(nn.Module):
     two ``[*]`` remap tensors map caller indices to engine indices,
     with ``-1`` marking out-of-vocabulary entries.
 
-    Returns ``Repr(scores=...)`` with sigmoid → log already applied
-    (matches the existing DpRL convention so downstream code consumes
-    log-scores). Out-of-vocabulary atoms get ``log(0.5)``.
+    Returns ``Repr(scores=...)``. With the default ``log=True``,
+    sigmoid → log is applied so downstream code consumes log-scores
+    (matches DpRL's PolicyRolloutSearcher / DirectSearcher convention).
+    With ``log=False``, returns linear sigmoid scores in ``[0, 1]``.
+    Out-of-vocabulary atoms get ``log(0.5)`` (or ``0.5`` if ``log=False``).
     """
 
     def __init__(self, const_remap: Tensor, pred_remap: Tensor,
-                  log_eps: float = 1e-8) -> None:
+                  log_eps: float = 1e-8, log: bool = True) -> None:
         super().__init__()
         # Hold remaps as buffers (move with .to(device), saved with state_dict).
         self.register_buffer("const_remap", const_remap)
         self.register_buffer("pred_remap", pred_remap)
         self.log_eps = log_eps
+        self.log = log
 
     def forward(self, preds: Tensor, subjs: Tensor, objs: Tensor, model) -> Repr:
         r = self.pred_remap[preds.clamp(min=0)]
@@ -159,7 +162,9 @@ class RemappedKGEScoreAtom(nn.Module):
         safe_t = t.clamp(min=0)
         raw = torch.sigmoid(_score_triples(model, safe_h, safe_r, safe_t))
         scores = torch.where(valid, raw, torch.full_like(raw, 0.5))
-        return Repr(scores=torch.log(scores.clamp(min=self.log_eps)))
+        if self.log:
+            return Repr(scores=torch.log(scores.clamp(min=self.log_eps)))
+        return Repr(scores=scores)
 
 
 __all__ = [
