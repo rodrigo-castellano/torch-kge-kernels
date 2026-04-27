@@ -33,8 +33,6 @@ from .query_repr import (
     MaxQueryRepr,
     MeanQueryRepr,
     MLPSumQueryRepr,
-    PolicyRolloutQueryRepr,
-    ProofScoreQueryRepr,
     SumQueryRepr,
     TrajectoryScoreQueryRepr,
 )
@@ -119,8 +117,6 @@ __all__ = [
     "MLPSumQueryRepr",
     "MaxQueryRepr",
     "MeanQueryRepr",
-    "PolicyRolloutQueryRepr",
-    "ProofScoreQueryRepr",
     "SumQueryRepr",
     "TrajectoryScoreQueryRepr",
     "ALL_TRAJECTORY_SCORE_MODES",
