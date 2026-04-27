@@ -258,6 +258,13 @@ def run_cli(
         value = coerce_config_value(key, parse_scalar(raw), defaults)
         _assign(base, key, value)
 
+    # Optional repo hook to consume parser extras (--eval / --profile flags,
+    # ``num_seeds`` → seed-list expansion, etc.). Runs ONCE on the base
+    # config before grid expansion so it can mutate base-level fields.
+    extras_hook = getattr(spec, "consume_extras", None)
+    if extras_hook is not None:
+        extras_hook(args, base)
+
     # Build grid: list-valued base entries (auto-lifted) + explicit --grid entries.
     grid: dict[str, list[Any]] = {}
     exclude = set(grid_exclude)
@@ -279,16 +286,14 @@ def run_cli(
     # Iterate seeds: pull seed list out of base; default to [base['seed']].
     seed_value = base.get("seed", 0)
     seeds = list(seed_value) if isinstance(seed_value, list) else [seed_value]
-
-    # Optional repo hook to consume parser extras (e.g. --eval / --profile flags).
-    extras_hook = getattr(spec, "consume_extras", None)
+    has_seed_run_i = "seed_run_i" in defaults
 
     for raw_config in run_configs:
         for seed in seeds:
             cfg = copy.deepcopy(raw_config)
             cfg["seed"] = seed
-            if extras_hook is not None:
-                extras_hook(args, cfg)
+            if has_seed_run_i:
+                cfg["seed_run_i"] = seed
             run_experiment(cfg, spec)
 
 
