@@ -1,52 +1,57 @@
+"""Tests for the unified runs/ machinery (paths + lifecycle + CLI driver)."""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-from kge_kernels.logging import LoggingConfig, RegistryConfig, ReportConfig, run_experiment
+from kge_kernels.runs import LoggingConfig, RegistryConfig, ReportConfig, RunContext, run_one
 
 
 @dataclass
 class DummyConfig:
     seed: int = 7
-    signature: str = "dummy"
+    sig: str = "dummy"
     manual_promote: bool = False
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
-
-class DummySpec:
-    def resolve_config(self, raw_config: Any) -> DummyConfig:
-        return raw_config
-
-    def logging_config(self, config: DummyConfig) -> LoggingConfig:
-        return config.logging
-
-    def family(self, config: DummyConfig) -> str:
+    # Duck-typed methods picked up by run_one's metadata resolver.
+    def family(self) -> str:
         return "train"
 
-    def signature(self, config: DummyConfig) -> str:
-        return config.signature
+    def signature(self) -> str:
+        return self.sig
 
-    def run(self, ctx, config: DummyConfig):
-        ctx.log_event("inside_run")
-        ctx.log_metrics({"valid/mrr": 0.75}, step=3, split="val")
-        ctx.save_model(lambda path: path.write_bytes(b"weights"), saved_as="best", metric_name="valid/mrr", metric_value=0.75)
-        if config.logging.report.enabled:
-            ctx.write_report("# Report\n\nDone.", metadata={"writer": config.logging.report.writer})
-        if config.manual_promote:
-            promoted = ctx.promote_model()
-            if promoted is not None:
-                ctx.log_event("model_promoted", registry_path=str(promoted))
-        return {"valid/mrr": 0.75}
+    def logging_config(self) -> LoggingConfig:
+        return self.logging
+
+
+def _dummy_run_experiment(ctx: RunContext, cfg: DummyConfig):
+    """Stand-in for a real ``run_experiment`` — exercises every RunContext API."""
+    ctx.log_event("inside_run")
+    ctx.log_metrics({"valid/mrr": 0.75}, step=3, split="val")
+    ctx.save_model(
+        lambda path: path.write_bytes(b"weights"),
+        saved_as="best",
+        metric_name="valid/mrr",
+        metric_value=0.75,
+    )
+    if cfg.logging.report.enabled:
+        ctx.write_report("# Report\n\nDone.", metadata={"writer": cfg.logging.report.writer})
+    if cfg.manual_promote:
+        promoted = ctx.promote_model()
+        if promoted is not None:
+            ctx.log_event("model_promoted", registry_path=str(promoted))
+    return {"valid/mrr": 0.75}
 
 
 def test_run_layout_and_registry(tmp_path: Path):
     cfg = DummyConfig()
     cfg.logging.output.output_root = str(tmp_path)
 
-    summary = run_experiment(cfg, DummySpec())
+    summary = run_one(
+        cfg, config_cls=DummyConfig, run_experiment=_dummy_run_experiment,
+    )
     assert summary["valid/mrr"] == 0.75
 
     runs_root = tmp_path / "runs" / "train"
@@ -79,7 +84,7 @@ def test_optional_report_and_manual_promotion(tmp_path: Path):
     cfg.logging.registry = RegistryConfig(enabled=True, promote_on_success=False, model_name="dummy-model")
     cfg.logging.report = ReportConfig(enabled=True, writer="agent")
 
-    run_experiment(cfg, DummySpec())
+    run_one(cfg, config_cls=DummyConfig, run_experiment=_dummy_run_experiment)
 
     run_dirs = list((tmp_path / "runs" / "train").rglob("manifest.json"))
     assert len(run_dirs) == 1

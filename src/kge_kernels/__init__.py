@@ -97,18 +97,15 @@ from .framework import (
     TrajRepr,
 )
 
-# Experiment logging
-from .logging import (
-    ExperimentSpec,
+# Experiment run-bundle machinery
+from .runs import (
     LoggingConfig,
     ModelConfig,
     OutputConfig,
     RegistryConfig,
     ReportConfig,
     RunContext,
-)
-from .logging import (
-    run_experiment as run_logged_experiment,
+    run_cli,
 )
 
 # Loss functions
@@ -168,15 +165,14 @@ __all__ = [
     "PartialScorer",
     "Sampler",
     "SamplerConfig",
-    # Logging
-    "ExperimentSpec",
+    # Run-bundle machinery
     "LoggingConfig",
     "ModelConfig",
     "OutputConfig",
     "RegistryConfig",
     "ReportConfig",
     "RunContext",
-    "run_logged_experiment",
+    "run_cli",
     # Losses
     "BinaryCrossEntropyRagged",
     "BinaryCrossEntropyWithMask",
