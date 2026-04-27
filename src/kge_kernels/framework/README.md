@@ -189,9 +189,124 @@ Two paths produce a `ScoreFn`:
 
 The evaluator can't tell the two paths apart.
 
+### What `mode_key` refers to
+
+The `mode_key` argument of `make_scorer_from_searcher` is **NOT** the
+head/tail corruption side — that's `Mode = Literal["head", "tail"]` and
+varies per evaluator call. `mode_key` is the **scoring-formula name** that
+the Searcher's returned dict is keyed by, and it's frozen at adapter
+construction. Concretely:
+
+```
+Searcher.__call__(queries)
+     ↓
+{ "logprob":         scores [N],     ← scoring-formula names
+  "proof_binary":    scores [N],
+  "depth_weighted":  scores [N],
+  ...                                   }
+     ↓ make_scorer_from_searcher(searcher, mode_key="logprob")
+ScoreFn(q_buf, pool_buf, mode="head" | "tail")  ← Mode picks corruption side
+     ↓
+[B, P] scores
+```
+
+Two orthogonal axes: `mode_key` (which formula) is config-time; `Mode`
+(which corruption) is per-call.
+
 ---
 
-## 4. Static-buffer layout
+## 4. Trajectory scoring (the formulas behind `mode_key`)
+
+The Searcher Protocol allows each method to emit any number of named
+scores per query. Concretely those scores are produced by a
+**`QueryRepr`** — the framework's per-trajectory → scalar reducer.
+
+For methods whose scoring depends on the trajectory's running statistics
+(success bit, total log-prob, depth, value-head outputs, etc.), tkk
+provides a single unified dispatcher:
+
+```python
+class TrajectoryScoreQueryRepr(nn.Module):
+    """~36 trajectory-scoring formulas in one Protocol-conforming class."""
+
+    def __init__(self, mode: str, *, alpha=5.0, beta=2.0,
+                 fail_penalty=1000.0, partial_weight=0.5,
+                 endf_penalty=200.0): ...
+
+    def forward(self, traj_repr: Repr, evidence) -> Repr:
+        # reads traj_repr.summaries[...]
+        # returns Repr.scores [B]
+```
+
+This replaces the older split between proof-search modes
+(`ProofScoreQueryRepr`) and rollout modes (`PolicyRolloutQueryRepr`) —
+both were "scalar score from trajectory summaries"; the split was
+implementation drift from each upstream search choosing which summaries
+to track.
+
+### How summaries flow
+
+`Repr.summaries: Optional[Dict[str, Tensor]]` carries trajectory-level
+named tensors. The upstream Searcher populates the subset it actually
+tracks; the QueryRepr reads what its mode needs.
+
+Standard summary keys (canonical names; missing → loud `KeyError`):
+
+```
+success                [B] bool    trajectory succeeded?
+depths                 [B] long    final depth reached
+cumulative_log         [B]         Σ log p(action_d) along trajectory
+min_step_log           [B]         min_d log p(action_d)
+final_step_log         [B]         log p(action_{D-1})
+final_state_score      [B]         KGE state-score at terminal step
+best_cumulative        [B]         max_d Σ_{d'≤d} log p(action_{d'})
+best_prefix_avg        [B]         max_d (Σ_{d'≤d} log p) / d
+best_ever_state_score  [B]         max state-score across all steps
+sbr_body_min           [B]         min over body-atom SBR scores
+endf                   [B] bool    rollout ended via END action?
+p_end                  [B]         step-0 P(end action)
+v_pos, v_neg           [B]         step-0 value heads
+kge_embed              [B]         KGE-policy embedding similarity
+cum_value              [B]         accumulated value-head signal
+value_steps            [B] long    #steps the value signal accumulated
+```
+
+PPO's compiled rollout populates ~6 of these (success, depths,
+cumulative_log, p_end, v_pos, v_neg, kge_embed); proof-search populates
+~10 (success, depths, cumulative_log, min_step_log, best_cumulative,
+sbr_body_min, final_step_log, final_state_score, best_ever_state_score,
+best_prefix_avg). Each mode reads only the keys it needs.
+
+### Mode catalogue
+
+`ALL_TRAJECTORY_SCORE_MODES` enumerates the ~36 supported keys. Headline
+groups:
+
+- **Trajectory aggregations** (no proved/failed branch): `no_cliff`,
+  `no_cliff_sqrt`, `no_cliff_log`, `best_avg`, `max_intermediate_nc`,
+  `trajectory_range`, `raw_cumulative`, `geometric_mean`.
+- **Binary success/fail formulas**: `proof_logprob`, `leaf_only`,
+  `final_state`, `min_step`, `best_partial`, `sbr`, `max_intermediate`,
+  `depth_weighted_quotient` (was `ProofScore.depth_weighted` =
+  `cum_log / d`).
+- **RL log-prob formulas**: `logprob`, `logprob_endf`, `proof_binary`,
+  `proof_bonus`, `logprob_clipped`, `proof_rank`, `success_only`,
+  `logprob_scaled_penalty`, `depth_weighted_bonus` (was
+  `PolicyRollout.depth_weighted` = `lp + β·d`).
+- **Step-0 policy signals**: `value_pos`, `end_prob`, `hybrid_end`,
+  `hybrid_value`, `combined`, `value_diff`, `endf_kge_embed`.
+- **KGE-embed hybrids**: `kge_embed`, `kge_embed_hybrid`,
+  `logprob_kge_embed`.
+- **RL value modes**: `rl_value`, `rl_value_mean`, `rl_value_neg`,
+  `rl_value_mean_neg`.
+
+The only legacy collision (`depth_weighted` had different math on each
+side) is resolved by explicit suffix: `_quotient` for the proof-search
+variant, `_bonus` for the rollout variant.
+
+---
+
+## 5. Static-buffer layout
 
 Allocated once in `__init__`; addresses captured by the CUDA graph.
 Throughout this section `P = K_fixed + 1` (the `+1` is the slot-0 true
@@ -213,7 +328,7 @@ _valid_scratch  [B, P]   bool
 
 ---
 
-## 5. Filtering happens at two points
+## 6. Filtering happens at two points
 
 | Stage | What's filtered | Where |
 |---|---|---|
@@ -227,7 +342,7 @@ as a tensor reshape — that's what keeps the compile boundary clean.
 
 ---
 
-## 6. Per-repo extension points
+## 7. Per-repo extension points
 
 | What you customize | What you reuse |
 |---|---|
@@ -249,7 +364,7 @@ n_corruptions) but the chunked loop is inherited unmodified.
 
 ---
 
-## 7. The three views
+## 8. The three views
 
 ### View 1 — Layered architecture & ownership
 
@@ -393,7 +508,7 @@ both end up satisfying the evaluator's interface.
 
 ---
 
-## 8. Why the contract is shaped this way
+## 9. Why the contract is shaped this way
 
 - **One scoring call per (chunk, mode)** maximizes batch-level GPU work, gives
   CUDA graph capture a clean target, and lets mode-specialized graphs avoid
