@@ -264,7 +264,7 @@ class ProofScoreQueryRepr(nn.Module):
 
 _RL_MODES = frozenset({
     "logprob", "logprob_endf", "proof_binary", "proof_bonus",
-    "depth_weighted_rl", "logprob_clipped", "proof_rank", "success_only",
+    "depth_weighted", "logprob_clipped", "proof_rank", "success_only",
     "logprob_scaled_penalty",
 })
 
@@ -285,7 +285,7 @@ class PolicyRolloutQueryRepr(nn.Module):
     branches. Takes per-entry rollout signals and returns per-entry
     scores.
 
-    Note ``depth_weighted_rl`` is renamed from DpRL's ``depth_weighted``
+    Note ``depth_weighted`` is renamed from DpRL's ``depth_weighted``
     to disambiguate from :class:`ProofScoreQueryRepr`'s ``depth_weighted``
     (which has different math: cumulative_log/depth vs lp + beta*depth).
     """
@@ -343,9 +343,9 @@ class PolicyRolloutQueryRepr(nn.Module):
             return torch.where(s, torch.full_like(lp, a), torch.full_like(lp, -a))
         if mode == "proof_bonus":
             return torch.where(s, lp + a, lp - f)
-        if mode == "depth_weighted_rl":
+        if mode == "depth_weighted":
             if depths is None:
-                raise ValueError("depth_weighted_rl requires depths=...")
+                raise ValueError("depth_weighted requires depths=...")
             d_clamped = depths.float().clamp(min=1.0)
             return torch.where(s, lp + b * d_clamped, lp - f)
         if mode == "logprob_clipped":

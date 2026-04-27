@@ -11,7 +11,13 @@ here. ``grounder`` provides the ``ResolutionOp`` (its ``ProofState`` and
 from __future__ import annotations
 
 from .atom_classification import classify_atoms
-from .atom_repr import KGEBothAtom, KGEEmbedAtom, KGEScoreAtom, MLPAtom
+from .atom_repr import (
+    KGEBothAtom,
+    KGEEmbedAtom,
+    KGEScoreAtom,
+    MLPAtom,
+    RemappedKGEScoreAtom,
+)
 from .protocols import (
     AtomRepr,
     QueryRepr,
@@ -81,6 +87,7 @@ __all__ = [
     "KGEEmbedAtom",
     "KGEScoreAtom",
     "MLPAtom",
+    "RemappedKGEScoreAtom",
     # State reprs
     "ConcatStateRepr",
     "MaxStateRepr",

@@ -127,4 +127,45 @@ class MLPAtom(nn.Module):
         return Repr(embeddings=x.reshape(*leading, x.shape[-1]))
 
 
-__all__ = ["KGEBothAtom", "KGEEmbedAtom", "KGEScoreAtom", "MLPAtom"]
+class RemappedKGEScoreAtom(nn.Module):
+    """KGEScoreAtom with caller-side → engine-side index remapping.
+
+    Used when a KGE model's index space differs from the caller's
+    (e.g. DpRL's env uses ``index_manager`` indices but the KGE
+    inference engine uses its own entity/predicate vocabulary). The
+    two ``[*]`` remap tensors map caller indices to engine indices,
+    with ``-1`` marking out-of-vocabulary entries.
+
+    Returns ``Repr(scores=...)`` with sigmoid → log already applied
+    (matches the existing DpRL convention so downstream code consumes
+    log-scores). Out-of-vocabulary atoms get ``log(0.5)``.
+    """
+
+    def __init__(self, const_remap: Tensor, pred_remap: Tensor,
+                  log_eps: float = 1e-8) -> None:
+        super().__init__()
+        # Hold remaps as buffers (move with .to(device), saved with state_dict).
+        self.register_buffer("const_remap", const_remap)
+        self.register_buffer("pred_remap", pred_remap)
+        self.log_eps = log_eps
+
+    def forward(self, preds: Tensor, subjs: Tensor, objs: Tensor, model) -> Repr:
+        r = self.pred_remap[preds.clamp(min=0)]
+        h = self.const_remap[subjs.clamp(min=0)]
+        t = self.const_remap[objs.clamp(min=0)]
+        valid = (r >= 0) & (h >= 0) & (t >= 0) & (preds > 0)
+        safe_r = r.clamp(min=0)
+        safe_h = h.clamp(min=0)
+        safe_t = t.clamp(min=0)
+        raw = torch.sigmoid(_score_triples(model, safe_h, safe_r, safe_t))
+        scores = torch.where(valid, raw, torch.full_like(raw, 0.5))
+        return Repr(scores=torch.log(scores.clamp(min=self.log_eps)))
+
+
+__all__ = [
+    "KGEBothAtom",
+    "KGEEmbedAtom",
+    "KGEScoreAtom",
+    "MLPAtom",
+    "RemappedKGEScoreAtom",
+]
