@@ -38,7 +38,7 @@ from .types import ProofEvidence, ProofState
 
 def _atoms_from_evidence(evidence: ProofEvidence):
     """Split ``evidence.body`` into ``(preds, subjs, objs)`` index tensors."""
-    body = evidence.body                                 # [B, C, D, M, 3] or [B, C, G, 3]
+    body = evidence.body                                 # [B, P, D, M, 3] or [B, P, G, 3]
     preds = body[..., 0]
     subjs = body[..., 1]
     objs = body[..., 2]

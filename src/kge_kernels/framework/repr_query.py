@@ -3,8 +3,8 @@
 Two families of QueryRepr live here:
 
   - **Pool reductions** (Max/Sum/Mean/LogSumExp/MLPSum/ConceptMax):
-    reduce over the candidate-proof dimension ``C`` using ``evidence.mask
-    [B, C]`` to ignore padded proofs. ``traj_repr.scores [B, C]`` →
+    reduce over the candidate-proof dimension ``P`` using ``evidence.mask
+    [B, P]`` to ignore padded proofs. ``traj_repr.scores [B, P]`` →
     ``Repr.scores [B]``.
 
   - **Trajectory-summary reduction** (:class:`TrajectoryScoreQueryRepr`):
@@ -26,7 +26,7 @@ from .types import ProofEvidence
 
 
 def _proof_mask(traj_repr: Repr, evidence: ProofEvidence) -> Tensor:
-    """Boolean ``[B, C]`` mask of valid candidate proofs."""
+    """Boolean ``[B, P]`` mask of valid candidate proofs."""
     if not hasattr(evidence, "mask"):
         raise AttributeError("QueryRepr requires evidence.mask")
     return evidence.mask.to(torch.bool)
@@ -43,7 +43,7 @@ class MaxQueryRepr(nn.Module):
     def forward(self, traj_repr: Repr, evidence: ProofEvidence) -> Repr:
         if not traj_repr.has_scores:
             raise ValueError("MaxQueryRepr requires traj_repr.scores")
-        scores = traj_repr.scores                       # [B, C]
+        scores = traj_repr.scores                       # [B, P]
         mask = _proof_mask(traj_repr, evidence)
         neg_inf = torch.finfo(scores.dtype).min
         masked = torch.where(mask, scores, torch.full_like(scores, neg_inf))
@@ -107,7 +107,7 @@ class MLPSumQueryRepr(nn.Module):
     def forward(self, traj_repr: Repr, evidence: ProofEvidence) -> Repr:
         if not traj_repr.has_embeddings:
             raise ValueError("MLPSumQueryRepr requires traj_repr.embeddings")
-        emb = traj_repr.embeddings                      # [B, C, E]
+        emb = traj_repr.embeddings                      # [B, P, E]
         mask = _proof_mask(traj_repr, evidence).to(emb.dtype).unsqueeze(-1)
         pooled = (emb * mask).sum(dim=-2)               # [B, E]
         x = torch.relu(self.fc1(pooled))

@@ -317,12 +317,12 @@ class LazyPartialScorer(PartialScorer):
 
         Only processes valid (non-padding) atoms. Single GPU→CPU sync.
         """
-        B, S, A, _ = derived_states.shape
+        B, G, A, _ = derived_states.shape
         C = self.constant_no
         pad = self.padding_idx
 
-        valid_s = torch.arange(S, device=derived_states.device).unsqueeze(0) < derived_counts.unsqueeze(1)
-        valid_atoms = valid_s.unsqueeze(2).expand(B, S, A).reshape(-1)
+        valid_s = torch.arange(G, device=derived_states.device).unsqueeze(0) < derived_counts.unsqueeze(1)
+        valid_atoms = valid_s.unsqueeze(2).expand(B, G, A).reshape(-1)
         flat = derived_states.reshape(-1, 3)[valid_atoms]
 
         if flat.shape[0] == 0:

@@ -11,13 +11,6 @@ here. ``grounder`` provides the ``ResolutionOp`` (its ``ProofState`` and
 from __future__ import annotations
 
 from .atom_classification import classify_atoms
-from .atom_repr import (
-    KGEBothAtom,
-    KGEEmbedAtom,
-    KGEScoreAtom,
-    MLPAtom,
-    RemappedKGEScoreAtom,
-)
 from .protocols import (
     AtomRepr,
     QueryRepr,
@@ -26,7 +19,15 @@ from .protocols import (
     StateRepr,
     TrajRepr,
 )
-from .query_repr import (
+from .repr import Repr
+from .repr_atom import (
+    KGEBothAtom,
+    KGEEmbedAtom,
+    KGEScoreAtom,
+    MLPAtom,
+    RemappedKGEScoreAtom,
+)
+from .repr_query import (
     ALL_TRAJECTORY_SCORE_MODES,
     ConceptMaxQueryRepr,
     LogSumExpQueryRepr,
@@ -36,16 +37,7 @@ from .query_repr import (
     SumQueryRepr,
     TrajectoryScoreQueryRepr,
 )
-from .repr import Repr
-from .scorer import ScorerFn, build_scorer, search_and_score
-from .select import (
-    BeamSelect,
-    ExhaustiveSelect,
-    GreedySelect,
-    SampleSelect,
-    StateFactory,
-)
-from .state_repr import (
+from .repr_state import (
     ConcatStateRepr,
     MaxStateRepr,
     MeanStateRepr,
@@ -53,7 +45,7 @@ from .state_repr import (
     SumStateRepr,
     TNormStateRepr,
 )
-from .traj_repr import (
+from .repr_traj import (
     BestCumulativeTrajRepr,
     BestEverStateScoreTrajRepr,
     BestPrefixAvgTrajRepr,
@@ -67,6 +59,14 @@ from .traj_repr import (
     RuleMLPTrajRepr,
     SBRBodyMinTrajRepr,
     TNormTrajRepr,
+)
+from .scorer import ScorerFn, build_scorer, search_and_score
+from .select import (
+    BeamSelect,
+    ExhaustiveSelect,
+    GreedySelect,
+    SampleSelect,
+    StateFactory,
 )
 from .types import ProofEvidence, ProofState, SelectInfo
 

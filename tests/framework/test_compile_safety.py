@@ -81,7 +81,7 @@ def test_search_and_score_compile_fullgraph_no_graph_breaks():
     and assert it produces a single graph with no breaks."""
     import torch._dynamo as dynamo  # type: ignore[attr-defined]
 
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=7, num_relations=5, dim=8)
     comp = _build_composition()
 
@@ -122,7 +122,7 @@ def test_tnorm_state_repr_is_fullgraph_compilable():
 
     from kge_kernels.framework import Repr
 
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     state_repr = TNormStateRepr("min")
 
     scores = torch.rand(2, 3, 2, 2)

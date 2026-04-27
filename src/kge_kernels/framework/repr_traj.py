@@ -35,20 +35,20 @@ from .types import ProofEvidence, SelectInfo
 def _reduce_depth_scores(scores: Tensor, evidence: ProofEvidence, fn) -> Tensor:
     """Reduce a per-state, per-depth score tensor along the depth dim.
 
-    Structured layout: scores ``[B, C, D]`` → reduce → ``[B, C]``
-    Legacy layout:     scores ``[B, C]``    → identity (no D dim)
+    Structured layout: scores ``[B, P, D]`` → reduce → ``[B, P]``
+    Legacy layout:     scores ``[B, P]``    → identity (no D dim)
 
     Padded depths (where ``evidence.body_count[..., d] == 0``) are masked
     out so they don't affect the reduction. ``fn`` decides the reduction
     semantics by accepting ``(masked_scores, depth_valid)``.
     """
     if scores.dim() == 3:
-        body_count = evidence.body_count                    # [B, C, D]
+        body_count = evidence.body_count                    # [B, P, D]
         if body_count.dim() != 3:
             raise ValueError(
-                "TrajRepr expects body_count [B,C,D] when state_repr has depth dim"
+                "TrajRepr expects body_count [B,P,D] when state_repr has depth dim"
             )
-        depth_valid = body_count > 0                        # [B, C, D]
+        depth_valid = body_count > 0                        # [B, P, D]
         return fn(scores, depth_valid)
     return scores
 
@@ -325,7 +325,7 @@ class FinalStepLogScoreTrajRepr(nn.Module):
 
         def reduce(scores: Tensor, depth_valid: Tensor) -> Tensor:
             # Pick the score at the last valid depth.
-            last_valid_idx = depth_valid.long().sum(dim=-1) - 1   # [B, C]
+            last_valid_idx = depth_valid.long().sum(dim=-1) - 1   # [B, P]
             last_valid_idx = last_valid_idx.clamp(min=0)
             gathered = scores.gather(-1, last_valid_idx.unsqueeze(-1)).squeeze(-1)
             any_valid = depth_valid.any(dim=-1)
@@ -560,8 +560,8 @@ class RuleMLPTrajRepr(nn.Module):
 
         traj_emb = min_d(e_d)
 
-    Requires ``state_repr.embeddings`` with shape ``[B, C, D, E_in]``
-    (one embedding per (proof, depth)). Output shape ``[B, C, E_out]``.
+    Requires ``state_repr.embeddings`` with shape ``[B, P, D, E_in]``
+    (one embedding per (proof, depth)). Output shape ``[B, P, E_out]``.
 
     Per-rule MLPs are stored as ``[R, ...]`` parameter tensors and
     gathered by ``rule_idx``. Incremental ``init/step`` mode is not
@@ -596,34 +596,34 @@ class RuleMLPTrajRepr(nn.Module):
     def forward(self, state_repr: Repr, evidence: ProofEvidence) -> Repr:
         if not state_repr.has_embeddings:
             raise ValueError("RuleMLPTrajRepr requires state_repr.embeddings")
-        emb = state_repr.embeddings           # [B, C, D, E_in]
+        emb = state_repr.embeddings           # [B, P, D, E_in]
         if emb.dim() != 4:
             raise ValueError(
-                f"RuleMLPTrajRepr expected state_repr.embeddings shape [B, C, D, E_in]; "
+                f"RuleMLPTrajRepr expected state_repr.embeddings shape [B, P, D, E_in]; "
                 f"got {tuple(emb.shape)}. Pair with ConcatStateRepr or similar."
             )
-        rule_idx = evidence.rule_idx          # [B, C, D]
+        rule_idx = evidence.rule_idx          # [B, P, D]
         if rule_idx.dim() != 3:
             raise ValueError(
-                f"RuleMLPTrajRepr expects evidence.rule_idx shape [B, C, D]; got {tuple(rule_idx.shape)}"
+                f"RuleMLPTrajRepr expects evidence.rule_idx shape [B, P, D]; got {tuple(rule_idx.shape)}"
             )
 
         # Apply per-rule MLP via grouped parameter gather.
-        l1_g = self.l1[rule_idx]              # [B, C, D, in_dim, h]
-        b1_g = self.b1[rule_idx]              # [B, C, D, h]
+        l1_g = self.l1[rule_idx]              # [B, P, D, in_dim, h]
+        b1_g = self.b1[rule_idx]              # [B, P, D, h]
         h1 = F.relu(torch.einsum("...e,...eh->...h", emb, l1_g) + b1_g)
-        l2_g = self.l2[rule_idx]              # [B, C, D, h, out_dim]
-        b2_g = self.b2[rule_idx]              # [B, C, D, out_dim]
-        e_d = torch.einsum("...h,...hk->...k", h1, l2_g) + b2_g   # [B, C, D, out_dim]
+        l2_g = self.l2[rule_idx]              # [B, P, D, h, out_dim]
+        b2_g = self.b2[rule_idx]              # [B, P, D, out_dim]
+        e_d = torch.einsum("...h,...hk->...k", h1, l2_g) + b2_g   # [B, P, D, out_dim]
 
         # Min over depth dim, masking padded depths with +inf.
-        body_count = evidence.body_count                    # [B, C, D]
+        body_count = evidence.body_count                    # [B, P, D]
         depth_valid = body_count > 0
         big = torch.finfo(e_d.dtype).max
         masked = torch.where(
             depth_valid.unsqueeze(-1), e_d, torch.full_like(e_d, big),
         )
-        reduced = masked.min(dim=-2).values                  # [B, C, out_dim]
+        reduced = masked.min(dim=-2).values                  # [B, P, out_dim]
         # If all depths invalid, collapse-from-+inf → 0.
         any_valid = depth_valid.any(dim=-1)
         reduced = torch.where(

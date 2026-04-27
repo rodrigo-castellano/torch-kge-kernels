@@ -16,7 +16,7 @@ from .conftest import make_legacy_evidence, make_structured_evidence
 
 
 def test_tnorm_min_structured():
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     scores = torch.tensor(
         [
             [[[0.4, 0.6], [0.2, 0.8]], [[0.7, 0.7], [0.5, 0.5]], [[0.9, 0.9], [0.1, 0.1]]],
@@ -31,14 +31,14 @@ def test_tnorm_min_structured():
 
 
 def test_tnorm_product_structured():
-    ev = make_structured_evidence(B=1, C=1, D=1, M=2)
+    ev = make_structured_evidence(B=1, P=1, D=1, M=2)
     scores = torch.tensor([[[[0.5, 0.4]]]])
     out = TNormStateRepr("product")(Repr(scores=scores), ev)
     assert torch.allclose(out.scores[0, 0, 0], torch.tensor(0.2))
 
 
 def test_tnorm_min_legacy():
-    ev = make_legacy_evidence(B=1, C=1, G_body=3)
+    ev = make_legacy_evidence(B=1, P=1, G_body=3)
     scores = torch.tensor([[[0.7, 0.2, 0.9]]])
     out = TNormStateRepr("min")(Repr(scores=scores), ev)
     assert out.scores.shape == (1, 1)
@@ -46,7 +46,7 @@ def test_tnorm_min_legacy():
 
 
 def test_sum_state_repr_structured_with_mask():
-    ev = make_structured_evidence(B=1, C=1, D=1, M=3)
+    ev = make_structured_evidence(B=1, P=1, D=1, M=3)
     # Make only first 2 atoms valid
     ev.body_count = torch.tensor([[[2]]], dtype=torch.long)
     emb = torch.tensor([[[[[1.0, 1.0], [2.0, 2.0], [99.0, 99.0]]]]])
@@ -56,21 +56,21 @@ def test_sum_state_repr_structured_with_mask():
 
 
 def test_mean_state_repr():
-    ev = make_structured_evidence(B=1, C=1, D=1, M=2)
+    ev = make_structured_evidence(B=1, P=1, D=1, M=2)
     emb = torch.tensor([[[[[2.0, 4.0], [4.0, 8.0]]]]])
     out = MeanStateRepr()(Repr(embeddings=emb), ev)
     assert torch.allclose(out.embeddings[0, 0, 0], torch.tensor([3.0, 6.0]))
 
 
 def test_max_state_repr():
-    ev = make_structured_evidence(B=1, C=1, D=1, M=3)
+    ev = make_structured_evidence(B=1, P=1, D=1, M=3)
     emb = torch.tensor([[[[[1.0, -1.0], [3.0, -3.0], [2.0, 0.0]]]]])
     out = MaxStateRepr()(Repr(embeddings=emb), ev)
     assert torch.allclose(out.embeddings[0, 0, 0], torch.tensor([3.0, 0.0]))
 
 
 def test_concat_state_repr_pads():
-    ev = make_structured_evidence(B=1, C=1, D=1, M=2)
+    ev = make_structured_evidence(B=1, P=1, D=1, M=2)
     emb = torch.tensor([[[[[1.0, 2.0], [3.0, 4.0]]]]])
     out = ConcatStateRepr(max_atoms=3)(Repr(embeddings=emb), ev)
     # max_atoms=3, embed_dim=2 → 6
@@ -84,7 +84,7 @@ def test_concat_state_repr_pads():
 
 def test_sum_state_repr_scores_polymorphic():
     """Score-path: SumStateRepr should reduce ``scores`` when no embeddings."""
-    ev = make_legacy_evidence(B=1, C=1, G_body=3)
+    ev = make_legacy_evidence(B=1, P=1, G_body=3)
     ev.body_count = torch.tensor([[2]], dtype=torch.long)  # only 2 atoms valid
     scores = torch.tensor([[[0.4, 0.6, 99.0]]])  # 99.0 is masked
     out = SumStateRepr()(Repr(scores=scores), ev)
@@ -95,7 +95,7 @@ def test_sum_state_repr_scores_polymorphic():
 
 def test_mean_state_repr_scores_polymorphic():
     """Score-path: MeanStateRepr should reduce ``scores`` when no embeddings."""
-    ev = make_legacy_evidence(B=1, C=1, G_body=3)
+    ev = make_legacy_evidence(B=1, P=1, G_body=3)
     ev.body_count = torch.tensor([[2]], dtype=torch.long)
     scores = torch.tensor([[[0.4, 0.6, 99.0]]])
     out = MeanStateRepr()(Repr(scores=scores), ev)
@@ -106,7 +106,7 @@ def test_mean_state_repr_scores_polymorphic():
 
 def test_mean_state_repr_scores_empty_body():
     """Empty body (body_count=0): mean should be 0, not NaN."""
-    ev = make_legacy_evidence(B=1, C=1, G_body=2)
+    ev = make_legacy_evidence(B=1, P=1, G_body=2)
     ev.body_count = torch.tensor([[0]], dtype=torch.long)
     scores = torch.tensor([[[1.0, 2.0]]])
     out = MeanStateRepr()(Repr(scores=scores), ev)
@@ -125,12 +125,12 @@ def test_body_atom_mask_flat_override_supports_interspersed_padding():
 
     @dataclass
     class _CustomEvidence:
-        body_count: torch.Tensor      # [B, C]
-        body_atom_mask_flat: torch.Tensor  # [B, C, G_body]
+        body_count: torch.Tensor      # [B, P]
+        body_atom_mask_flat: torch.Tensor  # [B, P, G_body]
 
     # Atoms at positions 0, 2 are valid; position 1 is padded; position 3 is valid.
     mask = torch.tensor([[[True, False, True, True]]])
-    body_count = mask.sum(dim=-1).long()  # [B, C] = [[3]]
+    body_count = mask.sum(dim=-1).long()  # [B, P] = [[3]]
     ev = _CustomEvidence(body_count=body_count, body_atom_mask_flat=mask)
     scores = torch.tensor([[[0.5, 99.0, 0.7, 0.3]]])
 

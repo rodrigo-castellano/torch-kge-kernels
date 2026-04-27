@@ -36,7 +36,7 @@ External orchestration (free functions over a model):
   - :func:`kge_kernels.training.train_step` — mask-aware BCE loss
     (unified compile boundary).
   - :func:`kge_kernels.models.kge_default_scorer` — adapt ``score`` to
-    the evaluator's ``(q_buf, pool_buf, mode) -> [B, P]`` ScoreFn shape.
+    the evaluator's ``(q_buf, pool_buf, mode) -> [B, C]`` ScoreFn shape.
   - :func:`kge_kernels.models.recommended_eval_batch_size` — memory-aware
     batch-size hint.
 

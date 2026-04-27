@@ -39,7 +39,7 @@ from kge_kernels.framework import (
 )
 from kge_kernels.framework.scorer import search_and_score
 from kge_kernels.framework.select import BeamSelect
-from kge_kernels.search import ExhaustiveSearcher
+from kge_kernels.search import make_searcher
 from kge_kernels.models import TransE
 
 from tests.framework.conftest import make_structured_evidence
@@ -52,10 +52,11 @@ from tests.framework.conftest import make_structured_evidence
 
 def test_sbr_method_tuple():
     """SBR = Enum + KGEScore + TNorm(min) + Exhaustive + TNorm(min) + Max."""
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=10, num_relations=5, dim=8)
 
-    sbr = ExhaustiveSearcher(
+    sbr = make_searcher(
+        "exhaustive",
         resolve=lambda state: ev,
         atom_repr=KGEScoreAtom(),
         state_repr=TNormStateRepr("min"),
@@ -80,11 +81,12 @@ def test_sbr_method_tuple():
 
 def test_dcr_method_tuple():
     """DCR = Enum + KGEBoth + PhiPsi + Exhaustive + TNorm(min) + Max."""
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=10, num_relations=5, dim=8)
     num_rules = int(ev.rule_idx.max().item()) + 1
 
-    dcr = ExhaustiveSearcher(
+    dcr = make_searcher(
+        "exhaustive",
         resolve=lambda state: ev,
         atom_repr=KGEBothAtom(),
         state_repr=PhiPsiStateRepr(num_rules=num_rules, embed_dim=8, tnorm="product"),
@@ -107,13 +109,14 @@ def test_dcr_method_tuple():
 
 def test_r2n_method_tuple():
     """R2N = Enum + KGEEmbed + Concat + Exhaustive + RuleMLP + MLPSum."""
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     embed_dim = 8
     model = TransE(num_entities=10, num_relations=5, dim=embed_dim)
     num_rules = int(ev.rule_idx.max().item()) + 1
     M = 2
 
-    r2n = ExhaustiveSearcher(
+    r2n = make_searcher(
+        "exhaustive",
         resolve=lambda state: ev,
         atom_repr=KGEEmbedAtom(),
         state_repr=ConcatStateRepr(max_atoms=M),
@@ -211,7 +214,7 @@ def test_dprl_method_tuple():
     """
     embed_dim = 8
     model = TransE(num_entities=10, num_relations=5, dim=embed_dim)
-    ev = make_structured_evidence(B=2, C=3, D=1, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=1, M=2)
 
     scores = search_and_score(
         query=None,
@@ -235,7 +238,7 @@ def test_dprl_method_tuple():
 
 def test_sbr_query_aggregation_ablation():
     """Swap MaxQueryRepr → SumQueryRepr keeping the rest of SBR fixed."""
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=10, num_relations=5, dim=8)
 
     base_kw = dict(
@@ -245,8 +248,8 @@ def test_sbr_query_aggregation_ablation():
         traj_repr=TNormTrajRepr("min"),
         model=model,
     )
-    sbr_max = ExhaustiveSearcher(**base_kw, query_repr=MaxQueryRepr(), name="sbr_max")
-    sbr_sum = ExhaustiveSearcher(**base_kw, query_repr=SumQueryRepr(), name="sbr_sum")
+    sbr_max = make_searcher("exhaustive", **base_kw, query_repr=MaxQueryRepr(), name="sbr_max")
+    sbr_sum = make_searcher("exhaustive", **base_kw, query_repr=SumQueryRepr(), name="sbr_sum")
 
     queries = torch.randint(1, 10, (2, 3))
     out_max = sbr_max(queries)["sbr_max"]

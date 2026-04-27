@@ -14,9 +14,29 @@ Six slots:
   Select           — evidence + state Repr → next ProofState (+ info)
 
 Concrete implementations live in:
-  atom_repr.py, state_repr.py, traj_repr.py, query_repr.py, select.py
+  repr_atom.py, repr_state.py, repr_traj.py, repr_query.py, select.py
 
 The reference composition lives in scorer.py (``search_and_score``).
+
+Cross-repo Protocol satisfiers
+------------------------------
+
+tkk stays env- and policy-unaware. Concrete primitives that need a
+policy network or a stateful environment live in DpRL and satisfy
+these Protocols via duck typing:
+
+  * ``DpRL.kge_experiments.ppo.policy_select.PolicySelect`` satisfies
+    :class:`Select`. Reads ``evidence.obs`` (the optional Protocol
+    field) to feed a policy net. Exposes ``set_gumbel_scale``.
+
+  * ``DpRL.kge_experiments.env.stateful_resolve.StatefulEnvResolve``
+    satisfies :class:`ResolutionOp`. Holds a stateful ``EnvVec`` plus
+    alternated state buffers; populates ``evidence.obs`` so a paired
+    ``PolicySelect`` can read it.
+
+Dependency arrow stays one-way: ``DpRL → tkk → grounder``. tkk imports
+neither DpRL nor any env/policy code; DpRL imports tkk's Protocols only
+for type hints (no runtime dependency on tkk's class hierarchy).
 """
 from __future__ import annotations
 
@@ -43,7 +63,7 @@ class AtomRepr(Protocol):
     """Maps atom triples ``(pred, subj, obj)`` to per-atom ``Repr``.
 
     The leading shape of the output ``Repr`` matches the leading shape of
-    the inputs (typically ``[B, C, D, M]`` or ``[B, C, G_body]``).
+    the inputs (typically ``[B, P, D, M]`` or ``[B, P, G_body]``).
 
     ``model`` is the tkk-native KGE model (anything inheriting from
     ``kge_kernels.models.base.KGEBase``). It is passed positionally so
@@ -59,7 +79,7 @@ class StateRepr(Protocol):
 
     Reads ``evidence.body_atom_mask_flat`` (or ``evidence.body_count``) to
     decide which atoms are valid in each body. Output leading shape is
-    ``[B, C]`` (one Repr per candidate proof) or ``[B, C, D]`` (one Repr
+    ``[B, P]`` (one Repr per candidate proof) or ``[B, P, D]`` (one Repr
     per depth step) depending on whether the implementation reduces over
     the depth dim.
     """

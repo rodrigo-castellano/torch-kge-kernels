@@ -33,9 +33,9 @@ from .conftest import make_structured_evidence
 def test_forward_equals_incremental(cls, tnorm):
     """forward(state_repr_full, evidence) ≡ init + step*D for the same data."""
     traj = cls()
-    B, C, D = 2, 1, 4
-    ev = make_structured_evidence(B=B, C=C, D=D, M=2)
-    # Per-state scores [B, C, D]
+    B, P, D = 2, 1, 4
+    ev = make_structured_evidence(B=B, P=P, D=D, M=2)
+    # Per-state scores [B, P, D]
     scores = torch.tensor(
         [
             [[0.2, 0.3, 0.4, 0.5]],
@@ -45,8 +45,8 @@ def test_forward_equals_incremental(cls, tnorm):
     )
     full = traj(Repr(scores=scores), ev)
 
-    # Run incrementally on the b=0, c=0 path. Reduce the [B, C] forward
-    # output along C to compare apples-to-apples.
+    # Run incrementally on the b=0, p=0 path. Reduce the [B, P] forward
+    # output along P to compare apples-to-apples.
     accum = traj.init(B, scores.device)
     for d in range(D):
         step_scores = scores[:, 0, d]   # [B]
@@ -60,7 +60,7 @@ def test_forward_equals_incremental(cls, tnorm):
 
 def test_cumulative_log_correctness():
     traj = CumulativeLogTrajRepr()
-    ev = make_structured_evidence(B=1, C=1, D=3, M=1)
+    ev = make_structured_evidence(B=1, P=1, D=3, M=1)
     scores = torch.tensor([[[0.5, 0.5, 0.5]]])
     out = traj(Repr(scores=scores), ev)
     expected = 3 * math.log(0.5)
@@ -69,7 +69,7 @@ def test_cumulative_log_correctness():
 
 def test_min_step_correctness():
     traj = MinStepTrajRepr()
-    ev = make_structured_evidence(B=1, C=1, D=3, M=1)
+    ev = make_structured_evidence(B=1, P=1, D=3, M=1)
     scores = torch.tensor([[[0.9, 0.1, 0.5]]])
     out = traj(Repr(scores=scores), ev)
     assert torch.allclose(out.scores[0, 0], torch.tensor(math.log(0.1)), atol=1e-5)
@@ -77,7 +77,7 @@ def test_min_step_correctness():
 
 def test_best_cumulative_picks_best_prefix():
     traj = BestCumulativeTrajRepr()
-    ev = make_structured_evidence(B=1, C=1, D=3, M=1)
+    ev = make_structured_evidence(B=1, P=1, D=3, M=1)
     # log(0.9) ≈ -0.105, then log(0.1) makes it ~ -2.4. Best prefix is just step 0.
     scores = torch.tensor([[[0.9, 0.1, 0.5]]])
     out = traj(Repr(scores=scores), ev)

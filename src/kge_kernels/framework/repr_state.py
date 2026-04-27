@@ -6,8 +6,8 @@ The StateRepr reduces the M (atoms-per-body) dimension and respects
 ``evidence.body_atom_mask_flat`` for masking.
 
 Output leading shape:
-  - structured (evidence.D > 0): ``[B, C, D]`` — one state Repr per depth
-  - legacy flat (evidence.D == 0): ``[B, C]``  — one state Repr per body
+  - structured (evidence.D > 0): ``[B, P, D]`` — one state Repr per depth
+  - legacy flat (evidence.D == 0): ``[B, P]``  — one state Repr per body
 """
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ def _per_atom_validity_mask(atom_lead_shape: tuple, evidence: ProofEvidence, dev
     derived prefix masks when ``body_atom_mask_flat`` is unavailable or
     its shape doesn't match.
 
-    Structured fallback: ``[B, C, D, M]`` from ``body_count[B, C, D]``.
-    Legacy fallback:     ``[B, C, G_body]`` from ``body_count[B, C]``.
+    Structured fallback: ``[B, P, D, M]`` from ``body_count[B, P, D]``.
+    Legacy fallback:     ``[B, P, G_body]`` from ``body_count[B, P]``.
     """
     custom = getattr(evidence, "body_atom_mask_flat", None)
     if isinstance(custom, Tensor) and tuple(custom.shape) == tuple(atom_lead_shape):
@@ -39,23 +39,23 @@ def _per_atom_validity_mask(atom_lead_shape: tuple, evidence: ProofEvidence, dev
 
     body_count = evidence.body_count
     if body_count.dim() == 3:
-        # structured: [B, C, D] body_count, atoms-per-depth = M
-        B, C, D = body_count.shape
+        # structured: [B, P, D] body_count, atoms-per-depth = M
+        B, P, D = body_count.shape
         if len(atom_lead_shape) != 4:
             raise ValueError(
-                f"StateRepr expected atom shape [B,C,D,M] for structured evidence; got {atom_lead_shape}"
+                f"StateRepr expected atom shape [B,P,D,M] for structured evidence; got {atom_lead_shape}"
             )
         M = atom_lead_shape[3]
         m_idx = torch.arange(M, device=device)
-        return m_idx < body_count.unsqueeze(-1)         # [B, C, D, M]
+        return m_idx < body_count.unsqueeze(-1)         # [B, P, D, M]
     # legacy flat
     if len(atom_lead_shape) != 3:
         raise ValueError(
-            f"StateRepr expected atom shape [B,C,G_body] for legacy evidence; got {atom_lead_shape}"
+            f"StateRepr expected atom shape [B,P,G_body] for legacy evidence; got {atom_lead_shape}"
         )
     G = atom_lead_shape[2]
     g_idx = torch.arange(G, device=device)
-    return g_idx < body_count.unsqueeze(-1)             # [B, C, G_body]
+    return g_idx < body_count.unsqueeze(-1)             # [B, P, G_body]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -252,9 +252,9 @@ class PhiPsiStateRepr(nn.Module):
             raise ValueError(
                 "PhiPsiStateRepr requires atom_repr with both embeddings and scores"
             )
-        emb = atom_repr.embeddings           # [B, C, D, M, E] or [B, C, G, E]
-        sc = atom_repr.scores                # [B, C, D, M]    or [B, C, G]
-        rule_idx = evidence.rule_idx         # [B, C, D]       or [B, C]
+        emb = atom_repr.embeddings           # [B, P, D, M, E] or [B, P, G, E]
+        sc = atom_repr.scores                # [B, P, D, M]    or [B, P, G]
+        rule_idx = evidence.rule_idx         # [B, P, D]       or [B, P]
 
         # Broadcast rule_idx to atom leading shape (add the M/G dim).
         rule_atom = rule_idx.unsqueeze(-1).expand(emb.shape[:-1])

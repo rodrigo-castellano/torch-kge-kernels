@@ -4,7 +4,7 @@ The model layer owns these because both functions are about the model:
 
 - :func:`kge_default_scorer` knows the ``model.score(h, r, t)`` API and
   adapts it to the evaluator's
-  ``ScoreFn`` shape ``(q_buf [B, 3], pool_buf [B, P], mode) -> [B, P]``.
+  ``ScoreFn`` shape ``(q_buf [B, 3], pool_buf [B, C], mode) -> [B, C]``.
 - :func:`recommended_eval_batch_size` reads ``model.dim`` /
   ``model.half_dim`` to pick a safe per-batch memory budget.
 
@@ -22,9 +22,9 @@ from torch import Tensor, nn
 def kge_default_scorer(
     model: nn.Module,
     q_buf: Tensor,     # [B, 3]  int64, columns (r, h, t)
-    pool_buf: Tensor,  # [B, P]  int64, entity indices to score
+    pool_buf: Tensor,  # [B, C]  int64, entity indices to score
     mode: Literal["head", "tail"],
-) -> Tensor:           # [B, P]  float
+) -> Tensor:           # [B, C]  float
     """Default scorer for tkk-native KGE models with ``model.score(h, r, t)``.
 
     Three steps in one expression:
@@ -33,7 +33,7 @@ def kge_default_scorer(
        takes ``(h, r, t)``.
     2. **Mode dispatch**: pass ``None`` for the corrupted side, triggering
        the model's all-entities matmul fast path → ``[B, |E|]``.
-    3. **Gather**: pull the ``P`` candidate columns from ``[B, |E|]`` via
+    3. **Gather**: pull the ``C`` candidate columns from ``[B, |E|]`` via
        ``pool_buf``.
 
     Mode is a Python string fixed per compile — every call inside a

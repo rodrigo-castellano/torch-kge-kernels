@@ -13,7 +13,7 @@ tiny dataclass that implements the protocol attributes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from torch import Tensor
 
@@ -30,9 +30,9 @@ class ProofState(Protocol):
     grounder dataclass satisfies this protocol via duck typing.
     """
 
-    proof_goals: Tensor              # [B, S, G, 3]
-    state_valid: Tensor              # [B, S]
-    top_ridx: Tensor                 # [B, S]
+    proof_goals: Tensor              # [B, G, A, 3]
+    state_valid: Tensor              # [B, G]
+    top_ridx: Tensor                 # [B, G]
     next_var_indices: Optional[Tensor]  # [B] or None
 
 
@@ -44,16 +44,24 @@ class ProofEvidence(Protocol):
     structured layout uses ``D > 0`` (depth dim populated) and the legacy
     flat layout uses ``D == 0``. Properties allow consumers to ignore the
     distinction.
+
+    Optional ``obs`` field carries an opaque per-step observation tensor
+    that policy-driven Selects (e.g. DpRL's ``PolicySelect``) feed into a
+    policy network. tkk's reference Selects ignore this field; grounder
+    evidence has ``obs is None``. Policy-aware evidence producers (e.g.
+    DpRL's ``StatefulEnvResolve``) populate it. Backward compatible:
+    consumers should use ``getattr(evidence, "obs", None)``.
     """
 
-    body: Tensor          # [B, C, D, M, 3] or [B, C, G_body, 3]
-    mask: Tensor          # [B, C]
+    body: Tensor          # [B, P, D, M, 3] or [B, P, G_body, 3]
+    mask: Tensor          # [B, P]
     count: Tensor         # [B]
-    rule_idx: Tensor      # [B, C, D] or [B, C]
-    body_count: Tensor    # [B, C, D] or [B, C]
+    rule_idx: Tensor      # [B, P, D] or [B, P]
+    body_count: Tensor    # [B, P, D] or [B, P]
     D: int
     M: int
-    head: Optional[Tensor]  # [B, C, D, 3] or None
+    head: Optional[Tensor]  # [B, P, D, 3] or None
+    obs: Optional[Any] = None  # opaque policy-input tensor; None on grounder evidence
 
     @property
     def body_flat(self) -> Tensor: ...
@@ -83,7 +91,7 @@ class SelectInfo:
     subclasses can add fields without breaking existing consumers.
     """
 
-    log_probs: Optional[Tensor] = None       # [B, S] policy gradient
+    log_probs: Optional[Tensor] = None       # [B, G] policy gradient
     chosen_scores: Optional[Tensor] = None   # [B, k] beam/greedy
     chosen_indices: Optional[Tensor] = None  # [B, k] which action was picked
     extra: dict = field(default_factory=dict)  # MCTS visit counts etc.

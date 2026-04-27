@@ -1,7 +1,7 @@
 """AtomRepr implementations: atoms → per-atom Repr.
 
 Each implementation takes ``preds``, ``subjs``, ``objs`` index tensors with
-matching shape (typically ``[B, C, D, M]``) and a tkk-native KGE model
+matching shape (typically ``[B, P, D, M]``) and a tkk-native KGE model
 (inheriting from ``kge_kernels.models.base.KGEBase``).
 
 Returns a ``Repr`` whose leading shape matches the inputs.

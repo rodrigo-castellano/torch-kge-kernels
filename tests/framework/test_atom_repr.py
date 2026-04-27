@@ -18,11 +18,11 @@ def _build_model(num_preds: int = 5, num_ents: int = 7, dim: int = 8) -> TransE:
     return TransE(num_entities=num_ents, num_relations=num_preds, dim=dim)
 
 
-def _indices(B: int = 2, C: int = 3, D: int = 2, M: int = 2):
+def _indices(B: int = 2, P: int = 3, D: int = 2, M: int = 2):
     g = torch.Generator().manual_seed(1)
-    preds = torch.randint(5, (B, C, D, M), generator=g)
-    subjs = torch.randint(7, (B, C, D, M), generator=g)
-    objs = torch.randint(7, (B, C, D, M), generator=g)
+    preds = torch.randint(5, (B, P, D, M), generator=g)
+    subjs = torch.randint(7, (B, P, D, M), generator=g)
+    objs = torch.randint(7, (B, P, D, M), generator=g)
     return preds, subjs, objs
 
 

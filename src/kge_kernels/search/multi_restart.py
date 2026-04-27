@@ -1,12 +1,13 @@
-"""MultiRestartSearcher: N independent beam searches with noise.
+"""MultiRestartSearcher: N independent UnifiedSearcher beam runs with noise.
 
-Pre-builds N inner :class:`BeamSearcher` instances, each with a
-different noise seed. The first restart is deterministic
-(``noise_scale=0``); subsequent restarts inject Gaussian noise on the
-selection scores. Per-query, the best score across restarts wins.
+Pre-builds N inner :class:`UnifiedSearcher` instances backed by
+:class:`BeamSelect`, each with its own static-address Gumbel scale
+buffer. The first restart is deterministic (``noise_scale=0``);
+subsequent restarts inject Gumbel-max noise at ``noise_scale``.
+Per-query, the best score across restarts wins.
 
-This is a higher-order Searcher: it composes other Searchers rather
-than primitives directly. It fits the same :class:`Searcher` contract.
+Higher-order Searcher: composes Searcher instances rather than
+primitives directly. Same :class:`Searcher` contract.
 """
 from __future__ import annotations
 
@@ -23,17 +24,16 @@ from ..framework import (
     StateRepr,
     TrajRepr,
 )
-from ..framework.select import StateFactory
-from .beam import BeamSearcher
+from ..framework.select import BeamSelect, StateFactory
+from .searcher import CaptureMode, SearchSpec, UnifiedSearcher
 
 
 class MultiRestartSearcher(nn.Module):
-    """Run :class:`BeamSearcher` N times with different noise seeds; per-query max.
+    """Run :class:`UnifiedSearcher` (beam) N times with different noise; per-query max.
 
     The first restart is deterministic (no noise); restarts 1..N-1 use
-    independent noise. Restart noise is currently mediated through the
-    ``BeamSearcher.set_gumbel_scale`` interface — pass a per-restart
-    scale to inject different noise levels per pass.
+    independent Gumbel noise at ``noise_scale``. Restart noise is
+    injected via :meth:`UnifiedSearcher.set_gumbel_scale` between calls.
     """
 
     def __init__(
@@ -51,6 +51,9 @@ class MultiRestartSearcher(nn.Module):
         max_depth: int = 20,
         name: str = "multi_restart",
         state_factory: Optional[StateFactory] = None,
+        capture: CaptureMode = "dynamic",
+        spec: Optional[SearchSpec] = None,
+        batch_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         if n_restarts < 1:
@@ -58,15 +61,37 @@ class MultiRestartSearcher(nn.Module):
         self.name = name
         self.n_restarts = n_restarts
         self.noise_scale = noise_scale
-        self._inners = nn.ModuleList([
-            BeamSearcher(
-                resolve=resolve, atom_repr=atom_repr, state_repr=state_repr,
-                traj_repr=traj_repr, query_repr=query_repr,
-                beam_width=beam_width, model=model, max_depth=max_depth,
-                name=name, state_factory=state_factory,
+
+        if spec is None:
+            spec = SearchSpec(
+                batch_size=batch_size if batch_size is not None else 1,
+                max_depth=max_depth,
+                beam_width=beam_width,
             )
-            for _ in range(n_restarts)
-        ])
+
+        inners = []
+        for _ in range(n_restarts):
+            buf = torch.zeros(())
+            select = BeamSelect(
+                k=beam_width,
+                state_factory=state_factory,
+                gumbel_scale_buf=buf,
+            )
+            inners.append(
+                UnifiedSearcher(
+                    resolve=resolve,
+                    atom_repr=atom_repr,
+                    state_repr=state_repr,
+                    select=select,
+                    traj_repr=traj_repr,
+                    query_repr=query_repr,
+                    spec=spec,
+                    model=model,
+                    name=name,
+                    capture=capture,
+                )
+            )
+        self._inners = nn.ModuleList(inners)
 
     @torch.no_grad()
     def __call__(self, queries: Tensor) -> Dict[str, Tensor]:

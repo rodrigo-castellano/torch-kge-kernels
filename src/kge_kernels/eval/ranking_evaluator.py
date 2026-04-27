@@ -237,7 +237,7 @@ class RankingEvaluator:
                 cand_ents, cand_valid = self.candidates.candidates(q_slice, mode)
                 # cand_ents: [actual_B, K_fixed]; cand_valid: [actual_B, K_fixed]
 
-                # Assemble pool [B, P]: col 0 = true entity, cols 1.. = candidates.
+                # Assemble pool [B, C]: col 0 = true entity, cols 1.. = candidates.
                 true_col = 2 if mode == "tail" else 1
                 self._pool_scratch[:actual_B, 0] = q_slice[:, true_col]
                 self._pool_scratch[:actual_B, 1:].copy_(cand_ents)
@@ -252,9 +252,9 @@ class RankingEvaluator:
                 # Compiled scoring step. Graph replays onto static buffers.
                 if self._compile_enabled:
                     torch.compiler.cudagraph_mark_step_begin()
-                pool_scores = self._compiled[mode](self._q_buf, self._pool_buf)  # [B, P]
+                pool_scores = self._compiled[mode](self._q_buf, self._pool_buf)  # [B, C]
 
-                # Eager ranking — O(B*P), negligible vs the matmul.
+                # Eager ranking — O(B*C), negligible vs the matmul.
                 chunk_ranks = compute_ranks(
                     pool_scores[:actual_B],
                     self._true_idx_const[:actual_B],

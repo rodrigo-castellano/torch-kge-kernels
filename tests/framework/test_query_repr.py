@@ -19,13 +19,13 @@ from .conftest import FakeProofEvidence
 
 def _evidence_with_mask(mask: torch.Tensor) -> FakeProofEvidence:
     """Build a minimal evidence object that only needs ``mask``."""
-    B, C = mask.shape
+    B, P = mask.shape
     return FakeProofEvidence(
-        body=torch.zeros(B, C, 1, 1, 3, dtype=torch.long),
+        body=torch.zeros(B, P, 1, 1, 3, dtype=torch.long),
         mask=mask.to(torch.bool),
         count=mask.sum(dim=-1),
-        rule_idx=torch.zeros(B, C, 1, dtype=torch.long),
-        body_count=torch.zeros(B, C, 1, dtype=torch.long),
+        rule_idx=torch.zeros(B, P, 1, dtype=torch.long),
+        body_count=torch.zeros(B, P, 1, dtype=torch.long),
         D=1, M=1,
     )
 

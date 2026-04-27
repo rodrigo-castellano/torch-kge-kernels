@@ -50,3 +50,37 @@ def test_sample_select_seed_determinism():
     assert torch.equal(info1.chosen_indices, info2.chosen_indices)
     assert info1.log_probs is not None
     assert info1.log_probs.shape == (3, 2)
+
+
+def test_greedy_select_gumbel_zero_is_bit_exact():
+    """scale=0 must reproduce no-noise argmax bit-exactly (finite × 0 == 0)."""
+    s = Repr(scores=torch.tensor([[0.1, 0.9, 0.5], [0.7, 0.2, 0.4]]))
+    buf = torch.zeros(())
+    _, info_buf = GreedySelect(gumbel_scale_buf=buf)(evidence=None, s_repr=s)
+    _, info_ref = GreedySelect()(evidence=None, s_repr=s)
+    assert torch.equal(info_buf.chosen_indices, info_ref.chosen_indices)
+    assert torch.equal(info_buf.chosen_scores, info_ref.chosen_scores)
+
+
+def test_greedy_select_gumbel_buf_mutation_takes_effect():
+    """Mutating the buf in place changes the chosen distribution."""
+    torch.manual_seed(0)
+    s = Repr(scores=torch.zeros(64, 8))   # uniform → noise dominates
+    buf = torch.zeros(())
+    sel = GreedySelect(gumbel_scale_buf=buf)
+    # scale=0: ties broken by argmax tiebreaker → all 0s.
+    _, info0 = sel(evidence=None, s_repr=s)
+    assert (info0.chosen_indices == 0).all()
+    # scale=1: noise injects choice variety.
+    buf.fill_(1.0)
+    _, info1 = sel(evidence=None, s_repr=s)
+    assert info1.chosen_indices.unique().numel() > 1
+
+
+def test_beam_select_gumbel_zero_is_bit_exact():
+    s = Repr(scores=torch.tensor([[0.1, 0.9, 0.5, 0.7]]))
+    buf = torch.zeros(())
+    _, info_buf = BeamSelect(k=2, gumbel_scale_buf=buf)(evidence=None, s_repr=s)
+    _, info_ref = BeamSelect(k=2)(evidence=None, s_repr=s)
+    assert torch.equal(info_buf.chosen_indices, info_ref.chosen_indices)
+    assert torch.equal(info_buf.chosen_scores, info_ref.chosen_scores)

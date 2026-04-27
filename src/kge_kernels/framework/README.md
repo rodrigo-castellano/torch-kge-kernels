@@ -1,525 +1,423 @@
-# Evaluation contract — architecture map
+# `framework/` — the proof-search abstraction
 
-This document explains how knowledge-graph-completion evaluation is wired across
-the three layers tkk owns (`framework/` primitives, `search/` Searchers,
-`eval/` ranking evaluator) and how external callers (torch-ns, DpRL-KGR) plug
-in. It starts at the highest level and progressively zooms in.
-
----
-
-## 1. The high-level picture
-
-Evaluation answers one question: **for each test triple `(h, r, t)`, how good
-is the model at putting the true entity at the top of the candidate list?**
-
-Concretely:
-
-- For each test triple, build two ranking problems: head corruption
-  (`(?, r, t)`) and tail corruption (`(h, r, ?)`).
-- For each problem, score the true entity + a pool of corruption candidates.
-- Filter out known-true triples from the corruptions (so they can't
-  out-rank the answer).
-- Compute the rank of the true entity → aggregate to MRR and Hits@k.
-
-```
-   test triples [N, 3]
-         │
-         ▼
-   ┌─────────────────────┐
-   │  score candidates   │ ◀── method-specific
-   │  (KGE / SBR / PPO   │     (the only thing that varies)
-   │   rollout / ...)    │
-   └─────────────────────┘
-         │
-         ▼
-   ┌─────────────────────┐
-   │  rank true entity   │ ◀── shared across all methods
-   │  (filter known,     │     (tkk owns this code)
-   │   compute_ranks)    │
-   └─────────────────────┘
-         │
-         ▼
-   MRR  +  Hits@1 / Hits@3 / Hits@10
-```
-
-Everything that varies between methods is funneled into a single function,
-`ScoreFn`. Everything else — candidate generation, filtering, rank
-computation, metric aggregation — is shared. tkk's job is to keep it that way.
+> Companion to [`framework.pdf`](https://github.com/) (canonical spec, §1–§13).
+> This README is the implementation-level orientation: where each piece lives,
+> what shapes it consumes/emits, and how the layers compose.
 
 ---
 
-## 2. The contract surfaces
+## 1. The big idea
 
-Five things plug together. Everything else is an implementation detail of one
-of these five.
+Every proof-based NeSy method is a search over proof space, decomposed into
+**six pluggable functions** that compose in **one canonical loop**:
 
-### `Mode` (`eval/candidates.py`)
-
-```python
-Mode = Literal["head", "tail"]
+```
+Method = (resolve, atom_repr, state_repr, select, traj_repr, query_repr)
 ```
 
-A Python string. Frozen at compile time per scorer instance.
-
-### `CandidateSource` (`eval/candidates.py`)
-
-```python
-class CandidateSource(Protocol):
-    K_fixed: int
-
-    def candidates(self, queries: Tensor, mode: Mode) \
-        -> tuple[Tensor, Tensor]:
-        # returns (cand_ents [B, K_fixed], valid [B, K_fixed])
-        ...
+```
+              ┌──────────────────────── one loop ────────────────────────┐
+              ▼                                                          │
+state ─▶ resolve ─▶ atom_repr ─▶ state_repr ─▶ select ─▶ traj_repr ─────┤
+                                                            │            │
+                                                            ▼            │
+                                                     accum (Repr) ───────┘
+                                                            │
+                                                            ▼
+                                                       query_repr ─▶ score [B]
 ```
 
-How candidates are picked. `SamplerCandidates` is the standard impl; it
-filters known-true triples at sampling time and applies per-relation domain
-restrictions.
+Each method is a **row in a table**: SBR is `(Enum, KGEScore, TNorm(min),
+Exhaustive, TNorm(min), Max)`, DPrL is `(SLD, MLP, Sum, Beam/Sample,
+PolicyProduct, Sum)`. New methods are new rows; ablations swap one cell.
 
-### `ScoreFn` (`eval/ranking_evaluator.py`)
+The **exhaustive/sequential** split is just whether `select = identity`
+(SBR/DCR/R2N: one iteration) or not (DPrL: D iterations).
+
+---
+
+## 2. Dim convention
+
+Aligned with `framework.pdf` §3.2–§3.3.
+
+| Dim | Meaning |
+|---|---|
+| `B` | batch (queries) |
+| `P` | max proofs per query (collected groundings) |
+| `D` | max depth (rule applications per proof) |
+| `M` | max body atoms per single rule application |
+| `G` | max parallel goals per query in live search (search width / branches) |
+| `A` | max atoms per goal (open atom stack length) |
+| `E` | embedding dim |
+| `N` | flat per-atom count (`atom_repr` inputs) |
+| `K` | corruptions per query (negatives in ranking) |
+| `C` | candidates per query = K + 1 (ranking pool size) |
+
+A "**goal**" is a conjunction of atoms (a search-node state, classical-AI
+sense). An "**atom**" is one triple. The trailing `3` in `[..., 3]` is
+always `(predicate, subject, object)`.
+
+Relationship: `A_max = 1 + D·(M − 1)` (each rule application replaces
+one atom with M body atoms).
+
+---
+
+## 3. Core data structures
+
+### `Repr` (universal carrier)
+
+Flows between all four representation levels. Holds optional embeddings,
+optional scores, optional summaries:
+
+```python
+@dataclass
+class Repr:
+    embeddings: Optional[Tensor]                       # [*, E]
+    scores: Optional[Tensor]                           # [*]
+    summaries: Optional[Dict[str, Tensor]] = None      # named per-traj signals
+```
+
+Each level's signature is `Repr → Repr`. What's populated depends on the
+method (SBR: scores only; DPrL/R2N: embeddings; DCR: both).
+
+### `ProofState` (live search state)
+
+```python
+@dataclass
+class ProofState:
+    proof_goals: Tensor      # [B, G, A, 3] — open goals per branch
+    state_valid: Tensor      # [B, G]
+    top_ridx: Tensor         # [B, G]
+```
+
+Mutable across resolution steps (sequential search reads/writes this).
+
+### `ProofEvidence` (accumulated proof trace)
+
+```python
+@dataclass
+class ProofEvidence:
+    body: Tensor             # [B, P, D, M, 3] — body atoms per (proof, depth, pos)
+    proof_mask: Tensor       # [B, P]            — valid proofs
+    depth_mask: Tensor       # [B, P, D]         — active depths per proof
+    body_mask: Tensor        # [B, P, D, M]      — valid atoms per depth
+    rule_idx: Tensor         # [B, P, D]         — which rule at each depth
+```
+
+Output of `resolve`. For exhaustive scorers (SBR/DCR/R2N) D = 1; for
+sequential proofs D > 1. Carries only structural data — scores and
+embeddings live in `Repr`, computed by the representation pipeline.
+
+---
+
+## 4. The six primitives
+
+| Slot | File | Protocol signature | Output shape |
+|---|---|---|---|
+| `resolve` | (grounder repos) | `(state) → ProofEvidence` | structural |
+| `atom_repr` | `repr_atom.py` | `(preds [N], subjs [N], objs [N], model) → Repr` | `[N, ...]` |
+| `state_repr` | `repr_state.py` | `(atom_repr: Repr, evidence) → Repr` | `[B, P, D, ...]` |
+| `select` | `select.py` | `(evidence, s_repr) → (next_state, info)` | varies |
+| `traj_repr` | `repr_traj.py` | `(state_repr: Repr, evidence) → Repr` | `[B, P, ...]` |
+| `query_repr` | `repr_query.py` | `(traj_repr: Repr, evidence) → Repr` | `[B]` |
+
+### `resolve` — produce successor goals
+
+Two implementations, both satisfy `ResolutionOp` Protocol:
+
+- **Enum** (`grounder.bc.grounder`) — backward-chaining with bounded width
+  and depth. Produces all groundings in batch. Used by SBR/DCR/R2N.
+- **SLD** (`DpRL.env.RLGrounder`) — single-step MGU-based resolution.
+  Returns one step's successors. Used by DPrL.
+
+### `atom_repr` — atom → Repr
+
+Maps `(pred, subj, obj)` triples to per-atom representations:
+
+| Impl | Output | Used by |
+|---|---|---|
+| `KGEScoreAtom` | scores | SBR |
+| `KGEEmbedAtom` | embeddings | R2N |
+| `KGEBothAtom` | both | DCR |
+| `MLPAtom` | embeddings | DPrL |
+| `RemappedKGEScoreAtom` | scores (with KGE-vocab remap) | DpRL hybrid |
+
+### `state_repr` — atoms → state-level Repr
+
+Aggregates per-atom representations within a goal:
+
+| Impl | Output | Notes |
+|---|---|---|
+| `TNormStateRepr` | scores `[B, P, D]` | min / product (Gödel / product t-norm) |
+| `SumStateRepr` | embs `[B, P, D, E]` | sum of atom embeddings |
+| `MeanStateRepr` | embs `[B, P, D, E]` | mean |
+| `ConcatStateRepr` | embs `[B, P, D, M*E]` | flattens body |
+| `PhiPsiStateRepr` | scores `[B, P, D]` | DCR-specific (Φ/Ψ then t-norm) |
+
+### `select` — choose next state
+
+Returns `(next_state, info)` where `info` carries per-step signals (chosen
+scores, log-probs, ...):
+
+| Impl | Description | Used by |
+|---|---|---|
+| `ExhaustiveSelect` | identity, terminate after 1 iter | SBR/DCR/R2N |
+| `GreedySelect` | argmax over s_repr | baseline |
+| `BeamSelect(k)` | top-k | DPrL eval |
+| `SampleSelect(n)` | categorical sampling | DPrL train (PPO) |
+| `PolicySelect` (DpRL) | policy network argmax + Gumbel | DpRL PPO eval |
+
+`Greedy/Beam/Sample/Policy` accept an optional `gumbel_scale_buf` for
+Gumbel-max stochasticity (see §6 mid-life mutation).
+
+### `traj_repr` — depth aggregation
+
+Two callable interfaces (must agree):
+- **Batch**: `forward(s_repr, evidence) → Repr` — exhaustive path, reduces
+  over D in one call.
+- **Incremental**: `init(B, device) + step(accum, s_repr, info)` —
+  sequential path, accumulates one depth at a time.
+
+| Impl | Output | Description |
+|---|---|---|
+| `TNormTrajRepr` | scores `[B, P]` | conjunction across depths (min/prod) |
+| `RuleMLPTrajRepr` | embs `[B, P, E]` | per-rule MLP per depth, then conj |
+| `CumulativeLogTrajRepr` | scores `[B, P]` | Σ log s(state) |
+| `PolicyProductTrajRepr` | scores `[B, P]` | Σ log π(a|s) for PG |
+| `MultiTrajRepr` | dict of named summaries | populates `Repr.summaries` |
+
+### `query_repr` — proofs → query score
+
+Reduces per-trajectory to per-query scalar:
+
+| Impl | Output | Formula |
+|---|---|---|
+| `MaxQueryRepr` | scores `[B]` | `max_p s(d_p)` |
+| `SumQueryRepr` | scores `[B]` | `Σ_p s(d_p)` |
+| `MeanQueryRepr` | scores `[B]` | `mean_p s(d_p)` |
+| `MLPSumQueryRepr` | scores `[B]` | `MLP(Σ_p e(d_p))` |
+| `LogSumExpQueryRepr` | scores `[B]` | `log Σ_p exp(s(d_p))` |
+| `TrajectoryScoreQueryRepr` | scores `[B]` | ~36-mode dispatcher reading `Repr.summaries` |
+
+`TrajectoryScoreQueryRepr` is the unified scoring-formula dispatcher used
+by RL methods (DPrL). Modes: `logprob`, `proof_binary`, `depth_weighted_*`,
+`value_pos`, `end_prob`, `kge_embed*`, etc. — see
+`repr_query.py:ALL_TRAJECTORY_SCORE_MODES`.
+
+---
+
+## 5. The canonical scoring loop
+
+`scorer.py:search_and_score` composes the six primitives:
+
+```python
+def search_and_score(query, *, resolve, atom_repr, state_repr, select,
+                      traj_repr, query_repr, model, max_depth) -> Tensor:
+    state = init(query)
+    accum = traj_repr.init(B)
+    for d in range(max_depth):
+        evidence = resolve(state)
+        a_repr = atom_repr(*atoms_from(evidence), model)
+        s_repr = state_repr(a_repr, evidence)
+        state, info = select(evidence, s_repr)
+        accum = traj_repr.step(accum, s_repr, info)
+        if state.done: break
+    return query_repr(accum, evidence).scores                # [B]
+```
+
+- **Exhaustive** (`max_depth=1`, `ExhaustiveSelect`): `resolve` returns
+  the full evidence in one call; `traj_repr.forward` reduces over D in
+  batch; `query_repr` produces the final score. One iteration.
+- **Sequential** (`max_depth>1`, non-exhaustive `select`): `traj_repr`
+  accumulates per-step via `init + step×D`; `select` prunes at each step.
+
+There is no separate `score_query` — the loop IS the scorer.
+
+---
+
+## 6. `UnifiedSearcher` — the concrete class
+
+`search/searcher.py:UnifiedSearcher` is the canonical implementation of
+the `Searcher` Protocol. One class for every 6-tuple composition.
+
+```python
+searcher = UnifiedSearcher(
+    resolve=...,            # ResolutionOp
+    atom_repr=...,          # AtomRepr
+    state_repr=...,         # StateRepr
+    select=...,             # Select
+    traj_repr=...,          # TrajRepr
+    query_repr=...,         # QueryRepr
+    spec=SearchSpec(batch_size=B, max_depth=D, ...),
+    capture="static" | "dynamic",
+)
+scores = searcher(queries)                 # {mode_key: [N]}
+```
+
+### Capture modes
+
+- **`capture="static"`** (default) — allocates static-address buffers,
+  marks them via `torch._dynamo.mark_static_address`, captures the inner
+  step via `torch.compile(mode="reduce-overhead", fullgraph=True)`.
+  Cudagraph cheap-replay on every call.
+- **`capture="dynamic"`** — eager `search_and_score` loop, no buffer
+  allocation, shape-flexible. For dev / debug / shape-variable use.
+
+Both modes have identical `__call__(queries) → Dict[str, Tensor]` output.
+
+### Two static-mode shapes
+
+1. **Pool-aware** — when `resolve` owns its own buffer alternation
+   (e.g. DpRL's `StatefulEnvResolve` / `LookaheadResolve`), it implements
+   `prepare(queries)`, `run(N, compiled_steps)`, `extract_summaries(N)`,
+   `build_compiled_steps(...)`. `UnifiedSearcher` delegates the entire
+   ranking-pool lifecycle to it; the `query_repr` runs on the extracted
+   summaries.
+2. **Generic** — when `resolve` is a function-style `ResolutionOp`,
+   `search_and_score` is `torch.compile`'d into one closure.
+
+### Mid-life mutation lives on the primitives
+
+```python
+searcher.select.set_gumbel_scale(0.3)        # GreedySelect / BeamSelect / PolicySelect
+searcher.resolve.configure(n_corruptions=5)  # StatefulEnvResolve
+```
+
+`UnifiedSearcher.set_gumbel_scale` / `configure` / `reset_stats` /
+`aggregate_stats` are convenience forwarders.
+
+### Strategy factory
+
+`search/__init__.py:make_searcher(strategy=...)` builds a `UnifiedSearcher`
+with the right `Select` for `"exhaustive"` / `"greedy"` / `"beam"` /
+`"multi_restart"` / `"direct"`. `MultiRolloutSearcher` and
+`MultiRestartSearcher` are higher-order wrappers (K rollouts × Gumbel
+noise; per-query max).
+
+---
+
+## 7. Evaluation pipeline (one consumer of `Searcher`)
+
+`eval/ranking_evaluator.py:RankingEvaluator` is the shared chunked
+loop + static-buffer + CUDA-graph evaluator. It consumes a `ScoreFn`:
 
 ```python
 ScoreFn = Callable[[Tensor, Tensor, Mode], Tensor]
-#                  q_buf [B, 3]  pool_buf [B, P]  mode  →  scores [B, P]
-#                                       │                         │
-#                                       │                         └── one score per slot
-#                                       └── P = K_fixed + 1
-#                                           slot 0   = true entity (lives at idx 0 by construction)
-#                                           slot 1.. = K_fixed sampled candidates
+#                  q_buf [B, 3]  pool_buf [B, C]  mode  →  scores [B, C]
 ```
 
-The narrow inner contract. `q_buf` rows are `(relation, head, tail)`.
-The pool always carries the true entity in slot 0 plus `K_fixed` corruption
-candidates in slots 1..P-1, so input and output both have length `P` (not
-`P + 1` — the `+1` for the true entity is already baked into `P`). This
-is the **only** thing that goes inside the compile boundary.
-
-**Why both `q_buf` and `pool_buf`?** Corruption varies one column of the
-triple, not all three. `pool_buf` holds only that varying entity per slot;
-`q_buf` holds the two columns that stay fixed across all P slots for a
-query. The scorer reconstructs full triples by substituting the corruption
-column from `pool_buf` into `q_buf`:
-
-```
-mode = "tail":  triple = (q_buf[:, 1],  q_buf[:, 0],  pool_buf[:, k])
-mode = "head":  triple = (pool_buf[:, k], q_buf[:, 0],  q_buf[:, 2])
-```
-
-This split is ~3× smaller than carrying full triples in the pool and makes
-the mode's job semantic: `mode` literally names which column gets
-replaced.
-
-### `RankingEvaluator` (`eval/ranking_evaluator.py`)
-
-```python
-class RankingEvaluator:
-    def __init__(self, scorer: ScoreFn, candidates: CandidateSource, *,
-                  batch_size, modes=("head","tail"), device,
-                  compile=True, compile_mode="reduce-overhead",
-                  tie_handling="average", seed=0): ...
-
-    @torch.no_grad()
-    def evaluate(self, triples: Tensor, *, track_scores=False) \
-        -> RankingResult: ...
-```
-
-Two-phase lifecycle:
-- **Setup-once** (`__init__`): allocates static-address buffers, compiles the
-  scorer once per mode (mode baked into the closure → specialized graph per
-  mode, no runtime branch).
-- **Run-many** (`evaluate`): chunked loop. CUDA graph captures on first
-  scorer call; replays for subsequent ones.
-
-### `RankingResult` (`eval/ranking_evaluator.py`)
-
-```python
-@dataclass(frozen=True)
-class RankingResult:
-    triples: Tensor                  # [N, 3]
-    modes: Tuple[Mode, ...]          # M
-    ranks: Tensor                    # [M, N] — 1-based
-    valid: Tensor                    # [M, N] — False = padded/skipped
-    scores: Optional[Tensor] = None  # [M, N, P] iff track_scores
-    elapsed_s: float = 0.0
-
-    def metrics(...)             -> Dict[str, float]
-    def metrics_per_mode(...)    -> Dict[Mode, Dict[str, float]]
-    def metrics_per_group(gids,) -> Dict[int, Dict[str, float]]
-    def metrics_per_relation(...) -> Dict[int, Dict[str, float]]
-```
-
-Aggregations are **methods on the result**, computed on demand. The same
-`RankingResult` answers many questions (overall, per-mode, per-relation,
-per-depth) without re-running the model.
-
----
-
-## 3. The Searcher path (`search/`)
-
-For methods that don't naturally fit `(q_buf, pool_buf, mode) → [B, P]`,
-tkk adds a second contract one level above:
-
-```python
-class Searcher(Protocol):
-    def __call__(self, queries: Tensor) -> Dict[str, Tensor]:
-        # queries [N, 3] → {mode_key: scores [N]}
-        ...
-```
-
-Plus an adapter that bridges the two:
-
-```python
-def make_scorer_from_searcher(searcher: Searcher, mode_key: str) -> ScoreFn:
-    # eager reshape: [B, 3] queries × [B, P] pool  ─▶  flat [P*B, 3] K-major
-    # call searcher(flat) → result[mode_key] → reshape back to [B, P]
-```
-
-The K-major flat layout `[k*B + b]` is the convention DpRL's compiled CUDA-
-graph rollout writes into. The adapter is eager — outside the compile
-boundary — so the compiled scorer keeps its `(q_buf, pool_buf) → [B, P]`
-shape.
+`q_buf` rows are `(relation, head, tail)`; `pool_buf` carries the true
+entity in slot 0 + K corruption candidates in slots 1..C-1 (so
+`C = K + 1`). `mode ∈ {"head", "tail"}` selects which column gets
+substituted from `pool_buf`. The pool is pre-filtered (known-true
+triples excluded by the sampler).
 
 Two paths produce a `ScoreFn`:
 
-- **Direct**: caller writes `ScoreFn` themselves. ns's KGE-only baseline does
-  this — `model.score(h, r, t)` over the substituted pool.
-- **Via Searcher**: caller writes a `Searcher`, lets `make_scorer_from_searcher`
-  do the reshape. DpRL's PPO and Lookahead use this.
-
-The evaluator can't tell the two paths apart.
-
-### What `mode_key` refers to
-
-The `mode_key` argument of `make_scorer_from_searcher` is **NOT** the
-head/tail corruption side — that's `Mode = Literal["head", "tail"]` and
-varies per evaluator call. `mode_key` is the **scoring-formula name** that
-the Searcher's returned dict is keyed by, and it's frozen at adapter
-construction. Concretely:
+- **Direct** — caller writes `ScoreFn` themselves (ns's KGE-only baseline:
+  `model.score(h, r, t)` over the substituted pool).
+- **Via Searcher** — `make_scorer_from_searcher(searcher, mode_key)`
+  reshapes the pool to K-major flat `[C*B, 3]`, calls
+  `searcher(flat) → {mode_key: [N]}`, reshapes back to `[B, C]`. The
+  reshape is eager — outside the compile boundary.
 
 ```
-Searcher.__call__(queries)
-     ↓
-{ "logprob":         scores [N],     ← scoring-formula names
-  "proof_binary":    scores [N],
-  "depth_weighted":  scores [N],
-  ...                                   }
-     ↓ make_scorer_from_searcher(searcher, mode_key="logprob")
-ScoreFn(q_buf, pool_buf, mode="head" | "tail")  ← Mode picks corruption side
-     ↓
-[B, P] scores
+test triples [N, 3]
+        │
+        ▼
+   ┌─────────────────────────────────────────────────────┐
+   │  RankingEvaluator (chunked loop, static buffers)    │
+   │                                                     │
+   │  per chunk:                                         │
+   │    sampler  → (cand_ents [B,K], cand_valid [B,K])   │
+   │    pool_buf[:, 0] = q[:, true_col]                  │
+   │    pool_buf[:, 1:] = cand_ents                      │
+   │    cudagraph_mark_step_begin()                      │
+   │    pool_scores = ScoreFn(q_buf, pool_buf, mode)     │  ◀── compile boundary
+   │    chunk_ranks = compute_ranks(pool_scores, ...)    │
+   └─────────────────────────────────────────────────────┘
+        │
+        ▼
+   RankingResult → MRR, Hits@1/3/10
 ```
 
-Two orthogonal axes: `mode_key` (which formula) is config-time; `Mode`
-(which corruption) is per-call.
-
----
-
-## 4. Trajectory scoring (the formulas behind `mode_key`)
-
-The Searcher Protocol allows each method to emit any number of named
-scores per query. Concretely those scores are produced by a
-**`QueryRepr`** — the framework's per-trajectory → scalar reducer.
-
-For methods whose scoring depends on the trajectory's running statistics
-(success bit, total log-prob, depth, value-head outputs, etc.), tkk
-provides a single unified dispatcher:
-
-```python
-class TrajectoryScoreQueryRepr(nn.Module):
-    """~36 trajectory-scoring formulas in one Protocol-conforming class."""
-
-    def __init__(self, mode: str, *, alpha=5.0, beta=2.0,
-                 fail_penalty=1000.0, partial_weight=0.5,
-                 endf_penalty=200.0): ...
-
-    def forward(self, traj_repr: Repr, evidence) -> Repr:
-        # reads traj_repr.summaries[...]
-        # returns Repr.scores [B]
-```
-
-This replaces the older split between proof-search modes
-(`ProofScoreQueryRepr`) and rollout modes (`PolicyRolloutQueryRepr`) —
-both were "scalar score from trajectory summaries"; the split was
-implementation drift from each upstream search choosing which summaries
-to track.
-
-### How summaries flow
-
-`Repr.summaries: Optional[Dict[str, Tensor]]` carries trajectory-level
-named tensors. The upstream Searcher populates the subset it actually
-tracks; the QueryRepr reads what its mode needs.
-
-Standard summary keys (canonical names; missing → loud `KeyError`):
-
-```
-success                [B] bool    trajectory succeeded?
-depths                 [B] long    final depth reached
-cumulative_log         [B]         Σ log p(action_d) along trajectory
-min_step_log           [B]         min_d log p(action_d)
-final_step_log         [B]         log p(action_{D-1})
-final_state_score      [B]         KGE state-score at terminal step
-best_cumulative        [B]         max_d Σ_{d'≤d} log p(action_{d'})
-best_prefix_avg        [B]         max_d (Σ_{d'≤d} log p) / d
-best_ever_state_score  [B]         max state-score across all steps
-sbr_body_min           [B]         min over body-atom SBR scores
-endf                   [B] bool    rollout ended via END action?
-p_end                  [B]         step-0 P(end action)
-v_pos, v_neg           [B]         step-0 value heads
-kge_embed              [B]         KGE-policy embedding similarity
-cum_value              [B]         accumulated value-head signal
-value_steps            [B] long    #steps the value signal accumulated
-```
-
-PPO's compiled rollout populates ~6 of these (success, depths,
-cumulative_log, p_end, v_pos, v_neg, kge_embed); proof-search populates
-~10 (success, depths, cumulative_log, min_step_log, best_cumulative,
-sbr_body_min, final_step_log, final_state_score, best_ever_state_score,
-best_prefix_avg). Each mode reads only the keys it needs.
-
-### Mode catalogue
-
-`ALL_TRAJECTORY_SCORE_MODES` enumerates the ~36 supported keys. Headline
-groups:
-
-- **Trajectory aggregations** (no proved/failed branch): `no_cliff`,
-  `no_cliff_sqrt`, `no_cliff_log`, `best_avg`, `max_intermediate_nc`,
-  `trajectory_range`, `raw_cumulative`, `geometric_mean`.
-- **Binary success/fail formulas**: `proof_logprob`, `leaf_only`,
-  `final_state`, `min_step`, `best_partial`, `sbr`, `max_intermediate`,
-  `depth_weighted_quotient` (was `ProofScore.depth_weighted` =
-  `cum_log / d`).
-- **RL log-prob formulas**: `logprob`, `logprob_endf`, `proof_binary`,
-  `proof_bonus`, `logprob_clipped`, `proof_rank`, `success_only`,
-  `logprob_scaled_penalty`, `depth_weighted_bonus` (was
-  `PolicyRollout.depth_weighted` = `lp + β·d`).
-- **Step-0 policy signals**: `value_pos`, `end_prob`, `hybrid_end`,
-  `hybrid_value`, `combined`, `value_diff`, `endf_kge_embed`.
-- **KGE-embed hybrids**: `kge_embed`, `kge_embed_hybrid`,
-  `logprob_kge_embed`.
-- **RL value modes**: `rl_value`, `rl_value_mean`, `rl_value_neg`,
-  `rl_value_mean_neg`.
-
-The only legacy collision (`depth_weighted` had different math on each
-side) is resolved by explicit suffix: `_quotient` for the proof-search
-variant, `_bonus` for the rollout variant.
-
----
-
-## 5. Static-buffer layout
-
-Allocated once in `__init__`; addresses captured by the CUDA graph.
-Throughout this section `P = K_fixed + 1` (the `+1` is the slot-0 true
-entity; `K_fixed` is the sampler's per-query candidate count).
-
-```
-_q_buf          [B, 3]   int64    test triple rows (padded if last chunk)
-_pool_buf       [B, P]   int64    col 0: true ent ; col 1..: K_fixed candidates
-_valid_buf      [B, P]   bool     True for active+valid slots
-_true_idx_const [B]      int64    all zeros (true entity always at slot 0)
-```
-
-Eager scratch (outside the compile boundary):
-
-```
-_pool_scratch   [B, P]   int64
-_valid_scratch  [B, P]   bool
-```
-
----
-
-## 6. Filtering happens at two points
+### Filtering at two points
 
 | Stage | What's filtered | Where |
 |---|---|---|
-| Sampling | Known-true triples (train ∪ val ∪ test) excluded from the corruption pool | `Sampler.corrupt(filter=True)` inside `SamplerCandidates.candidates` |
-| Pool assembly | Sampler shortfalls / per-relation domain restrictions marked `valid=False` | `SamplerCandidates.candidates` post-pad |
-| Scoring | nothing — every slot is scored, shape stays `[B, P]` | (compiled scorer, fixed shape) |
-| Ranking | invalid slots set to `-inf` → can't out-rank the truth | `compute_ranks(scores, true_idx, valid_mask)` |
+| Sampling | Known-true triples (train ∪ val ∪ test) | `Sampler.corrupt(filter=True)` inside `SamplerCandidates.candidates` |
+| Pool assembly | Sampler shortfalls / domain restrictions → `valid=False` | `SamplerCandidates.candidates` post-pad |
+| Scoring | (none — every slot scored, shape stays `[B, C]`) | (compiled) |
+| Ranking | invalid slots → `-inf` → can't out-rank truth | `compute_ranks(...)` |
 
-Every layer is shape-preserving. Validity flows as a parallel mask, never
-as a tensor reshape — that's what keeps the compile boundary clean.
+Validity flows as a parallel mask, never as a reshape — that's what keeps
+the compile boundary clean.
 
 ---
 
-## 7. Per-repo extension points
+## 8. Method instantiations (the 6-tuples)
 
-| What you customize | What you reuse |
-|---|---|
-| The score function (raw KGE, fused SBR, PPO rollout) | `RankingEvaluator`, `RankingResult`, `compute_ranks` |
-| The candidate source (sampled-K vs full vocab; domain restrictions) | the chunked loop, the static buffers |
-| The result envelope (DpRL wraps `RankingResult` in its own `EvalResults`) | `evaluate`'s body — only the wrapper subclass overrides |
+From `framework.pdf` §9.1:
 
-The chunked loop is **final**: override `evaluate` only to wrap the result in
-a different envelope. To change scoring, pass a different `scorer=`. To
-change candidate generation, pass a different `candidates=`.
+| Method | resolve | atom_repr | state_repr | select | traj_repr | query_repr |
+|---|---|---|---|---|---|---|
+| **SBR** | Enum | KGEScore | TNorm(min) | Exhaustive | TNorm(min) | Max |
+| **DCR** | Enum | KGEBoth | PhiPsi | Exhaustive | TNorm(min) | Max |
+| **R2N** | Enum | KGEEmbed | Concat | Exhaustive | RuleMLP | MLPSum |
+| **DPrL** | SLD | MLP | Sum | Beam/Sample | PolicyProduct | Sum |
+| **SBR-Greedy** | Enum | KGEScore | TNorm | Greedy | TNorm | Max |
+| **SBR-Beam(k)** | Enum | KGEScore | TNorm | Beam(k) | TNorm | Max |
 
-| Repo | Scorer construction | Evaluator class |
+These are exercised end-to-end in `tests/search/test_method_tuples.py`.
+
+---
+
+## 9. Per-repo extension points
+
+| Repo | Builds the searcher via | Plugs into eval via |
 |---|---|---|
-| **torch-ns** | `experiments/model.py:KGEModel.eval_scores` is a `ScoreFn` directly | uses `RankingEvaluator` straight, called from `experiments/evaluator.py:run_unified_ranking_eval` |
-| **DpRL-KGR** | `PolicyRolloutSearcher` (or `LookaheadSearcher` subclass) → `make_scorer_from_searcher(s, mode_key)` → `ScoreFn` | `ppo/evaluator.py:PPOEvaluator(RankingEvaluator)` |
+| **torch-ns** | direct grounder + framework primitives (SBR/DCR/R2N) | `experiments/model.py:KGEModel.eval_scores` (a `ScoreFn` directly) |
+| **DpRL-KGR (PPO)** | `make_ppo_searcher(ppo, scoring_method)` → `UnifiedSearcher(StatefulEnvResolve + PolicySelect + TrajectoryScoreQueryRepr or KGEEngineQueryRepr)` — or `DirectSearcher` for `reasoning_mode="direct_kge"` | `make_scorer_from_searcher(s, mode_key)` |
+| **DpRL-KGR (Lookahead)** | `LookaheadSearcher` composes `UnifiedSearcher(LookaheadResolve + LookaheadProofScoreQueryRepr)` | same |
 
-DpRL's subclass is thin — it owns the searcher lifecycle (set/swap/configure
-n_corruptions) but the chunked loop is inherited unmodified.
-
----
-
-## 8. The three views
-
-### View 1 — Layered architecture & ownership
-
-Where each piece lives and which repo customizes what.
-
-```
-   ┌──────────────────────────────────────────────────────────────────────────────┐
-   │  test_triples [N, 3]                                                         │
-   │       │                                                                      │
-   │       ▼                                                          (caller)    │
-   │  ╔══════════════════════════════════╗   ns:    experiments/evaluator.py      │
-   │  ║       ENTRY  POINT               ║   DpRL:  ppo/evaluator.py              │
-   │  ║  evaluator.evaluate(triples)     ║─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│
-   │  ╚══════════════════════════════════╝                                        │
-   │                                                                              │
-   │     ┌─────────────────────────────────────────────────┐  ◀── tkk-owned       │
-   │     │           RankingEvaluator (FINAL)              │      eval/           │
-   │     │    chunked loop · static buffers · graph cap.   │      ranking_evaluator│
-   │     └─────────────────────────────────────────────────┘                      │
-   │              │                  │                  │                         │
-   │   ┌──────────▼──┐     ┌─────────▼──────┐    ┌──────▼──────┐                  │
-   │   │CandidateSrc │     │   ScoreFn      │    │compute_ranks│                  │
-   │   │  Protocol   │     │  Protocol      │    │ + metrics   │                  │
-   │   └──────────┬──┘     └─────────┬──────┘    └──────┬──────┘                  │
-   │              │                  │                  │                         │
-   │     ┌────────▼────┐    ┌────────▼─────────────┐    │                         │
-   │     │ Sampler-    │    │  • direct (ns: KGE)  │    │   tkk reuses everywhere │
-   │     │ Candidates  │    │  • via Searcher      │    │                         │
-   │     │ (tkk std)   │    │      ─ adapter ──┐   │    │                         │
-   │     └─────────────┘    └──────────────────┼───┘    │                         │
-   │                                           │        │                         │
-   │                    ┌──────────────────────▼───┐    │                         │
-   │                    │   make_scorer_from_      │    │                         │
-   │                    │   searcher(s, mode_key)  │    │                         │
-   │                    │   K-major flat reshape   │    │                         │
-   │                    └──────────────┬───────────┘    │                         │
-   │                                   │                │                         │
-   │            ┌──────────────────────┼──────────┐     │                         │
-   │            ▼                      ▼          ▼     │                         │
-   │     ┌────────────┐       ┌────────────┐  ┌─────────────┐                     │
-   │     │ Greedy/    │       │ Policy-    │  │ Lookahead-  │   ◀── method-       │
-   │     │ Beam/      │       │ Rollout-   │  │ Searcher    │       specific      │
-   │     │ Multi-     │       │ Searcher   │  │ (subclass)  │                     │
-   │     │ Restart    │       │ (compiled  │  └─────────────┘                     │
-   │     │ (tkk ref)  │       │  CUDA-graph│                                      │
-   │     └────────────┘       │  rollout)  │   tkk:  search/*                     │
-   │                          └────────────┘   DpRL: ppo/policy_rollout_searcher  │
-   │                                                  lookahead/searcher          │
-   └──────────────────────────────────────────────────────────────────────────────┘
-```
-
-### View 2 — Per-chunk dataflow + compile boundary
-
-What runs eagerly vs inside the compiled CUDA graph.
-
-```
-                    ┌─ EAGER ──────────────┐  ┌─ COMPILE ─┐  ┌─ EAGER ──────────────┐
-                    │                      │  │           │  │                      │
-   triples ───────▶ │  q_buf.copy_(slice)  │  │           │  │                      │
-   [N, 3]           │                      │  │           │  │                      │
-                    │  candidates.candidates                │  │                      │
-                    │   (q_slice, mode)    │  │           │  │                      │
-                    │   ─▶ cand_ents [B,K] │  │           │  │                      │
-                    │      cand_valid [B,K]│  │           │  │                      │
-                    │                      │  │           │  │                      │
-                    │  pool_scratch[:,0] = │  │           │  │                      │
-                    │    q[:, true_col]    │  │           │  │                      │
-                    │  pool_scratch[:,1:] =│  │           │  │                      │
-                    │    cand_ents         │  │           │  │                      │
-                    │  pool_buf.copy_(     │  │           │  │                      │
-                    │    pool_scratch)     │  │           │  │                      │
-                    │  valid_buf.copy_(...)│  │           │  │                      │
-                    │                      │  │           │  │                      │
-                    │  cudagraph_mark_     │  │           │  │                      │
-                    │    step_begin()  ────┼─▶│           │  │                      │
-                    │                      │  │ScoreFn    │  │                      │
-                    │                      │  │(q_buf,    │  │                      │
-                    │                      │  │ pool_buf, │  │                      │
-                    │                      │  │ mode)     │  │                      │
-                    │                      │  │  ─▶ [B,P] │  │                      │
-                    │                      │  │           │  │                      │
-                    │                      │  │ replays   │  │                      │
-                    │                      │  │ static    │  │                      │
-                    │                      │  │ buffers   │  │                      │
-                    │                      │  └─────┬─────┘  │                      │
-                    │                      │        ▼        │  compute_ranks(      │
-                    │                      │  pool_scores    │    pool_scores,      │
-                    │                      │                 │    true_idx=zeros,   │
-                    │                      │                 │    valid_mask)       │
-                    │                      │                 │   ─▶ chunk_ranks[B'] │
-                    │                      │                 │                      │
-                    │                      │                 │  ranks_out[m, qs:] = │
-                    │                      │                 │  valid_out[m, qs:] = │
-                    │                      │                 │                      │
-                    └──────────────────────┘  └───────────┘  └──────────────────────┘
-
-       Static-address tensors: q_buf, pool_buf, valid_buf, true_idx_const
-       Loop: for chunk in N // B:  for mode in modes:  ScoreFn(...)
-       One CUDA graph per mode   (mode is Python str, baked into closure)
-```
-
-### View 3 — Two paths to a `ScoreFn`
-
-How the two contract surfaces (direct `ScoreFn` vs `Searcher` + adapter)
-both end up satisfying the evaluator's interface.
-
-```
-                            RankingEvaluator expects:
-                            ScoreFn(q_buf [B,3], pool_buf [B,P], mode) ─▶ [B, P]
-                                          ▲
-                          ┌───────────────┴───────────────┐
-                          │                               │
-              ┌───────────┴───────────┐       ┌───────────┴────────────────┐
-              │   PATH A — direct     │       │   PATH B — via Searcher    │
-              │                       │       │                            │
-              │  caller writes the    │       │  caller writes a Searcher: │
-              │  reshape themselves   │       │  (queries [N,3]) ─▶        │
-              │                       │       │      {mode_key: [N]}       │
-              │  e.g. ns KGEModel.    │       │                            │
-              │  eval_scores:         │       │  ↓ eager reshape (adapter) │
-              │    h, r, t = pool     │       │                            │
-              │     into model.score  │       │  make_scorer_from_searcher │
-              │     ─▶ [B, P]         │       │   • triples [P, B, 3]      │
-              │                       │       │   • flat [P*B, 3]   K-major│
-              │  no adapter needed    │       │   • searcher(flat) ─▶ [N]  │
-              │                       │       │   • result.view(P,B).t()   │
-              │                       │       │     ─▶ [B, P]              │
-              └───────────────────────┘       └────────────────────────────┘
-                          ▲                               ▲
-              used by:    │                               │  used by:
-              ns          │                               │  DpRL — PolicyRollout-
-              (KGE-only   │                               │  Searcher (compiled
-              baseline)   │                               │  CUDA-graph rollout) +
-                          │                               │  LookaheadSearcher
-
-
-      Either path is one ScoreFn function. The evaluator can't tell them apart.
-      Filtering (drop known-true triples) happens INSIDE the candidate source —
-      both paths see only sampler-filtered candidates in pool_buf.
-```
+Common pattern:
+- Customize `ScoreFn` (raw KGE / fused SBR / PPO rollout) — reuse
+  `RankingEvaluator`, `RankingResult`, `compute_ranks`.
+- Customize `CandidateSource` (sampled-K vs full-vocab; domain restrictions)
+  — reuse the chunked loop + static buffers.
+- Customize the result envelope (DpRL wraps `RankingResult` in
+  `EvalResults`) — only override the wrapping.
 
 ---
 
-## 9. Why the contract is shaped this way
+## 10. Why the contract is shaped this way
 
-- **One scoring call per (chunk, mode)** maximizes batch-level GPU work, gives
-  CUDA graph capture a clean target, and lets mode-specialized graphs avoid
-  runtime branching.
+- **One scoring call per (chunk, mode)** maximizes batch-level GPU work,
+  gives CUDA-graph capture a clean target, and lets mode-specialized
+  graphs avoid runtime branching.
 - **Static buffers + `mark_static_address`** enable
   `mode="reduce-overhead"` to actually replay graphs instead of retracing.
-- **Aggregation as result methods, not eval-time work** lets the same
+- **Aggregations as result methods, not eval-time work** lets the same
   `RankingResult` answer many questions (overall, per-mode, per-relation,
   per-depth) without re-running the model.
 - **K-major flat pool as the Searcher convention** lets DpRL's compiled
-  rollout treat the entire pool as one big batch (no per-query loop in the
-  compiled region) while keeping the evaluator's `[B, P]` interface intact.
-- **Filtering as a mask, not a reshape**: invalid slots stay in the buffer
-  (so shape never changes), but contribute nothing to the rank — compile-friendly.
+  rollout treat the entire pool as one big batch (no per-query loop in
+  the compiled region) while keeping the evaluator's `[B, C]` interface.
+- **Filtering as a mask, not a reshape**: invalid slots stay in the
+  buffer (shape never changes) but contribute nothing to the rank.
+- **Mid-life mutation on primitives**: `set_gumbel_scale` writes into a
+  static-address scalar buffer, so the next replay sees the new value
+  without re-tracing the graph.
+
+---
+
+## 11. Pointers
+
+- `framework.pdf` — canonical spec (§1–§13). This README is the
+  implementation orientation; the PDF is the math + theory.
+- `tests/framework/` — primitive coverage (one test file per slot).
+- `tests/search/test_method_tuples.py` — end-to-end exercises of the
+  6-tuples in §8.
+- `tests/search/test_unified_searcher.py` — `UnifiedSearcher` capture-mode
+  + setter-propagation coverage.
+- `repr.py` — the `Repr` carrier docstring (the universal flow object).

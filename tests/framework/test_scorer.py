@@ -18,7 +18,7 @@ from .conftest import make_structured_evidence
 
 
 def test_exhaustive_search_and_score_shape():
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
 
     def fake_resolve(state):
         return ev
@@ -41,7 +41,7 @@ def test_exhaustive_search_and_score_shape():
 
 
 def test_build_scorer_returns_dict():
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
 
     def fake_resolve(state):
         return ev
@@ -79,19 +79,19 @@ def test_q_select_can_read_evidence_for_future_compat():
             self.lambdas = nn.Parameter(torch.zeros(2))  # 2 rules
 
         def forward(self, evidence, s_repr):
-            v = s_repr.scores                       # [B, C, D] (per-state per-depth)
-            r_idx = evidence.rule_idx               # [B, C, D] structured
-            h = self.lambdas[r_idx]                 # [B, C, D]
+            v = s_repr.scores                       # [B, P, D] (per-state per-depth)
+            r_idx = evidence.rule_idx               # [B, P, D] structured
+            h = self.lambdas[r_idx]                 # [B, P, D]
             q = h + v
-            # Reduce D to get per-candidate Q, then argmax over C
-            q_per_c = q.mean(dim=-1)                # [B, C]
-            chosen = q_per_c.argmax(dim=-1, keepdim=True)
+            # Reduce D to get per-candidate Q, then argmax over P
+            q_per_p = q.mean(dim=-1)                # [B, P]
+            chosen = q_per_p.argmax(dim=-1, keepdim=True)
             return None, SelectInfo(
                 chosen_indices=chosen,
-                chosen_scores=torch.gather(q_per_c, -1, chosen),
+                chosen_scores=torch.gather(q_per_p, -1, chosen),
             )
 
-    ev = make_structured_evidence(B=2, C=3, D=2, M=2)
+    ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=7, num_relations=5, dim=8)
     select = QSelect()
 

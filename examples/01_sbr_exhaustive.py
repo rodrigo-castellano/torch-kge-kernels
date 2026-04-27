@@ -36,19 +36,19 @@ from kge_kernels.models import TransE
 class ToyEvidence:
     """Minimal ``ProofEvidence``-satisfying dataclass for this example."""
 
-    body: Tensor           # [B, C, D, M, 3]
-    mask: Tensor           # [B, C]
+    body: Tensor           # [B, P, D, M, 3]
+    mask: Tensor           # [B, P]
     count: Tensor          # [B]
-    rule_idx: Tensor       # [B, C, D]
-    body_count: Tensor     # [B, C, D]
+    rule_idx: Tensor       # [B, P, D]
+    body_count: Tensor     # [B, P, D]
     D: int = 0
     M: int = 0
     head: Optional[Tensor] = None
 
     @property
     def body_flat(self) -> Tensor:
-        B, C, D, M, _ = self.body.shape
-        return self.body.reshape(B, C, D * M, 3)
+        B, P, D, M, _ = self.body.shape
+        return self.body.reshape(B, P, D * M, 3)
 
     @property
     def rule_idx_top(self) -> Tensor:
@@ -60,11 +60,11 @@ class ToyEvidence:
 
     @property
     def body_atom_mask_flat(self) -> Tensor:
-        B, C, D = self.body_count.shape
+        B, P, D = self.body_count.shape
         M = self.body.shape[3]
         m_idx = torch.arange(M, device=self.body_count.device)
         per_depth = m_idx < self.body_count.unsqueeze(-1)
-        return per_depth.reshape(B, C, D * M)
+        return per_depth.reshape(B, P, D * M)
 
 
 def main() -> None:
@@ -80,21 +80,21 @@ def main() -> None:
 
     # Hand-build a toy evidence object representing 2 queries, each with
     # 3 candidate proofs, each proof of depth 1 with 2 body atoms.
-    B, C, D, M = 2, 3, 1, 2
+    B, P, D, M = 2, 3, 1, 2
     body = torch.stack(
         [
-            torch.randint(num_relations, (B, C, D, M)),
-            torch.randint(num_entities, (B, C, D, M)),
-            torch.randint(num_entities, (B, C, D, M)),
+            torch.randint(num_relations, (B, P, D, M)),
+            torch.randint(num_entities, (B, P, D, M)),
+            torch.randint(num_entities, (B, P, D, M)),
         ],
         dim=-1,
     )
     ev = ToyEvidence(
         body=body,
-        mask=torch.ones(B, C, dtype=torch.bool),
-        count=torch.full((B,), C, dtype=torch.long),
-        rule_idx=torch.zeros(B, C, D, dtype=torch.long),
-        body_count=torch.full((B, C, D), M, dtype=torch.long),
+        mask=torch.ones(B, P, dtype=torch.bool),
+        count=torch.full((B,), P, dtype=torch.long),
+        rule_idx=torch.zeros(B, P, D, dtype=torch.long),
+        body_count=torch.full((B, P, D), M, dtype=torch.long),
         D=D,
         M=M,
     )
