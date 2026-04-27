@@ -27,6 +27,7 @@ from .protocols import (
     TrajRepr,
 )
 from .query_repr import (
+    ALL_TRAJECTORY_SCORE_MODES,
     ConceptMaxQueryRepr,
     LogSumExpQueryRepr,
     MaxQueryRepr,
@@ -35,6 +36,7 @@ from .query_repr import (
     PolicyRolloutQueryRepr,
     ProofScoreQueryRepr,
     SumQueryRepr,
+    TrajectoryScoreQueryRepr,
 )
 from .repr import Repr
 from .scorer import ScorerFn, build_scorer, search_and_score
@@ -120,6 +122,8 @@ __all__ = [
     "PolicyRolloutQueryRepr",
     "ProofScoreQueryRepr",
     "SumQueryRepr",
+    "TrajectoryScoreQueryRepr",
+    "ALL_TRAJECTORY_SCORE_MODES",
     # Select
     "BeamSelect",
     "ExhaustiveSelect",
