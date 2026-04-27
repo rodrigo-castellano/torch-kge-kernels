@@ -2,17 +2,17 @@
 
 Per framework.pdf §11, every method is a 6-tuple
 ``(resolve, atom_repr, state_repr, select, traj_repr, query_repr)``.
-The unified :class:`UnifiedSearcher` (see ``searcher.py``) composes
+The unified :class:`ProofScorer` (see ``searcher.py``) composes
 that 6-tuple plus a :class:`SearchSpec` and a capture-mode flag. The
 :func:`make_searcher` factory below dispatches on a string strategy
 name to choose the right :class:`Select` and wire it into a
-``UnifiedSearcher`` instance.
+``ProofScorer`` instance.
 
   - ``"exhaustive"``: ``ExhaustiveSelect`` + ``max_depth=1``
     (canonical for SBR / DCR / R2N).
   - ``"greedy"``: ``GreedySelect`` (DpRL eval default).
   - ``"beam"``: ``BeamSelect`` (requires ``beam_width=...``).
-  - ``"multi_restart"``: N independent ``UnifiedSearcher`` instances,
+  - ``"multi_restart"``: N independent ``ProofScorer`` instances,
     per-query max across restarts; the first restart is deterministic.
 
 Higher-order Searchers:
@@ -21,7 +21,7 @@ Higher-order Searchers:
     times with different Gumbel scales, takes the per-query max.
   - :class:`DirectSearcher` — baseline that bypasses search and scores
     triples directly via an :class:`AtomRepr`. Kept distinct from
-    :class:`UnifiedSearcher` because it doesn't compose the 6-tuple.
+    :class:`ProofScorer` because it doesn't compose the 6-tuple.
 
 The :class:`Searcher` Protocol and :func:`make_scorer_from_searcher`
 adapter let any Searcher feed
@@ -43,15 +43,15 @@ from .multirollout import MultiRolloutSearcher
 from .searcher import (
     CaptureMode,
     Mode,
+    ProofScorer,
     ScoreFn,
     Searcher,
     SearchSpec,
-    UnifiedSearcher,
     make_scorer_from_searcher,
 )
 
 
-def _build_unified(
+def _build_proof_scorer(
     *,
     select,
     spec: Optional[SearchSpec],
@@ -59,8 +59,8 @@ def _build_unified(
     capture: CaptureMode,
     name: str,
     **kw: Any,
-) -> UnifiedSearcher:
-    """Internal helper: construct a ``UnifiedSearcher`` from raw kwargs.
+) -> ProofScorer:
+    """Internal helper: construct a ``ProofScorer`` from raw kwargs.
 
     ``spec`` may be supplied directly; otherwise a default
     :class:`SearchSpec` is built from ``batch_size`` (required when
@@ -72,7 +72,7 @@ def _build_unified(
             spec = SearchSpec(batch_size=1)
         else:
             spec = SearchSpec(batch_size=batch_size)
-    return UnifiedSearcher(
+    return ProofScorer(
         select=select,
         spec=spec,
         capture=capture,
@@ -102,11 +102,11 @@ def make_searcher(
     """Factory: build a :class:`Searcher` by string name.
 
     Recognized strategies:
-      - ``"exhaustive"``: ``UnifiedSearcher`` with ``ExhaustiveSelect``.
-      - ``"greedy"``: ``UnifiedSearcher`` with ``GreedySelect``.
-      - ``"beam"``: ``UnifiedSearcher`` with ``BeamSelect`` (requires ``beam_width``).
+      - ``"exhaustive"``: ``ProofScorer`` with ``ExhaustiveSelect``.
+      - ``"greedy"``: ``ProofScorer`` with ``GreedySelect``.
+      - ``"beam"``: ``ProofScorer`` with ``BeamSelect`` (requires ``beam_width``).
       - ``"multi_restart"``: :class:`MultiRestartSearcher` over N
-        beam-equipped ``UnifiedSearcher`` instances.
+        beam-equipped ``ProofScorer`` instances.
       - ``"direct"``: :class:`DirectSearcher` (baseline).
 
     When ``K_rollouts > 1``, the result is auto-wrapped in
@@ -135,7 +135,7 @@ def make_searcher(
                 max_D=spec.max_D,
                 max_M=spec.max_M,
             )
-        base: Searcher = _build_unified(
+        base: Searcher = _build_proof_scorer(
             select=ExhaustiveSelect(),
             spec=spec,
             batch_size=batch_size,
@@ -144,7 +144,7 @@ def make_searcher(
             **from_kw,
         )
     elif strategy == "greedy":
-        base = _build_unified(
+        base = _build_proof_scorer(
             select=GreedySelect(state_factory=state_factory, gumbel_scale_buf=gumbel_scale_buf),
             spec=spec or (
                 SearchSpec(batch_size=batch_size, max_depth=max_depth)
@@ -156,7 +156,7 @@ def make_searcher(
             **kw,
         )
     elif strategy == "beam":
-        base = _build_unified(
+        base = _build_proof_scorer(
             select=BeamSelect(
                 k=beam_width,
                 state_factory=state_factory,
@@ -207,10 +207,10 @@ __all__ = [
     "Mode",
     "MultiRestartSearcher",
     "MultiRolloutSearcher",
+    "ProofScorer",
     "ScoreFn",
     "SearchSpec",
     "Searcher",
-    "UnifiedSearcher",
     "make_scorer_from_searcher",
     "make_searcher",
 ]

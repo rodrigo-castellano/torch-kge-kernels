@@ -27,9 +27,9 @@ from kge_kernels.framework import (
     MaxQueryRepr,
     TNormStateRepr,
     TNormTrajRepr,
-    search_and_score,
 )
 from kge_kernels.models import TransE
+from kge_kernels.search import ProofScorer, SearchSpec
 
 
 @dataclass
@@ -103,8 +103,7 @@ def main() -> None:
         # In real usage this would call the grounder.
         return ev
 
-    scores = search_and_score(
-        query=None,
+    scorer = ProofScorer(
         resolve=resolve,
         atom_repr=KGEScoreAtom(),
         state_repr=TNormStateRepr("min"),
@@ -112,8 +111,11 @@ def main() -> None:
         query_repr=MaxQueryRepr(),
         select=ExhaustiveSelect(),
         model=model,
-        max_depth=1,
+        spec=SearchSpec(batch_size=B, max_depth=1),
+        capture="dynamic",
+        name="sbr_exhaustive",
     )
+    scores = scorer(torch.zeros(B, 3, dtype=torch.long))["sbr_exhaustive"]
 
     print("SBR-exhaustive scores:", scores.tolist())
     print("  shape:", list(scores.shape))

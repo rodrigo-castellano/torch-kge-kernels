@@ -2,7 +2,11 @@
 
 Implements the six pluggable slots from ``framework.tex`` (resolve,
 atom_repr, state_repr, traj_repr, query_repr, select) plus the ``Repr``
-container and a reference ``search_and_score`` composition.
+container.
+
+The canonical 6-tuple scoring loop lives on
+:class:`kge_kernels.search.ProofScorer`; subclasses (e.g., DpRL's
+PPO/Lookahead proof scorers) override it for specialized rollouts.
 
 Both ``torch-ns-swarm`` and ``DpRL-KGR-swarm`` import the primitives from
 here. ``grounder`` provides the ``ResolutionOp`` (its ``ProofState`` and
@@ -60,7 +64,6 @@ from .repr_traj import (
     SBRBodyMinTrajRepr,
     TNormTrajRepr,
 )
-from .scorer import ScorerFn, build_scorer, search_and_score
 from .select import (
     BeamSelect,
     ExhaustiveSelect,
@@ -126,8 +129,4 @@ __all__ = [
     "GreedySelect",
     "SampleSelect",
     "StateFactory",
-    # Scorer
-    "ScorerFn",
-    "build_scorer",
-    "search_and_score",
 ]

@@ -1,4 +1,4 @@
-"""Searcher protocol + ScoreFn type + reshape adapter + unified Searcher class.
+"""Searcher protocol + ScoreFn type + reshape adapter + :class:`ProofScorer`.
 
 The framework PDF §6 specifies the canonical scoring-loop output as
 ``Dict[str, Tensor]`` (per-query, per-mode score). tkk's
@@ -8,11 +8,14 @@ score). The two contracts are reconciled by one tiny adapter,
 :func:`make_scorer_from_searcher`, which performs the K-major flat-pool
 reshape outside any compile boundary.
 
-This module also hosts the :class:`UnifiedSearcher` class introduced in
-Phase 4 of the unified-Searcher migration. The reference per-strategy
-classes (``ExhaustiveSearcher``, ``GreedySearcher``, ``BeamSearcher``,
-``DirectSearcher``) live in their own modules during the migration and
-are deleted in Phase 5 in favor of :class:`UnifiedSearcher`.
+This module also hosts :class:`ProofScorer`: the canonical concrete
+implementation of the framework's 6-tuple. The base class composes the
+six primitives plus a :class:`SearchSpec` and a :data:`CaptureMode` flag,
+exposes the :meth:`search_and_score` loop as a method, and provides a
+minimal compilation contract — :meth:`_allocate_buffers` and
+:meth:`_compile` hooks called from ``__init__`` — that subclasses (e.g.,
+DpRL's PPO/Lookahead proof scorers) override to plug in specialized
+rollouts without re-deriving the framework boilerplate.
 """
 from __future__ import annotations
 
@@ -40,8 +43,8 @@ from ..framework.protocols import (
     StateRepr,
     TrajRepr,
 )
-from ..framework.scorer import search_and_score
-from ..framework.select import ExhaustiveSelect
+from ..framework.repr import Repr
+from ..framework.types import ProofEvidence, ProofState
 
 Mode = Literal["head", "tail"]
 ScoreFn = Callable[[Tensor, Tensor, Mode], Tensor]
@@ -53,14 +56,10 @@ class Searcher(Protocol):
     """Per-query search strategy returning ``{mode_name: [N]}``.
 
     Concrete classes compose framework primitives in a
-    ``search_and_score``-equivalent loop. They may also use
-    method-specific specializations (e.g., DpRL's compiled CUDA-graph
-    rollout) — the Protocol only requires the callable signature.
-
-    .. note::
-       Phase 4+ introduces :class:`UnifiedSearcher` as the canonical
-       implementation. Phase 5 deletes the per-strategy reference
-       classes and renames ``UnifiedSearcher`` → ``Searcher``.
+    :meth:`ProofScorer.search_and_score`-equivalent loop. They may also
+    use method-specific specializations (e.g., DpRL's compiled
+    CUDA-graph rollout) — the Protocol only requires the callable
+    signature.
     """
 
     def __call__(self, queries: Tensor) -> Dict[str, Tensor]: ...
@@ -102,9 +101,9 @@ def make_scorer_from_searcher(searcher: Searcher, mode_key: str) -> ScoreFn:
 
 @dataclass(frozen=True)
 class SearchSpec:
-    """Frozen sizing for a :class:`UnifiedSearcher` instance.
+    """Frozen sizing for a :class:`ProofScorer` instance.
 
-    A :class:`SearchSpec` is part of the searcher's identity. Shape
+    A :class:`SearchSpec` is part of the scorer's identity. Shape
     changes require a new instance. Mid-life mutation is reserved for
     scalar / index buffers via primitive-level setters
     (``select.set_gumbel_scale``, ``resolve.configure``).
@@ -125,30 +124,120 @@ class SearchSpec:
     max_M: int = 4
 
 
-def _needs_alternation(select: Select) -> bool:
-    """Sequential Selects need an A/B compiled-step pair for double-buffering."""
-    return not isinstance(select, ExhaustiveSelect)
+def _atoms_from_evidence(evidence: ProofEvidence):
+    """Split ``evidence.body`` into ``(preds, subjs, objs)`` index tensors."""
+    body = evidence.body                                 # [B, P, D, M, 3] or [B, P, G, 3]
+    preds = body[..., 0]
+    subjs = body[..., 1]
+    objs = body[..., 2]
+    return preds, subjs, objs
 
 
-class UnifiedSearcher(nn.Module):
-    """Unified Searcher with capture-mode dispatch.
+def _canonical_loop(
+    query: Any,
+    *,
+    resolve: ResolutionOp,
+    atom_repr: AtomRepr,
+    state_repr: StateRepr,
+    select: Select,
+    traj_repr: TrajRepr,
+    query_repr: QueryRepr,
+    model: Any,
+    max_depth: int = 1,
+    initial_state: Optional[ProofState] = None,
+) -> Tensor:
+    """Reference scoring loop composing the six framework primitives.
 
-    Composes the six framework primitives plus a :class:`SearchSpec` and
-    a :data:`CaptureMode` flag. ``capture="static"`` allocates
-    static-address buffers per ``SearchSpec`` and compiles the inner
-    step via ``torch.compile(mode="reduce-overhead", fullgraph=True)``;
-    ``capture="dynamic"`` runs the eager
-    :func:`framework.scorer.search_and_score` loop with no buffer
-    allocation. Both expose the same ``__call__`` contract.
+    This is the canonical body referenced as ``framework.tex §6.5``.
+    :class:`ProofScorer` calls it from :meth:`search_and_score` (eager
+    or torch.compile'd via :meth:`_compile`). Subclasses with
+    method-specific rollouts override :meth:`search_and_score` and
+    therefore do not call this helper.
 
-    Mid-life mutable state lives on the primitives, not on the searcher::
+    Args:
+        query: Initial query (consumed by ``resolve`` if ``initial_state``
+            is None — the resolution op is responsible for converting
+            queries into ProofStates).
+        resolve / atom_repr / state_repr / select / traj_repr / query_repr:
+            framework primitives.
+        model: KGE model (or backend) passed positionally to ``atom_repr``.
+        max_depth: Number of resolution steps. Use ``1`` for exhaustive
+            (one-shot) scoring with ``ExhaustiveSelect``.
+        initial_state: Optional pre-built ProofState. If None, ``resolve``
+            is expected to accept ``query`` directly on the first call.
 
-        searcher.select.set_gumbel_scale(0.3)
-        searcher.resolve.configure(n_corruptions=5)
+    Returns:
+        ``[B]`` per-query scalar scores.
+    """
+    state = initial_state if initial_state is not None else query
+    accum: Optional[Repr] = None
+    final_evidence: Optional[ProofEvidence] = None
+
+    for d in range(max_depth):
+        evidence = resolve(state)
+        final_evidence = evidence
+
+        preds, subjs, objs = _atoms_from_evidence(evidence)
+        a_repr = atom_repr(preds, subjs, objs, model)
+        s_repr = state_repr(a_repr, evidence)
+
+        next_state, info = select(evidence, s_repr)
+
+        if d == 0 and max_depth == 1:
+            # Exhaustive path: traj_repr reduces over the full depth dim
+            # in a single batch call.
+            accum = traj_repr(s_repr, evidence)
+        else:
+            if accum is None:
+                B = s_repr.scores.shape[0] if s_repr.has_scores else s_repr.embeddings.shape[0]
+                device = (s_repr.scores if s_repr.has_scores else s_repr.embeddings).device
+                accum = traj_repr.init(B, device)
+            accum = traj_repr.step(accum, s_repr, info)
+
+        if next_state is None:
+            break
+        state = next_state
+
+    if accum is None or final_evidence is None:
+        raise RuntimeError("ProofScorer canonical loop produced no accumulator (max_depth must be >= 1)")
+
+    out = query_repr(accum, final_evidence)
+    if not out.has_scores:
+        raise RuntimeError("query_repr must return Repr with scores")
+    return out.scores
+
+
+class ProofScorer(nn.Module):
+    """Canonical concrete implementation of the framework's 6-tuple.
+
+    Composes the six framework primitives plus a :class:`SearchSpec`
+    and a :data:`CaptureMode` flag. ``capture="static"`` allocates
+    static-address buffers and compiles :meth:`search_and_score` via
+    ``torch.compile(mode="reduce-overhead", fullgraph=True)``;
+    ``capture="dynamic"`` runs the eager :func:`_canonical_loop` with no
+    buffer allocation. Both expose the same ``__call__`` contract.
+
+    Mid-life mutable state lives on the primitives, not on the scorer::
+
+        scorer.select.set_gumbel_scale(0.3)
+        scorer.resolve.configure(n_corruptions=5)
 
     The :meth:`set_gumbel_scale` and :meth:`configure` methods on
-    UnifiedSearcher are convenience forwarders that delegate to the
+    ``ProofScorer`` are convenience forwarders that delegate to the
     primitives; setting on the primitive directly works equivalently.
+
+    Compilation contract — subclasses override these two hooks to plug
+    in specialized rollouts:
+
+    * :meth:`_allocate_buffers` — allocate persistent tensors owned by
+      this scorer. Base: no-op (primitives own theirs).
+    * :meth:`_compile` — build compiled bodies / closures. Base:
+      :func:`torch.compile` over the canonical 6-tuple loop.
+
+    Subclasses that fully override :meth:`search_and_score` (e.g.,
+    DpRL's ``PPOProofScorer`` running an alternated-buffer rollout) may
+    bypass the parent's compiled artifact entirely; they still benefit
+    from the lifecycle hooks for inventory clarity.
     """
 
     _graph_cache: ClassVar[Dict[tuple, Callable]] = {}
@@ -156,16 +245,16 @@ class UnifiedSearcher(nn.Module):
     def __init__(
         self,
         *,
-        resolve: ResolutionOp,
-        atom_repr: AtomRepr,
-        state_repr: StateRepr,
-        select: Select,
-        traj_repr: TrajRepr,
-        query_repr: QueryRepr,
         spec: SearchSpec,
-        model: Any = None,
         name: str = "default",
         capture: CaptureMode = "static",
+        resolve: Optional[ResolutionOp] = None,
+        atom_repr: Optional[AtomRepr] = None,
+        state_repr: Optional[StateRepr] = None,
+        select: Optional[Select] = None,
+        traj_repr: Optional[TrajRepr] = None,
+        query_repr: Optional[QueryRepr] = None,
+        model: Any = None,
     ) -> None:
         super().__init__()
         self.resolve = resolve
@@ -178,97 +267,36 @@ class UnifiedSearcher(nn.Module):
         self.spec = spec
         self.name = name
         self.capture: CaptureMode = capture
-        self._needs_alternation = _needs_alternation(select)
-        # Two static-mode shapes:
-        #  * pool-aware: resolve owns prepare/run/extract_summaries, returns
-        #    an alternated (step_ab, step_ba) compiled pair.
-        #  * generic:    resolve is a function-style ResolutionOp, the entire
-        #    search_and_score loop is torch.compile'd into one closure.
         self._compiled_step: Optional[Callable] = None
-        self._compiled_steps: Optional[Tuple[Callable, Callable]] = None
-        self._pool_aware = (
-            hasattr(resolve, "build_compiled_steps")
-            and hasattr(resolve, "prepare")
-            and hasattr(resolve, "run")
-            and hasattr(resolve, "extract_summaries")
-        )
+        self._allocate_buffers()
         if capture == "static":
-            self._build_static_path()
+            self._compile()
 
-    @torch.no_grad()
-    def __call__(self, queries: Tensor) -> Dict[str, Tensor]:
-        if self._pool_aware and self.capture == "static":
-            return self._call_pool_aware(queries)
-        if queries.shape[0] != self.spec.batch_size:
-            if self.capture == "static":
-                raise ValueError(
-                    f"queries.shape[0]={queries.shape[0]} != "
-                    f"spec.batch_size={self.spec.batch_size} "
-                    f"(static-capture Searcher cannot reshape on the fly; "
-                    f"build a new Searcher with the right SearchSpec)"
-                )
-        if self.capture == "static":
-            return self._call_static(queries)
-        return self._call_dynamic(queries)
+    # ── Compilation contract — subclasses override ─────────────────────
 
-    def _call_dynamic(self, queries: Tensor) -> Dict[str, Tensor]:
-        scores = search_and_score(
-            queries,
-            resolve=self.resolve,
-            atom_repr=self.atom_repr,
-            state_repr=self.state_repr,
-            select=self.select,
-            traj_repr=self.traj_repr,
-            query_repr=self.query_repr,
-            model=self.model,
-            max_depth=self.spec.max_depth,
-        )
-        return {self.name: scores}
+    def _allocate_buffers(self) -> None:
+        """Allocate persistent tensors owned by this scorer.
 
-    def _call_static(self, queries: Tensor) -> Dict[str, Tensor]:
-        assert self._compiled_step is not None, "static path not initialized"
-        scores = self._compiled_step(queries)
-        return {self.name: scores}
-
-    def _call_pool_aware(self, queries: Tensor) -> Dict[str, Tensor]:
-        """Pool-aware static path.
-
-        Delegates pool-allocation + initial-state setup + replay loop +
-        summary extraction to the resolve primitive (which owns those
-        buffers). The query_repr converts trajectory summaries to the
-        per-query scalar score.
-
-        The input ``queries`` are also threaded into ``summaries`` under
-        the ``"queries"`` key so query_reprs that need the original
-        triples (e.g. external-KGE bridge combinations) can read them
-        without reaching into the resolve primitive.
+        Base: no-op (primitives own their own buffers). Override in
+        subclasses to add scorer-level tensors (rollout state pair,
+        result scratchpads, etc.).
         """
-        from ..framework import Repr  # local import to avoid cycles
+        pass
 
-        assert self._compiled_steps is not None, "pool-aware path not initialized"
-        N = self.resolve.prepare(queries)
-        self.resolve.run(N, self._compiled_steps)
-        summaries = self.resolve.extract_summaries(N)
-        summaries["queries"] = queries
-        scores = self.query_repr(Repr(summaries=summaries), evidence=None).scores
-        return {self.name: scores}
+    def _compile(self) -> None:
+        """Build compiled bodies / closures.
 
-    def _build_static_path(self) -> None:
-        """Compile the inner search step.
-
-        If the resolve primitive owns its own buffer alternation
-        (:class:`StatefulEnvResolve` does, because policy-rollout needs
-        explicit cur_buf/next_buf alternation + cudagraph_mark_step_begin
-        replay), it builds the alternated pair via
-        :meth:`build_compiled_steps`. Otherwise traces
-        ``search_and_score`` through ``torch.compile(fullgraph=True)``.
+        Base: ``torch.compile`` the canonical 6-tuple loop. Requires
+        all six primitives to be present. Override in subclasses with
+        specialized compiled paths (e.g., alternated-buffer step pair).
         """
-        if self._pool_aware:
-            self._compiled_steps = self.resolve.build_compiled_steps(
-                select=self.select,
-                traj_repr=self.traj_repr,
-                spec=self.spec,
-            )
+        if any(p is None for p in (
+            self.resolve, self.atom_repr, self.state_repr,
+            self.select, self.traj_repr, self.query_repr,
+        )):
+            # Subclass that overrides search_and_score may pass None for
+            # primitives the base class would compose; their _compile
+            # runs the specialized path instead. Nothing to do here.
             return
 
         cache_key = self._cache_key()
@@ -288,7 +316,7 @@ class UnifiedSearcher(nn.Module):
 
         @torch.no_grad()
         def inner(queries: Tensor) -> Tensor:
-            return search_and_score(
+            return _canonical_loop(
                 queries,
                 resolve=resolve,
                 atom_repr=atom_repr,
@@ -309,6 +337,41 @@ class UnifiedSearcher(nn.Module):
         self._graph_cache[cache_key] = compiled
         self._compiled_step = compiled
 
+    # ── Search loop ────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def __call__(self, queries: Tensor) -> Dict[str, Tensor]:
+        return {self.name: self.search_and_score(queries)}
+
+    def search_and_score(self, queries: Tensor) -> Tensor:
+        """Run the canonical 6-tuple scoring loop.
+
+        Default: dispatches between the compiled artifact (static) and
+        the eager :func:`_canonical_loop` body (dynamic). Subclasses
+        override entirely for method-specific rollouts.
+        """
+        if self.capture == "static":
+            if queries.shape[0] != self.spec.batch_size:
+                raise ValueError(
+                    f"queries.shape[0]={queries.shape[0]} != "
+                    f"spec.batch_size={self.spec.batch_size} "
+                    f"(static-capture ProofScorer cannot reshape on the fly; "
+                    f"build a new ProofScorer with the right SearchSpec)"
+                )
+            assert self._compiled_step is not None, "static path not initialized"
+            return self._compiled_step(queries)
+        return _canonical_loop(
+            queries,
+            resolve=self.resolve,
+            atom_repr=self.atom_repr,
+            state_repr=self.state_repr,
+            select=self.select,
+            traj_repr=self.traj_repr,
+            query_repr=self.query_repr,
+            model=self.model,
+            max_depth=self.spec.max_depth,
+        )
+
     def _cache_key(self) -> tuple:
         return (
             self.spec,
@@ -320,13 +383,15 @@ class UnifiedSearcher(nn.Module):
             type(self.query_repr).__name__,
         )
 
+    # ── Mid-life convenience forwarders ────────────────────────────────
+
     def set_gumbel_scale(self, scale: float) -> None:
         """Forward to ``self.select.set_gumbel_scale`` if available.
 
         Convenience method — equivalent to calling
-        ``searcher.select.set_gumbel_scale(scale)`` directly.
+        ``scorer.select.set_gumbel_scale(scale)`` directly.
         """
-        fn = getattr(self.select, "set_gumbel_scale", None)
+        fn = getattr(self.select, "set_gumbel_scale", None) if self.select is not None else None
         if fn is not None:
             fn(scale)
 
@@ -334,21 +399,21 @@ class UnifiedSearcher(nn.Module):
         """Forward to ``self.resolve.configure`` if available.
 
         Convenience method — equivalent to calling
-        ``searcher.resolve.configure(**kwargs)`` directly.
+        ``scorer.resolve.configure(**kwargs)`` directly.
         """
-        fn = getattr(self.resolve, "configure", None)
+        fn = getattr(self.resolve, "configure", None) if self.resolve is not None else None
         if fn is not None:
             fn(**kwargs)
 
     def reset_stats(self) -> None:
         """Forward to ``self.resolve.reset_stats`` if available."""
-        fn = getattr(self.resolve, "reset_stats", None)
+        fn = getattr(self.resolve, "reset_stats", None) if self.resolve is not None else None
         if fn is not None:
             fn()
 
     def aggregate_stats(self, **kwargs: Any) -> Dict[str, Any]:
         """Forward to ``self.resolve.aggregate_stats``; empty dict if absent."""
-        fn = getattr(self.resolve, "aggregate_stats", None)
+        fn = getattr(self.resolve, "aggregate_stats", None) if self.resolve is not None else None
         if fn is not None:
             return fn(**kwargs)
         return {}
@@ -357,9 +422,9 @@ class UnifiedSearcher(nn.Module):
 __all__ = [
     "CaptureMode",
     "Mode",
+    "ProofScorer",
     "ScoreFn",
     "SearchSpec",
     "Searcher",
-    "UnifiedSearcher",
     "make_scorer_from_searcher",
 ]

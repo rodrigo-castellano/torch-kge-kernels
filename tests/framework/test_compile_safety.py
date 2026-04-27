@@ -1,15 +1,15 @@
 """Compile-safety smoke tests for the framework primitives.
 
-The ``framework.tex`` spec and ``ethereal-launching-hollerith.md`` plan
-both describe fullgraph compile-safety as a design goal for the framework
-primitives: SBR-style exhaustive scoring should compose cleanly into a
-single ``torch.compile(fullgraph=True)`` region without graph breaks,
-so that DPrL's compiled CUDA-graph closures can import the primitives
-wherever they are free.
+The ``framework.tex`` spec describes fullgraph compile-safety as a
+design goal for the framework primitives: SBR-style exhaustive scoring
+should compose cleanly into a single ``torch.compile(fullgraph=True)``
+region without graph breaks, so that DPrL's compiled CUDA-graph
+closures can import the primitives wherever they are free.
 
-This module wraps ``search_and_score`` + the most common primitive
-compositions in ``torch.compile(fullgraph=True, dynamic=False)`` and
-asserts that:
+This module wraps the canonical scoring loop (the body of
+:class:`kge_kernels.search.ProofScorer`) plus the most common
+primitive compositions in ``torch.compile(fullgraph=True,
+dynamic=False)`` and asserts that:
 
   1. The compiled function runs successfully and agrees with the eager
      version (numerical parity, modulo float32 noise).
@@ -42,9 +42,9 @@ from kge_kernels.framework import (
     MaxQueryRepr,
     TNormStateRepr,
     TNormTrajRepr,
-    search_and_score,
 )
 from kge_kernels.models import TransE
+from kge_kernels.search.searcher import _canonical_loop
 
 from .conftest import make_structured_evidence
 
@@ -66,7 +66,7 @@ def _run_scorer(model, evidence, comp):
     def fake_resolve(state):
         return evidence
 
-    return search_and_score(
+    return _canonical_loop(
         query=None,
         resolve=fake_resolve,
         model=model,
@@ -76,7 +76,7 @@ def _run_scorer(model, evidence, comp):
 
 
 @pytest.mark.skipif(not _HAS_DYNAMO, reason="torch._dynamo not available")
-def test_search_and_score_compile_fullgraph_no_graph_breaks():
+def test_canonical_loop_compile_fullgraph_no_graph_breaks():
     """Wrap the canonical SBR composition in ``torch.compile(fullgraph=True)``
     and assert it produces a single graph with no breaks."""
     import torch._dynamo as dynamo  # type: ignore[attr-defined]
@@ -102,7 +102,7 @@ def test_search_and_score_compile_fullgraph_no_graph_breaks():
         explanation, "graph_break_count", len(getattr(explanation, "break_reasons", []))
     )
     assert graph_break_count == 0, (
-        f"search_and_score produced {graph_break_count} graph break(s); "
+        f"canonical loop produced {graph_break_count} graph break(s); "
         f"reasons: {getattr(explanation, 'break_reasons', '?')}"
     )
 

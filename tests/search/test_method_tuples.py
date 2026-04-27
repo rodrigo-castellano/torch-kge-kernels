@@ -37,9 +37,8 @@ from kge_kernels.framework import (
     TNormStateRepr,
     TNormTrajRepr,
 )
-from kge_kernels.framework.scorer import search_and_score
 from kge_kernels.framework.select import BeamSelect
-from kge_kernels.search import make_searcher
+from kge_kernels.search import ProofScorer, SearchSpec, make_searcher
 from kge_kernels.models import TransE
 
 from tests.framework.conftest import make_structured_evidence
@@ -187,8 +186,8 @@ class _SumOverBatch(nn.Module):
     """QueryRepr that sums per-query along ``B`` (no candidate-C dim).
 
     DPrL's canonical sequential loop produces a single trajectory per
-    query (the chosen path through the tree). The reference
-    ``framework.search_and_score`` doesn't expand the C dim during
+    query (the chosen path through the tree). The canonical
+    :class:`ProofScorer` loop doesn't expand the C dim during
     sequential search, so the PDF's ``Sum`` query_repr is implicitly
     "identity over the single-trajectory output" rather than the
     candidate-pool reduction in :class:`SumQueryRepr`.
@@ -216,17 +215,19 @@ def test_dprl_method_tuple():
     model = TransE(num_entities=10, num_relations=5, dim=embed_dim)
     ev = make_structured_evidence(B=2, P=3, D=1, M=2)
 
-    scores = search_and_score(
-        query=None,
+    scorer = ProofScorer(
         resolve=lambda state: ev,
         atom_repr=MLPAtom(embed_dim=embed_dim),
         state_repr=_SumWithPolicyScore(),
         select=_BeamWithLogProbs(k=2),
         traj_repr=PolicyProductTrajRepr(),
         query_repr=_SumOverBatch(),
+        spec=SearchSpec(batch_size=2, max_depth=2),
         model=model,
-        max_depth=2,
+        capture="dynamic",
+        name="dprl",
     )
+    scores = scorer(torch.zeros(2, 3, dtype=torch.long))["dprl"]
     assert scores.shape == (2,)
     assert torch.isfinite(scores).all()
 

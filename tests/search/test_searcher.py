@@ -7,9 +7,9 @@ from kge_kernels.framework.select import BeamSelect, ExhaustiveSelect
 from kge_kernels.search import (
     DirectSearcher,
     MultiRolloutSearcher,
+    ProofScorer,
     SearchSpec,
     Searcher,
-    UnifiedSearcher,
     make_scorer_from_searcher,
     make_searcher,
 )
@@ -76,7 +76,7 @@ def test_make_scorer_head_mode_replaces_col1():
     assert scores[1, 2].item() == 40 + 6 + 60
 
 
-def test_unified_exhaustive_sbr_tuple():
+def test_proof_scorer_exhaustive_sbr_tuple():
     """SBR per framework.pdf §11: Enum + KGEScore + TNorm(min) + Exhaustive + TNorm(min) + Max."""
     ev = make_structured_evidence(B=2, P=3, D=2, M=2)
     model = TransE(num_entities=7, num_relations=5, dim=8)
@@ -166,8 +166,8 @@ def test_direct_searcher_kge_score():
     assert ((out["kge"] >= 0) & (out["kge"] <= 1)).all()
 
 
-def test_beam_unified_gumbel_scale_zero_bit_exact():
-    """UnifiedSearcher+BeamSelect with gumbel_scale_buf zero must match the no-buf baseline."""
+def test_beam_proof_scorer_gumbel_scale_zero_bit_exact():
+    """ProofScorer+BeamSelect with gumbel_scale_buf zero must match the no-buf baseline."""
     ev = make_structured_evidence(B=4, P=4, D=1, M=2, seed=11)
     model = TransE(num_entities=7, num_relations=5, dim=8)
     queries = torch.randint(1, 7, (4, 3), generator=torch.Generator().manual_seed(0))
@@ -184,10 +184,10 @@ def test_beam_unified_gumbel_scale_zero_bit_exact():
         capture="dynamic",
     )
 
-    base_no_buf = UnifiedSearcher(select=BeamSelect(k=2), **common_kwargs)
+    base_no_buf = ProofScorer(select=BeamSelect(k=2), **common_kwargs)
 
     buf = torch.zeros(())
-    base_with_buf = UnifiedSearcher(
+    base_with_buf = ProofScorer(
         select=BeamSelect(k=2, gumbel_scale_buf=buf), **common_kwargs,
     )
 
@@ -196,11 +196,11 @@ def test_beam_unified_gumbel_scale_zero_bit_exact():
     assert torch.equal(out_ref["beam"], out_zero["beam"])
 
 
-def test_unified_beam_gumbel_buf_is_shared_with_select():
-    """UnifiedSearcher.set_gumbel_scale forwards to BeamSelect's buf."""
+def test_proof_scorer_beam_gumbel_buf_is_shared_with_select():
+    """ProofScorer.set_gumbel_scale forwards to BeamSelect's buf."""
     buf = torch.zeros(())
     model = TransE(num_entities=7, num_relations=5, dim=8)
-    searcher = UnifiedSearcher(
+    searcher = ProofScorer(
         resolve=lambda s: make_structured_evidence(B=2, P=3, D=1, M=2),
         atom_repr=KGEScoreAtom(),
         state_repr=TNormStateRepr("min"),
@@ -223,7 +223,7 @@ def test_multirollout_beam_gumbel_changes_select_output():
     same buf that BeamSelect reads; chosen indices change at scale > 0.
 
     Verified through direct ``select`` invocation rather than
-    ``__call__`` because ``search_and_score`` with ``max_depth=1`` does
+    ``__call__`` because the canonical loop with ``max_depth=1`` does
     not propagate ``select.info`` (the exhaustive shortcut). The wire
     fix is what enables future sequential Searchers to use gumbel.
     """
@@ -232,7 +232,7 @@ def test_multirollout_beam_gumbel_changes_select_output():
     torch.manual_seed(0)
     buf = torch.zeros(())
     model = TransE(num_entities=7, num_relations=5, dim=8)
-    base = UnifiedSearcher(
+    base = ProofScorer(
         resolve=lambda s: make_structured_evidence(B=4, P=4, D=1, M=2),
         atom_repr=KGEScoreAtom(),
         state_repr=TNormStateRepr("min"),
@@ -263,7 +263,7 @@ def test_multirollout_beam_gumbel_changes_select_output():
 
 
 def test_searcher_to_scorer_end_to_end():
-    """UnifiedSearcher (exhaustive) → make_scorer_from_searcher → ScoreFn for RankingEvaluator."""
+    """ProofScorer (exhaustive) → make_scorer_from_searcher → ScoreFn for RankingEvaluator."""
     ev = make_structured_evidence(B=10, P=2, D=1, M=2)  # B = total flat pool size
     model = TransE(num_entities=20, num_relations=5, dim=8)
 

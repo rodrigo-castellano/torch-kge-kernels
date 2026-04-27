@@ -87,7 +87,6 @@ from .framework import (
     ResolutionOp,
     SampleSelect,
     SBRBodyMinTrajRepr,
-    ScorerFn,
     Select,
     SelectInfo,
     StateRepr,
@@ -96,8 +95,6 @@ from .framework import (
     TNormStateRepr,
     TNormTrajRepr,
     TrajRepr,
-    build_scorer,
-    search_and_score,
 )
 
 # Experiment logging
@@ -230,7 +227,6 @@ __all__ = [
     "ResolutionOp",
     "SBRBodyMinTrajRepr",
     "SampleSelect",
-    "ScorerFn",
     "Select",
     "SelectInfo",
     "StateRepr",
@@ -239,8 +235,6 @@ __all__ = [
     "TNormStateRepr",
     "TNormTrajRepr",
     "TrajRepr",
-    "build_scorer",
-    "search_and_score",
     # KGE models + factory
     "ComplEx",
     "ConvE",

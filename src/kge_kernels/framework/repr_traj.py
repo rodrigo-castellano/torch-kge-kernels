@@ -229,10 +229,10 @@ class PolicyProductTrajRepr(nn.Module):
     depends on which action was chosen at each step, and the batched
     ``evidence`` does not carry per-step policy log-probs. Calling
     :meth:`forward` raises :class:`TypeError` with a pointer to the
-    incremental API. Sequential search loops (including the reference
-    :func:`kge_kernels.framework.search_and_score`) always go through
-    :meth:`init` + :meth:`step`, so this does not limit the reference
-    implementation.
+    incremental API. Sequential search loops (including
+    :class:`kge_kernels.search.ProofScorer`'s canonical loop) always go
+    through :meth:`init` + :meth:`step`, so this does not limit the
+    reference implementation.
 
     Contract::
 

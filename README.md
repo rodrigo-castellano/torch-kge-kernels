@@ -27,8 +27,7 @@ kge_kernels/
 │   ├── traj_repr.py       TNorm / CumulativeLog / MinStep / BestCumulative /
 │   │                      PolicyProduct / SBRBodyMin trajectory aggregators
 │   ├── query_repr.py      Max / Sum / Mean / LogSumExp / MLPSum / ConceptMax
-│   ├── select.py          Exhaustive / Greedy / Beam / Sample
-│   └── scorer.py          Reference search_and_score + build_scorer
+│   └── select.py          Exhaustive / Greedy / Beam / Sample
 │
 ├── models/           # Raw KGE nn.Module classes on a common KGEModel base
 │   ├── base.py            KGEModel ABC (score_triples / all_tails / all_heads /
@@ -87,9 +86,9 @@ from kge_kernels.framework import (
     MaxQueryRepr,
     TNormStateRepr,
     TNormTrajRepr,
-    build_scorer,
 )
 from kge_kernels.models import TransE
+from kge_kernels.search import ProofScorer, SearchSpec
 
 # Any grounder producing ProofEvidence works; this is a stub
 def my_grounder(state):
@@ -97,15 +96,16 @@ def my_grounder(state):
 
 model = TransE(num_entities=14505, num_relations=237, dim=256)
 
-scorer = build_scorer(
+scorer = ProofScorer(
     resolve=my_grounder,
     atom_repr=KGEScoreAtom(),
     state_repr=TNormStateRepr("min"),      # Gödel conjunction
     traj_repr=TNormTrajRepr("min"),        # min-over-depths
     query_repr=MaxQueryRepr(),             # max-over-proofs (SBR)
     select=ExhaustiveSelect(),             # one-shot scoring
+    spec=SearchSpec(batch_size=B, max_depth=1),
     model=model,
-    max_depth=1,
+    capture="static",                      # CUDA-graph cheap-replay
 )
 
 scores = scorer(queries)  # {"default": [B]}
@@ -138,10 +138,12 @@ results = MyEvaluator(
 
 ## Architectural contract
 
-Each downstream method ships its **own** `search_and_score`-equivalent
-function. Consumers use tkk primitives wherever the math is the same as
-the reference implementation, but are free to inline, fuse, or
-specialize them when performance constraints require:
+Each downstream method either uses :class:`ProofScorer` directly or
+ships its **own** :class:`ProofScorer` subclass that overrides
+:meth:`search_and_score` for a specialized rollout (e.g., DpRL's
+compiled CUDA-graph PPO scorer). Consumers use tkk primitives wherever
+the math is the same as the canonical loop, but are free to inline,
+fuse, or specialize them when performance constraints require:
 
 - **torch-ns SBR / DCR / R2N** use fused, `torch.compile`-safe reasoning
   layers in `ns_lib/nn/reasoning.py` that reproduce framework primitives

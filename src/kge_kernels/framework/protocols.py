@@ -16,7 +16,7 @@ Six slots:
 Concrete implementations live in:
   repr_atom.py, repr_state.py, repr_traj.py, repr_query.py, select.py
 
-The reference composition lives in scorer.py (``search_and_score``).
+The reference composition lives in :class:`kge_kernels.search.ProofScorer`.
 
 Cross-repo Protocol satisfiers
 ------------------------------

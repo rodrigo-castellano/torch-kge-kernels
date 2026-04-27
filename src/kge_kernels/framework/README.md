@@ -208,11 +208,12 @@ by RL methods (DPrL). Modes: `logprob`, `proof_binary`, `depth_weighted_*`,
 
 ## 5. The canonical scoring loop
 
-`scorer.py:search_and_score` composes the six primitives:
+The body of `ProofScorer.search_and_score` (private helper
+`search/searcher.py:_canonical_loop`) composes the six primitives:
 
 ```python
-def search_and_score(query, *, resolve, atom_repr, state_repr, select,
-                      traj_repr, query_repr, model, max_depth) -> Tensor:
+def _canonical_loop(query, *, resolve, atom_repr, state_repr, select,
+                    traj_repr, query_repr, model, max_depth) -> Tensor:
     state = init(query)
     accum = traj_repr.init(B)
     for d in range(max_depth):
@@ -235,13 +236,13 @@ There is no separate `score_query` — the loop IS the scorer.
 
 ---
 
-## 6. `UnifiedSearcher` — the concrete class
+## 6. `ProofScorer` — the concrete class
 
-`search/searcher.py:UnifiedSearcher` is the canonical implementation of
+`search/searcher.py:ProofScorer` is the canonical implementation of
 the `Searcher` Protocol. One class for every 6-tuple composition.
 
 ```python
-searcher = UnifiedSearcher(
+scorer = ProofScorer(
     resolve=...,            # ResolutionOp
     atom_repr=...,          # AtomRepr
     state_repr=...,         # StateRepr
@@ -251,44 +252,48 @@ searcher = UnifiedSearcher(
     spec=SearchSpec(batch_size=B, max_depth=D, ...),
     capture="static" | "dynamic",
 )
-scores = searcher(queries)                 # {mode_key: [N]}
+scores = scorer(queries)                   # {mode_key: [N]}
 ```
 
 ### Capture modes
 
-- **`capture="static"`** (default) — allocates static-address buffers,
-  marks them via `torch._dynamo.mark_static_address`, captures the inner
-  step via `torch.compile(mode="reduce-overhead", fullgraph=True)`.
-  Cudagraph cheap-replay on every call.
-- **`capture="dynamic"`** — eager `search_and_score` loop, no buffer
-  allocation, shape-flexible. For dev / debug / shape-variable use.
+- **`capture="static"`** (default) — `_compile()` wraps the canonical
+  loop with `torch.compile(mode="reduce-overhead", fullgraph=True)` for
+  cudagraph cheap-replay.
+- **`capture="dynamic"`** — eager `_canonical_loop`, no compilation,
+  shape-flexible. For dev / debug / shape-variable use.
 
 Both modes have identical `__call__(queries) → Dict[str, Tensor]` output.
 
-### Two static-mode shapes
+### Compilation contract — for subclassing
 
-1. **Pool-aware** — when `resolve` owns its own buffer alternation
-   (e.g. DpRL's `StatefulEnvResolve` / `LookaheadResolve`), it implements
-   `prepare(queries)`, `run(N, compiled_steps)`, `extract_summaries(N)`,
-   `build_compiled_steps(...)`. `UnifiedSearcher` delegates the entire
-   ranking-pool lifecycle to it; the `query_repr` runs on the extracted
-   summaries.
-2. **Generic** — when `resolve` is a function-style `ResolutionOp`,
-   `search_and_score` is `torch.compile`'d into one closure.
+`ProofScorer.__init__` calls two lifecycle hooks subclasses override to
+plug in specialized rollouts (e.g., DpRL's `PPOProofScorer` /
+`LookaheadProofScorer` running an alternated-buffer compiled CUDA-graph
+rollout):
+
+- `_allocate_buffers()` — allocate persistent tensors owned by this
+  scorer. Base: no-op (primitives own theirs).
+- `_compile()` — build compiled bodies / closures. Base:
+  `torch.compile` the canonical 6-tuple loop. Subclasses that override
+  `search_and_score` entirely may make this a no-op.
+
+Subclasses that fully override `search_and_score` may pass `None` for
+the framework primitives the parent would compose.
 
 ### Mid-life mutation lives on the primitives
 
 ```python
-searcher.select.set_gumbel_scale(0.3)        # GreedySelect / BeamSelect / PolicySelect
-searcher.resolve.configure(n_corruptions=5)  # StatefulEnvResolve
+scorer.select.set_gumbel_scale(0.3)         # GreedySelect / BeamSelect / PolicySelect
+scorer.resolve.configure(n_corruptions=5)   # PPOProofScorer
 ```
 
-`UnifiedSearcher.set_gumbel_scale` / `configure` / `reset_stats` /
+`ProofScorer.set_gumbel_scale` / `configure` / `reset_stats` /
 `aggregate_stats` are convenience forwarders.
 
 ### Strategy factory
 
-`search/__init__.py:make_searcher(strategy=...)` builds a `UnifiedSearcher`
+`search/__init__.py:make_searcher(strategy=...)` builds a `ProofScorer`
 with the right `Select` for `"exhaustive"` / `"greedy"` / `"beam"` /
 `"multi_restart"` / `"direct"`. `MultiRolloutSearcher` and
 `MultiRestartSearcher` are higher-order wrappers (K rollouts × Gumbel
@@ -377,8 +382,8 @@ These are exercised end-to-end in `tests/search/test_method_tuples.py`.
 | Repo | Builds the searcher via | Plugs into eval via |
 |---|---|---|
 | **torch-ns** | direct grounder + framework primitives (SBR/DCR/R2N) | `experiments/model.py:KGEModel.eval_scores` (a `ScoreFn` directly) |
-| **DpRL-KGR (PPO)** | `make_ppo_searcher(ppo, scoring_method)` → `UnifiedSearcher(StatefulEnvResolve + PolicySelect + TrajectoryScoreQueryRepr or KGEEngineQueryRepr)` — or `DirectSearcher` for `reasoning_mode="direct_kge"` | `make_scorer_from_searcher(s, mode_key)` |
-| **DpRL-KGR (Lookahead)** | `LookaheadSearcher` composes `UnifiedSearcher(LookaheadResolve + LookaheadProofScoreQueryRepr)` | same |
+| **DpRL-KGR (PPO)** | `PPOEvaluator.searcher` → `PPOProofScorer(ppo, scoring_method=...)` (a `ProofScorer` subclass with an alternated-buffer compiled rollout) — or `DirectSearcher` for `reasoning_mode="direct_kge"` | `make_scorer_from_searcher(s, mode_key)` |
+| **DpRL-KGR (Lookahead)** | `LookaheadEvaluator.searcher` → `LookaheadProofScorer(ppo, scoring_method=...)` (subclasses `PPOProofScorer`; KGE-guided rollout) | same |
 
 Common pattern:
 - Customize `ScoreFn` (raw KGE / fused SBR / PPO rollout) — reuse
@@ -418,6 +423,6 @@ Common pattern:
 - `tests/framework/` — primitive coverage (one test file per slot).
 - `tests/search/test_method_tuples.py` — end-to-end exercises of the
   6-tuples in §8.
-- `tests/search/test_unified_searcher.py` — `UnifiedSearcher` capture-mode
-  + setter-propagation coverage.
+- `tests/search/test_proof_scorer.py` — `ProofScorer` capture-mode
+  + contract-hook + setter-propagation coverage.
 - `repr.py` — the `Repr` carrier docstring (the universal flow object).

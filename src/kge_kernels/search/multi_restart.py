@@ -1,6 +1,6 @@
-"""MultiRestartSearcher: N independent UnifiedSearcher beam runs with noise.
+"""MultiRestartSearcher: N independent ProofScorer beam runs with noise.
 
-Pre-builds N inner :class:`UnifiedSearcher` instances backed by
+Pre-builds N inner :class:`ProofScorer` instances backed by
 :class:`BeamSelect`, each with its own static-address Gumbel scale
 buffer. The first restart is deterministic (``noise_scale=0``);
 subsequent restarts inject Gumbel-max noise at ``noise_scale``.
@@ -25,15 +25,15 @@ from ..framework import (
     TrajRepr,
 )
 from ..framework.select import BeamSelect, StateFactory
-from .searcher import CaptureMode, SearchSpec, UnifiedSearcher
+from .searcher import CaptureMode, ProofScorer, SearchSpec
 
 
 class MultiRestartSearcher(nn.Module):
-    """Run :class:`UnifiedSearcher` (beam) N times with different noise; per-query max.
+    """Run :class:`ProofScorer` (beam) N times with different noise; per-query max.
 
     The first restart is deterministic (no noise); restarts 1..N-1 use
     independent Gumbel noise at ``noise_scale``. Restart noise is
-    injected via :meth:`UnifiedSearcher.set_gumbel_scale` between calls.
+    injected via :meth:`ProofScorer.set_gumbel_scale` between calls.
     """
 
     def __init__(
@@ -78,7 +78,7 @@ class MultiRestartSearcher(nn.Module):
                 gumbel_scale_buf=buf,
             )
             inners.append(
-                UnifiedSearcher(
+                ProofScorer(
                     resolve=resolve,
                     atom_repr=atom_repr,
                     state_repr=state_repr,
