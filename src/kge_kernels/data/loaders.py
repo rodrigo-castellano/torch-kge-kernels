@@ -432,7 +432,7 @@ def load_rules_file(
 # ============================================================================
 
 
-def load_probabilistic_facts(
+def load_probabilistic_facts_file(
     path: str,
     *,
     topk_limit: Optional[int] = None,
@@ -625,12 +625,16 @@ def _iter_queries_with_depth(path: str):
 # ============================================================================
 
 
-def load_dataset_split(
+def _resolve_dataset_split_path(
     data_root: str,
     dataset_name: str,
     split_filename: str,
 ) -> str:
-    """Resolve ``<data_root>/<dataset_name>/<split_filename>``."""
+    """Resolve ``<data_root>/<dataset_name>/<split_filename>``.
+
+    Internal helper used by :func:`resolve_train_path` and
+    :func:`resolve_split_path`. Not exported.
+    """
     path = os.path.join(data_root, dataset_name, split_filename)
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -650,7 +654,7 @@ def resolve_train_path(
     if train_path:
         return train_path
     if dataset:
-        return load_dataset_split(data_root, dataset, train_split)
+        return _resolve_dataset_split_path(data_root, dataset, train_split)
     raise ValueError("Provide either train_path or dataset")
 
 
@@ -671,7 +675,7 @@ def resolve_split_path(
         return explicit_path
     if dataset and split_filename:
         try:
-            return load_dataset_split(data_root, dataset, split_filename)
+            return _resolve_dataset_split_path(data_root, dataset, split_filename)
         except FileNotFoundError as err:
             print(
                 f"Warning: {split_name} split not found ({err}); continuing without it."
@@ -684,10 +688,9 @@ __all__ = [
     "TripleExample",
     "detect_triple_format",
     "encode_split_triples",
-    "load_dataset_split",
     "load_depth_file",
     "load_domain_file",
-    "load_probabilistic_facts",
+    "load_probabilistic_facts_file",
     "load_rules_file",
     "load_triples",
     "load_triples_with_mappings",

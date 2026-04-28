@@ -103,18 +103,20 @@ def build_relation_domains(
     return dict(head_domain), dict(tail_domain)
 
 
-def build_relation_domains_from_file(
+def build_relation_domains_typed(
     triples: Sequence[Tuple[int, int, int]],
     entity2domain: Dict[int, str],
     domain2idx: Dict[str, List[int]],
 ) -> Tuple[Dict[int, Set[int]], Dict[int, Set[int]]]:
-    """Build per-relation domain sets using domain-file memberships.
+    """Build per-relation domain sets using domain-typing memberships.
 
     Unlike :func:`build_relation_domains` (observed-only), this function
     looks up the domain of each position's entities and returns **all**
     entities belonging to that domain. Matches ns-old's
     ``_IndexedCorruptionAdapter`` evaluation protocol, which draws
-    exhaustive corruption candidates from the full domain file pool.
+    exhaustive corruption candidates from the full domain pool. The
+    ``entity2domain`` and ``domain2idx`` mappings are typically built
+    by :func:`load_domain_file` in :mod:`kge_kernels.data.loaders`.
 
     Falls back to observed entities for relations whose entities have no
     domain mapping.
@@ -143,6 +145,6 @@ __all__ = [
     "add_reciprocal_triples",
     "build_filter_maps",
     "build_relation_domains",
-    "build_relation_domains_from_file",
+    "build_relation_domains_typed",
     "filter_queries_by_predicates",
 ]

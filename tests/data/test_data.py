@@ -12,7 +12,7 @@ from kge_kernels.data import (
     encode_split_triples,
     filter_queries_by_predicates,
     load_domain_file,
-    load_probabilistic_facts,
+    load_probabilistic_facts_file,
     load_rules_file,
     load_triples,
     load_triples_with_mappings,
@@ -320,7 +320,7 @@ def test_load_rules_file_missing_returns_empty(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# load_probabilistic_facts
+# load_probabilistic_facts_file
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -332,7 +332,7 @@ def test_load_probabilistic_facts_basic(tmp_path):
         "mother(alice,carol) 0.80 2\n"
         "\n"
     )
-    facts = load_probabilistic_facts(str(p))
+    facts = load_probabilistic_facts_file(str(p))
     assert facts == [
         ("father", "alice", "bob"),
         ("mother", "alice", "carol"),
@@ -345,7 +345,7 @@ def test_load_probabilistic_facts_topk_filter(tmp_path):
         "father(alice,bob) 0.95 1\n"
         "father(alice,carol) 0.50 5\n"
     )
-    facts = load_probabilistic_facts(str(p), topk_limit=3)
+    facts = load_probabilistic_facts_file(str(p), topk_limit=3)
     assert facts == [("father", "alice", "bob")]
 
 
@@ -355,7 +355,7 @@ def test_load_probabilistic_facts_score_threshold(tmp_path):
         "father(alice,bob) 0.95\n"
         "father(alice,carol) 0.30\n"
     )
-    facts = load_probabilistic_facts(str(p), score_threshold=0.5)
+    facts = load_probabilistic_facts_file(str(p), score_threshold=0.5)
     assert facts == [("father", "alice", "bob")]
 
 
@@ -365,7 +365,7 @@ def test_load_probabilistic_facts_dedupes(tmp_path):
         "father(alice,bob) 0.95\n"
         "father(alice,bob) 0.80\n"
     )
-    facts = load_probabilistic_facts(str(p))
+    facts = load_probabilistic_facts_file(str(p))
     assert facts == [("father", "alice", "bob")]
 
 

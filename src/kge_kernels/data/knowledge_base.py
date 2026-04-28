@@ -15,7 +15,7 @@ in slightly different ways:
    the same id space.
 4. ``load_domain_file`` (string mode for pre-id consumers, indexed mode
    for tkk's training pipeline).
-5. ``build_filter_maps`` + ``build_relation_domains_from_file`` for
+5. ``build_filter_maps`` + ``build_relation_domains_typed`` for
    filtered ranking and domain-aware corruption.
 
 :class:`KnowledgeBase` runs all five steps in ``__init__`` and exposes
@@ -43,7 +43,7 @@ from .loaders import (
     _iter_queries_with_depth,
     encode_split_triples,
     load_domain_file,
-    load_probabilistic_facts as _load_probabilistic_facts_file,
+    load_probabilistic_facts_file,
     load_rules_file,
     load_triples,
     load_triples_with_mappings,
@@ -51,7 +51,7 @@ from .loaders import (
 )
 from .transforms import (
     build_filter_maps,
-    build_relation_domains_from_file,
+    build_relation_domains_typed,
     filter_queries_by_predicates,
 )
 
@@ -114,9 +114,9 @@ class KnowledgeBase:
     constants_set: frozenset = field(default_factory=frozenset)
     predicates: List[str] = field(default_factory=list)
     predicates_set: frozenset = field(default_factory=frozenset)
-    # Typed-data placeholders populated by load_facts / load_rules /
-    # load_queries_with_depth (kept here so subclass __init__ doesn't
-    # have to redeclare them).
+    # Typed-data placeholders populated by load_dataset's typed-load
+    # steps + load_rules / load_queries_with_depth (kept here so
+    # subclass __init__ doesn't have to redeclare them).
     rule_names: List[Optional[str]] = field(default_factory=list)
     rule_weights: List[float] = field(default_factory=list)
     rules_str: List[Tuple[Tuple[str, ...], List[Tuple[str, ...]]]] = field(default_factory=list)
@@ -408,37 +408,12 @@ class KnowledgeBase:
             )
             if self.domain2idx:
                 self.use_domain_eval = True
-                self.head_domain, self.tail_domain = build_relation_domains_from_file(
+                self.head_domain, self.tail_domain = build_relation_domains_typed(
                     self.train_idx + self.valid_idx + self.test_idx,
                     self.entity2domain_idx, self.domain2idx,
                 )
 
     # ---- typed-data loaders -------------------------------------------
-
-    def load_facts(
-        self,
-        *,
-        filepath: Optional[str] = None,
-        skip_predicate_prefixes: Tuple[str, ...] = (),
-    ) -> List[Tuple[str, ...]]:
-        """Return background facts as ``(predicate, head, tail)`` tuples.
-
-        With no ``filepath``: pulls from ``self.known`` (already loaded
-        by :meth:`_load_dataset`). With explicit ``filepath``: re-parses
-        that file via :func:`load_triples` (Prolog, permissive). Triples
-        whose relation starts with any prefix in ``skip_predicate_prefixes``
-        are dropped — useful for dataset-specific preamble lines like
-        DpRL's ``one_step``.
-        """
-        if filepath is None:
-            triples = self.known
-        else:
-            triples = load_triples(filepath, format_hint="prolog", permissive=True)
-        return [
-            (triple.relation, triple.head, triple.tail)
-            for triple in triples
-            if not any(triple.relation.startswith(p) for p in skip_predicate_prefixes)
-        ]
 
     def load_rules(
         self,
@@ -549,7 +524,7 @@ class KnowledgeBase:
         )
         if path is None:
             return []
-        return _load_probabilistic_facts_file(
+        return load_probabilistic_facts_file(
             path, topk_limit=topk_limit, score_threshold=score_threshold,
         )
 
@@ -646,7 +621,8 @@ class KnowledgeBase:
 
         1. Low-level: vocabulary, splits, filter maps, domains via
            :meth:`_load_dataset` (always).
-        2. Typed facts via :meth:`load_facts` (if ``load_typed_facts``).
+        2. Typed facts (str-tuple list from ``self.known``) if
+           ``load_typed_facts``.
         3. Typed rules via :meth:`load_rules` (if ``load_typed_rules`` and
            ``rules_file`` is provided).
         4. Typed queries with depth via :meth:`load_queries_with_depth`
@@ -669,24 +645,31 @@ class KnowledgeBase:
         DpRL passes ``load_typed_*=True`` and ``materialize=False``
         (uses its own IndexManager-aware materialize override).
         """
-        # 1. Low-level loader.
-        self._load_dataset(
-            dataset_name=dataset_name, base_path=base_path,
-            train_file=train_file, valid_file=valid_file, test_file=test_file,
-            fact_file=fact_file, domain_file=domain_file,
-            permissive=permissive, valid_size=valid_size,
-        )
+        # 1. Low-level loader. Skip if ``__init__`` already ran it
+        # (KnowledgeBase(dataset_name=...) eager path) — the typed-data
+        # extras below are idempotent re-applications, but re-reading
+        # the files would be wasted I/O. Lazy-init subclasses that
+        # construct with ``dataset_name=None`` reach this with empty
+        # ``entity2id`` and trigger the full load here.
+        if not self.entity2id:
+            self._load_dataset(
+                dataset_name=dataset_name, base_path=base_path,
+                train_file=train_file, valid_file=valid_file, test_file=test_file,
+                fact_file=fact_file, domain_file=domain_file,
+                permissive=permissive, valid_size=valid_size,
+            )
         dataset_path = join(base_path, dataset_name)
 
-        # 2. Typed facts (str form populated alongside).
+        # 2. Typed facts (str form populated alongside). DpRL extends
+        # ``self.facts`` in-place with probabilistic facts later, so the
+        # two lists must stay independent.
         if load_typed_facts:
-            self.facts = self.load_facts(skip_predicate_prefixes=skip_predicate_prefixes)
-            # Populate facts_str alongside the typed list — useful for
-            # downstream materialize() and consumers that want str-form.
-            self.facts_str = [
+            facts_typed = [
                 (t.relation, t.head, t.tail) for t in self.known
                 if not any(t.relation.startswith(p) for p in skip_predicate_prefixes)
             ]
+            self.facts = list(facts_typed)
+            self.facts_str = list(facts_typed)
 
         # 3. Typed rules.
         if load_typed_rules and rules_file:
@@ -840,7 +823,8 @@ class KnowledgeBase:
         Source-of-truth for the string-form is ``facts_str`` / ``rules_str`` /
         ``{split}_queries_str`` / ``{split}_depths`` / ``{split}_labels``;
         these must be populated before calling ``materialize`` (typically
-        by ``load_facts`` / ``load_rules`` / ``load_queries_with_depth``).
+        by ``load_dataset`` with the matching typed-load flags, or by
+        ``load_rules`` / ``load_queries_with_depth`` directly).
         """
         device = device or torch.device("cpu")
         ent_fn = entity_id_fn or (lambda e: self.entity2id[e])
@@ -942,7 +926,7 @@ class KnowledgeBase:
         }
         # Per-relation domain restriction reflects the catch-all additions.
         if self.use_domain_eval and self.domain2idx:
-            self.head_domain, self.tail_domain = build_relation_domains_from_file(
+            self.head_domain, self.tail_domain = build_relation_domains_typed(
                 self.train_idx + self.valid_idx + self.test_idx,
                 self.entity2domain_idx, self.domain2idx,
             )
