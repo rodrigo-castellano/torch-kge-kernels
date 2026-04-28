@@ -43,7 +43,9 @@ from .repr_query import (
     TrajectoryScoreQueryRepr,
 )
 from .repr_state import (
+    ClusteredFilterSignStateRepr,
     ConcatStateRepr,
+    FilterSignStateRepr,
     GatedTNormStateRepr,
     MaxStateRepr,
     MeanStateRepr,
@@ -98,7 +100,9 @@ __all__ = [
     "MLPAtom",
     "RemappedKGEScoreAtom",
     # State reprs
+    "ClusteredFilterSignStateRepr",
     "ConcatStateRepr",
+    "FilterSignStateRepr",
     "GatedTNormStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",

@@ -54,7 +54,16 @@ def _normalize_json(value: Any) -> Any:
 
 
 class _TeeStream:
-    """Mirror writes to the original stream and a file."""
+    """Mirror writes to the original stream and a file.
+
+    Implements enough of the file-protocol that ``logging.shutdown``
+    and similar atexit hooks can call ``close()`` / ``isatty()`` /
+    ``fileno()`` on stdout-like substitutes without raising. The
+    original stream and file handle are owned by their respective
+    creators; this proxy never closes either of them on its own
+    ``close()`` (would re-close ``sys.stdout`` and the run-bundle
+    log file).
+    """
 
     def __init__(self, original: Any, file_handle: Any) -> None:
         self._original = original
@@ -68,6 +77,23 @@ class _TeeStream:
     def flush(self) -> None:
         self._file_handle.flush()
         self._original.flush()
+
+    def close(self) -> None:
+        # No-op: ``logging.shutdown`` may call this through absl during
+        # interpreter exit. Delegating to the wrapped streams would
+        # double-close ``sys.stdout`` / the run-log handle. The actual
+        # cleanup happens in ``RunContext.__exit__``.
+        pass
+
+    def isatty(self) -> bool:
+        return getattr(self._original, "isatty", lambda: False)()
+
+    def fileno(self) -> int:
+        return self._original.fileno()
+
+    @property
+    def closed(self) -> bool:
+        return getattr(self._original, "closed", False)
 
 
 class RunContext:

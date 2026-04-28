@@ -463,8 +463,297 @@ class PhiPsiStateRepr(nn.Module):
         return Repr(scores=reduced)
 
 
+def _godel_iff(a: Tensor, b: Tensor) -> Tensor:
+    """Godel biconditional: ``min(max(1-a, b), max(a, 1-b))``."""
+    return torch.minimum(
+        torch.maximum(1.0 - a, b),
+        torch.maximum(a, 1.0 - b),
+    )
+
+
+class FilterSignStateRepr(nn.Module):
+    """DCR's filter+sign Godel-attention state aggregator (framework.pdf §11).
+
+    Implements the Barbiero/Marra DCR variant exactly:
+
+      sign_r(e)   = sigmoid(sign_mlp_r(e))         # per-atom polarity
+      filter_r(e) = sigmoid(filter_mlp_r(e))       # per-atom relevance
+      sign_term   = godel_iff(sign_r(e), score(b)) # match polarity to score
+      term        = max(1 - filter_r(e), sign_term)
+      head_p      = tnorm_min(term over body atoms)
+
+    Two per-rule MLPs (filter and sign), each ``E → hidden → 1`` with
+    LeakyReLU between layers. ``sign_mlp`` returns logits; ``filter_mlp``
+    returns sigmoid output (init Sigmoid in the final layer matches
+    ns.DCRReasoning's pre-migration behavior).
+
+    Pair upstream with :class:`KGEPairAtom` (entity-pair embeddings +
+    KGE scores; matches ns's entity-pair convention) — the per-atom
+    embedding goes into both MLPs and the per-atom score is the logical
+    "value" the iff matches against.
+
+    Aggregation over the body axis uses min by default; pass
+    ``tnorm="product"`` for product semantics.
+    """
+
+    def __init__(
+        self,
+        num_rules: int,
+        embed_dim: int,
+        *,
+        hidden_dim: int = 64,
+        tnorm: Literal["min", "product"] = "min",
+    ) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError("num_rules must be >= 1")
+        if tnorm not in ("min", "product"):
+            raise ValueError(f"Unknown t-norm: {tnorm}")
+        self.num_rules = num_rules
+        self.embed_dim = embed_dim
+        self.tnorm = tnorm
+        # Per-rule filter MLP: E → hidden → 1, sigmoid.
+        self.filter_l1 = nn.Parameter(torch.empty(num_rules, embed_dim, hidden_dim))
+        self.filter_b1 = nn.Parameter(torch.zeros(num_rules, hidden_dim))
+        self.filter_l2 = nn.Parameter(torch.empty(num_rules, hidden_dim, 1))
+        self.filter_b2 = nn.Parameter(torch.zeros(num_rules, 1))
+        # Per-rule sign MLP: E → hidden → 1 (logits; sigmoid applied in forward).
+        self.sign_l1 = nn.Parameter(torch.empty(num_rules, embed_dim, hidden_dim))
+        self.sign_b1 = nn.Parameter(torch.zeros(num_rules, hidden_dim))
+        self.sign_l2 = nn.Parameter(torch.empty(num_rules, hidden_dim, 1))
+        self.sign_b2 = nn.Parameter(torch.zeros(num_rules, 1))
+        for p in (self.filter_l1, self.filter_l2, self.sign_l1, self.sign_l2):
+            nn.init.kaiming_uniform_(p, a=5 ** 0.5)
+
+    def _per_atom_filter_sign(self, emb: Tensor, rule_idx_atom: Tensor):
+        """Apply per-rule filter+sign MLPs to per-atom embeddings.
+
+        Args:
+            emb: ``[..., E]`` per-atom embeddings.
+            rule_idx_atom: ``[...]`` matching leading shape; per-atom rule.
+
+        Returns ``(filter_attn, sign_attn)`` each ``[...]`` in [0, 1].
+
+        Computes the filter/sign outputs for ALL rules in a single
+        ``einsum`` and gathers the per-position rule's result. This
+        replaces a per-position weight gather (``self.l1[rule_idx]``
+        materialises ``[..., E, h]`` for every atom — OOMs on eval
+        chunks) and a Python loop over rules (incompatible with
+        ``torch.compile(fullgraph=True, mode="reduce-overhead")``).
+        Compute is ``num_rules``× redundant per atom, memory is
+        ``[..., num_rules, h]`` intermediate — strictly smaller than
+        the gather pattern when ``E > num_rules`` (the typical regime).
+        """
+        # all_filter_h1[..., r, h] = emb[..., e] @ filter_l1[r, e, h]
+        all_filter_h1 = F.leaky_relu(
+            torch.einsum("...e,reh->...rh", emb, self.filter_l1) + self.filter_b1
+        )
+        # ... → [..., num_rules]
+        all_filter = torch.sigmoid(
+            (
+                torch.einsum("...rh,rhk->...rk", all_filter_h1, self.filter_l2)
+                + self.filter_b2
+            ).squeeze(-1)
+        )
+        all_sign_h1 = F.leaky_relu(
+            torch.einsum("...e,reh->...rh", emb, self.sign_l1) + self.sign_b1
+        )
+        all_sign = torch.sigmoid(
+            (
+                torch.einsum("...rh,rhk->...rk", all_sign_h1, self.sign_l2)
+                + self.sign_b2
+            ).squeeze(-1)
+        )
+        # Gather per-atom rule's result.
+        gather_idx = rule_idx_atom.unsqueeze(-1)            # [..., 1]
+        filter_attn = torch.gather(all_filter, dim=-1, index=gather_idx).squeeze(-1)
+        sign_attn = torch.gather(all_sign, dim=-1, index=gather_idx).squeeze(-1)
+        return filter_attn, sign_attn
+
+    def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
+        if not atom_repr.has_embeddings or not atom_repr.has_scores:
+            raise ValueError(
+                "FilterSignStateRepr requires atom_repr with both embeddings "
+                "and scores (use KGEPairAtom or KGEBothAtom upstream)."
+            )
+        emb = atom_repr.embeddings           # [B, P, D, M, E] or [B, P, M, E]
+        sc = atom_repr.scores                # leading shape matches emb without E
+
+        # Per-atom rule index broadcast to atom leading shape. Padded
+        # groundings carry ``rule_idx=-1``; clamp before the gather (the
+        # downstream ``MaxQueryRepr.mask`` zeroes those slots out so the
+        # mis-routed rule's score never leaks into the final output).
+        rule_idx = evidence.rule_idx.clamp(min=0)        # [B, P, D] or [B, P]
+        rule_atom = rule_idx.unsqueeze(-1).expand(emb.shape[:-1])
+
+        filter_attn, sign_attn = self._per_atom_filter_sign(emb, rule_atom)
+        # filter_attn / sign_attn already collapse the trailing scalar dim.
+        sign_term = _godel_iff(sign_attn, sc)
+        term = torch.maximum(1.0 - filter_attn, sign_term)        # [..., M]
+
+        # T-norm over atoms with the standard empty-conjunction identity (1.0).
+        mask = _per_atom_validity_mask(tuple(term.shape), evidence, term.device)
+        ones = torch.ones_like(term)
+        masked = torch.where(mask, term, ones)
+        if self.tnorm == "min":
+            reduced = masked.min(dim=-1).values
+        else:
+            reduced = masked.prod(dim=-1)
+        return Repr(scores=reduced)
+
+
+class ClusteredFilterSignStateRepr(nn.Module):
+    """Clustered DCR: Gumbel formula clustering + filter/sign Godel attention.
+
+    Adds a learned per-rule formula clustering layer in front of
+    :class:`FilterSignStateRepr`'s per-atom filter+sign MLPs. For each
+    grounding, body-atom embeddings are flattened, projected into ``K``
+    formula embeddings of size ``H``, and a single formula is selected
+    via Gumbel-logistic + straight-through argmax. The selected formula
+    embedding is broadcast over atom positions (with a per-rule
+    positional embedding added) before filter/sign attention.
+
+    Bit-by-bit reproduces ns's pre-migration ``ClusteredDCRReasoning``
+    math, including the exact init pattern (separate per-rule MLPs in
+    ``ModuleList`` flavour, gathered here as stacked parameters).
+
+    Inputs (via ``atom_repr``):
+      * embeddings ``[B, P, D, M, E]`` or ``[B, P, M, E]``
+      * scores ``[..., M]`` — concept "values" for the iff
+    Output: ``Repr(scores=...)`` of shape matching the body-leading dim
+    minus ``M`` (i.e. ``[B, P, D]`` or ``[B, P]``).
+    """
+
+    def __init__(
+        self,
+        num_rules: int,
+        embed_dim: int,
+        max_body_atoms: int,
+        *,
+        num_formulas: int = 4,
+        formula_hidden: int = 64,
+        temperature: float = 1.0,
+        tnorm: Literal["min", "product"] = "min",
+    ) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError("num_rules must be >= 1")
+        self.num_rules = num_rules
+        self.embed_dim = embed_dim
+        self.max_body_atoms = max_body_atoms
+        self.num_formulas = num_formulas
+        self.formula_hidden = formula_hidden
+        self.temperature = temperature
+        self.tnorm = tnorm
+
+        flat_in = max_body_atoms * embed_dim
+        formula_emb_dim = num_formulas * formula_hidden
+        # Per-rule formula embedder: flat → K*H, two-layer LeakyReLU.
+        self.fe_l1 = nn.Parameter(torch.empty(num_rules, flat_in, formula_emb_dim))
+        self.fe_b1 = nn.Parameter(torch.zeros(num_rules, formula_emb_dim))
+        self.fe_l2 = nn.Parameter(torch.empty(num_rules, formula_emb_dim, formula_emb_dim))
+        self.fe_b2 = nn.Parameter(torch.zeros(num_rules, formula_emb_dim))
+        # Per-rule formula scorer: H → 1.
+        self.fs_w = nn.Parameter(torch.empty(num_rules, formula_hidden, 1))
+        self.fs_b = nn.Parameter(torch.zeros(num_rules, 1))
+        # Per-rule positional embedding: [num_rules, M, H].
+        self.pos_emb = nn.Parameter(torch.randn(num_rules, max_body_atoms, formula_hidden))
+        # Filter / sign MLPs over formula embeddings (input dim H, not E).
+        self._fs = FilterSignStateRepr(
+            num_rules=num_rules, embed_dim=formula_hidden,
+            hidden_dim=formula_hidden, tnorm=tnorm,
+        )
+        for p in (self.fe_l1, self.fe_l2, self.fs_w):
+            nn.init.kaiming_uniform_(p, a=5 ** 0.5)
+
+    @staticmethod
+    def _gumbel_logistic(logits: Tensor, temperature: float) -> Tensor:
+        coolness = 1.0 / temperature
+        u = torch.rand_like(logits).clamp(1e-8, 1 - 1e-8)
+        logistic_noise = torch.log(u) - torch.log(1 - u)
+        return F.softmax(logits * coolness + logistic_noise * coolness, dim=-1)
+
+    def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
+        if not atom_repr.has_embeddings or not atom_repr.has_scores:
+            raise ValueError(
+                "ClusteredFilterSignStateRepr requires both embeddings "
+                "and scores in atom_repr."
+            )
+        emb = atom_repr.embeddings           # [..., M, E]
+        sc = atom_repr.scores                # [..., M]
+        leading = emb.shape[:-2]             # [B, P] or [B, P, D]
+        M = emb.shape[-2]
+        E = emb.shape[-1]
+        K = self.num_formulas
+        H = self.formula_hidden
+
+        # Mask invalid atom embeddings (matches ns: zero out pre-flatten).
+        atom_mask_full = _per_atom_validity_mask(emb.shape[:-1], evidence, emb.device)
+        masked_emb = emb * atom_mask_full.unsqueeze(-1).to(emb.dtype)
+
+        # Per-rule formula embedder + formula scorer + positional embedding,
+        # all vectorized via einsum + gather. Computes ALL rules at every
+        # grounding in one fused pass, then picks the per-grounding rule's
+        # outputs along the rule axis. No Python loops, no per-position
+        # weight gather — fullgraph + reduce-overhead torch.compile-safe.
+        # Padded groundings carry ``rule_idx=-1``; clamp to 0 before the
+        # gather (those slots are masked out by ``MaxQueryRepr.mask``).
+        rule_idx = evidence.rule_idx.clamp(min=0)          # [B, P] or [B, P, D]
+        flat_emb = masked_emb.reshape(*leading, M * E)     # [..., M*E]
+        # Two-layer formula embedder for ALL rules: [..., R, K*H].
+        all_h1 = F.leaky_relu(
+            torch.einsum("...i,rij->...rj", flat_emb, self.fe_l1) + self.fe_b1
+        )                                                                    # [..., R, K*H]
+        all_formula = (
+            torch.einsum("...rj,rjk->...rk", all_h1, self.fe_l2) + self.fe_b2
+        )                                                                    # [..., R, K*H]
+        all_formula = all_formula.reshape(*leading, self.num_rules, K, H)    # [..., R, K, H]
+        # Per-formula score for ALL rules: [..., R, K, H] @ [R, H, 1] → [..., R, K]
+        all_logits = (
+            torch.einsum("...rkh,rhj->...rkj", all_formula, self.fs_w)
+            + self.fs_b.unsqueeze(-2)
+        ).squeeze(-1)
+        # Gather per-grounding rule's outputs.
+        rule_idx_kh = rule_idx.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(
+            *rule_idx.shape, 1, K, H,
+        )                                                                    # [..., 1, K, H]
+        formula_emb = torch.gather(all_formula, dim=-3, index=rule_idx_kh).squeeze(-3)
+        rule_idx_k = rule_idx.unsqueeze(-1).unsqueeze(-1).expand(
+            *rule_idx.shape, 1, K,
+        )                                                                    # [..., 1, K]
+        formula_logits = torch.gather(all_logits, dim=-2, index=rule_idx_k).squeeze(-2)
+        # Positional embeddings: pos_emb is [num_rules, M, H], keyed by
+        # rule index along axis 0; ``self.pos_emb[rule_idx]`` produces
+        # the per-grounding [M, H] slice directly without a separate
+        # gather call.
+        atom_formula_emb_pos = self.pos_emb[rule_idx]                        # [..., M, H]
+
+        if self.temperature > 0.0:
+            # ``_gumbel_logistic`` returns soft probs that ns ignores
+            # (it picks via argmax of raw logits); calling it still
+            # consumes the RNG draw so seed-equivalent runs match.
+            _ = self._gumbel_logistic(formula_logits, self.temperature)
+        selected = formula_logits.argmax(dim=-1, keepdim=True)        # [..., 1]
+        # Gather the selected formula embedding per grounding: [..., H].
+        selected_emb = torch.gather(
+            formula_emb, dim=-2,
+            index=selected.unsqueeze(-1).expand(*selected.shape, H),
+        ).squeeze(-2)
+
+        # Add per-rule positional embeddings broadcast across atoms.
+        atom_formula_emb = selected_emb.unsqueeze(-2) + atom_formula_emb_pos  # [..., M, H]
+
+        # Hand off to filter/sign with formula-augmented embeddings.
+        return self._fs(
+            Repr(embeddings=atom_formula_emb, scores=sc),
+            evidence,
+        )
+
+
 __all__ = [
+    "ClusteredFilterSignStateRepr",
     "ConcatStateRepr",
+    "FilterSignStateRepr",
     "GatedTNormStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",

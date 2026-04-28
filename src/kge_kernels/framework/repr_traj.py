@@ -605,14 +605,29 @@ class RuleMLPTrajRepr(nn.Module):
             raise ValueError(
                 f"RuleMLPTrajRepr expects evidence.rule_idx shape [B, P, D]; got {tuple(rule_idx.shape)}"
             )
+        # Padded depths carry ``rule_idx=-1``; clamp before the gather
+        # (the depth-mask in the min reduction below masks them out).
+        rule_idx = rule_idx.clamp(min=0)
 
-        # Apply per-rule MLP via grouped parameter gather.
-        l1_g = self.l1[rule_idx]              # [B, P, D, in_dim, h]
-        b1_g = self.b1[rule_idx]              # [B, P, D, h]
-        h1 = F.relu(torch.einsum("...e,...eh->...h", emb, l1_g) + b1_g)
-        l2_g = self.l2[rule_idx]              # [B, P, D, h, out_dim]
-        b2_g = self.b2[rule_idx]              # [B, P, D, out_dim]
-        e_d = torch.einsum("...h,...hk->...k", h1, l2_g) + b2_g   # [B, P, D, out_dim]
+        # Apply per-rule MLP via vectorized einsum + gather. Computes
+        # all rules' outputs at every position in a single fused
+        # contraction, then picks the per-position rule's output via a
+        # gather along the rule axis. Strictly vectorized (no Python
+        # loops, no large per-position weight gather) — fullgraph +
+        # reduce-overhead torch.compile-safe. Memory:
+        # ``[..., num_rules, h]`` then ``[..., num_rules, out_dim]``,
+        # which is small for KG rule counts (≤ 30).
+        all_h1 = F.relu(
+            torch.einsum("...e,reh->...rh", emb, self.l1) + self.b1
+        )                                                           # [..., R, h]
+        all_e_d = (
+            torch.einsum("...rh,rho->...ro", all_h1, self.l2) + self.b2
+        )                                                           # [..., R, out_dim]
+        # Gather per-position rule's output along the rule axis.
+        gather_idx = rule_idx.unsqueeze(-1).unsqueeze(-1).expand(
+            *rule_idx.shape, 1, self.out_dim,
+        )                                                           # [..., 1, out_dim]
+        e_d = torch.gather(all_e_d, dim=-2, index=gather_idx).squeeze(-2)
 
         # Min over depth dim, masking padded depths with +inf.
         body_count = evidence.body_count                    # [B, P, D]

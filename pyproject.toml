@@ -55,6 +55,13 @@ kge_kernels = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # PyTorch's own torch/utils/mkldnn.py still uses the deprecated
+    # ``@torch.jit.script_method`` decorator; the warning fires every
+    # time ``torch._inductor.compile_fx`` is imported. Not actionable
+    # from this codebase.
+    "ignore:`torch.jit.script_method` is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 120
