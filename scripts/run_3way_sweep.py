@@ -38,17 +38,18 @@ SEED = 0
 
 CONFIGS = [
     # (dataset, model, corrupt_mode, domain_file, epochs, eval_negs)
+    # corrupt_mode: "head" | "tail" | "both" (matches tkk's corruption_scheme)
     # Small datasets: exhaustive TAIL eval
-    ("ablation_d3",  "complex", "TAIL",          "domain2constants.txt", 300, 0),
-    ("ablation_d3",  "rotate",  "TAIL",          "domain2constants.txt", 300, 0),
-    ("countries_s3", "complex", "TAIL",          "domain2constants.txt", 300, 0),
-    ("countries_s3", "rotate",  "TAIL",          "domain2constants.txt", 300, 0),
+    ("ablation_d3",  "complex", "tail", "domain2constants.txt", 300, 0),
+    ("ablation_d3",  "rotate",  "tail", "domain2constants.txt", 300, 0),
+    ("countries_s3", "complex", "tail", "domain2constants.txt", 300, 0),
+    ("countries_s3", "rotate",  "tail", "domain2constants.txt", 300, 0),
     # Family: 500-neg sampled
-    ("family",       "complex", "HEAD_AND_TAIL", None,                   100, 500),
-    ("family",       "rotate",  "HEAD_AND_TAIL", None,                   100, 500),
+    ("family",       "complex", "both", None,                   100, 500),
+    ("family",       "rotate",  "both", None,                   100, 500),
     # wn18rr: 500-neg sampled
-    ("wn18rr",       "complex", "HEAD_AND_TAIL", None,                   100, 500),
-    ("wn18rr",       "rotate",  "HEAD_AND_TAIL", None,                   100, 500),
+    ("wn18rr",       "complex", "both", None,                   100, 500),
+    ("wn18rr",       "rotate",  "both", None,                   100, 500),
 ]
 
 PAPER = {
@@ -61,7 +62,8 @@ PAPER = {
 
 def run_tkk(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
     from kge_kernels.training import TrainConfig, pipeline
-    scheme = "both" if corrupt_mode == "HEAD_AND_TAIL" else corrupt_mode.lower()
+    # corrupt_mode is already in tkk-canonical form ("head"/"tail"/"both").
+    scheme = corrupt_mode
     dom = None
     if domain_file:
         candidate = os.path.join(DATA_ROOT, dataset, domain_file)
@@ -116,7 +118,7 @@ def run_ns(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
     t0 = time.perf_counter()
     train_m, valid_m, test_m, _ = ns_pipeline(args)
     dt = time.perf_counter() - t0
-    mrr = test_m.get('kge_score_mrrmetric', 0) * 100
+    mrr = test_m.get('MRR', 0) * 100
     return mrr, dt
 
 
