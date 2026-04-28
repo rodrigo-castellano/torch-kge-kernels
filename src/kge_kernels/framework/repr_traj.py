@@ -75,14 +75,12 @@ class TNormTrajRepr(nn.Module):
             raise ValueError("TNormTrajRepr requires state_repr.scores")
 
         def reduce(scores: Tensor, depth_valid: Tensor) -> Tensor:
-            if self.tnorm == "min":
-                big = torch.finfo(scores.dtype).max
-                masked = torch.where(depth_valid, scores, torch.full_like(scores, big))
-                reduced = masked.min(dim=-1).values
-                any_valid = depth_valid.any(dim=-1)
-                return torch.where(any_valid, reduced, torch.zeros_like(reduced))
+            # Empty conjunction = vacuously true (1.0) for both min and product
+            # t-norms over [0,1] scores. Matches TNormStateRepr's choice.
             ones = torch.ones_like(scores)
             masked = torch.where(depth_valid, scores, ones)
+            if self.tnorm == "min":
+                return masked.min(dim=-1).values
             return masked.prod(dim=-1)
 
         return Repr(scores=_reduce_depth_scores(state_repr.scores, evidence, reduce))

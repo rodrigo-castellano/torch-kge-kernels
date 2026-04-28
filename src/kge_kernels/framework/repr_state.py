@@ -82,17 +82,14 @@ class TNormStateRepr(nn.Module):
             raise ValueError("TNormStateRepr requires atom_repr.scores")
         scores = atom_repr.scores
         mask = _per_atom_validity_mask(tuple(scores.shape), evidence, scores.device)
+        # Both "min" and "product" t-norms over [0,1] scores share the same
+        # identity element (1.0): an empty conjunction is vacuously true.
+        # ns's SBR matches this via ``masked_fill(~mask, 1.0)``.
+        ones = torch.ones_like(scores)
+        masked = torch.where(mask, scores, ones)
         if self.tnorm == "min":
-            # Pad invalid atoms with +inf so they cannot lower the min.
-            big = torch.finfo(scores.dtype).max
-            masked = torch.where(mask, scores, torch.full_like(scores, big))
             reduced = masked.min(dim=-1).values
-            # If a whole body is empty, the min collapses to +inf — replace with 0
-            any_valid = mask.any(dim=-1)
-            reduced = torch.where(any_valid, reduced, torch.zeros_like(reduced))
         else:
-            ones = torch.ones_like(scores)
-            masked = torch.where(mask, scores, ones)
             reduced = masked.prod(dim=-1)
         return Repr(scores=reduced)
 
