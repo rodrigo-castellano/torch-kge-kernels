@@ -83,8 +83,6 @@ def build_training_model(
     ``hidden_dropout``, ``embedding_height``, ``embedding_width``,
     ``multi_gpu``, ``compile``, ``compile_mode``, ``compile_fullgraph``.
     """
-    from ..training.loop import wrap_model_for_training
-
     model = build_model(
         cfg.model,
         num_entities,
@@ -103,7 +101,22 @@ def build_training_model(
     if cfg.multi_gpu and device.type == "cuda" and torch.cuda.device_count() <= 1:
         print("Warning: multi_gpu=True but multiple GPUs not available. Using single GPU/CPU.")
 
-    return wrap_model_for_training(model, device, cfg)
+    model = model.to(device)
+
+    if cfg.multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+
+    if cfg.compile:
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("torch.compile is unavailable in this PyTorch build")
+        if cfg.multi_gpu and device.type == "cuda" and torch.cuda.device_count() > 1:
+            raise RuntimeError(
+                "torch.compile with DataParallel is not supported in this path"
+            )
+        model = torch.compile(
+            model, mode=cfg.compile_mode, fullgraph=cfg.compile_fullgraph
+        )
+    return model
 
 
 __all__ = ["build_model", "build_training_model"]

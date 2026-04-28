@@ -28,9 +28,8 @@ class TrainConfig:
     """Full KGE training configuration.
 
     Covers everything from data paths to optimiser settings to
-    evaluation schedule. All fields have defaults so the lean
-    ``train_kge`` inner loop can still be called with just
-    ``TrainConfig(epochs=N)``.
+    evaluation schedule. All fields have defaults so :func:`pipeline`
+    can be called with just ``TrainConfig(dataset=..., epochs=N)``.
     """
 
     # -- Data paths --

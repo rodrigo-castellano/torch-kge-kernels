@@ -1,18 +1,18 @@
-"""Streaming metric utilities for training-time observability.
+"""Streaming MRR + Hits@k accumulator for training-time observability.
 
-These accumulate metrics over many per-batch ``(y_pred, y_true)``
-labeled-prediction tensors during training — distinct from the eval
-flow, which goes through :class:`kge_kernels.eval.RankingEvaluator`
-and produces a single :class:`~kge_kernels.eval.RankingResult` per call.
+Per-batch labeled-prediction streams (``y_pred``, ``y_true``) → running
+MRR / Hits@k without any GPU→CPU sync until ``streaming_compute`` is
+called. Distinct from :class:`kge_kernels.eval.RankingEvaluator`, which
+operates on a held-out triple set + corruption sampler.
 
-When you have a per-batch labeled-prediction stream and want a running
-MRR / Hits@k (typical training-loop instrumentation), use
-:class:`StreamingRankingMetrics`. When you have a held-out triple set
-and a corruption sampler and want the standard filtered MRR, use
-:func:`kge_kernels.eval.RankingEvaluator`.
+Functional API: a small mutable :class:`StreamingRanking` state plus
+three free functions (:func:`streaming_reset`, :func:`streaming_update`,
+:func:`streaming_compute`). The legacy class name
+:class:`StreamingRankingMetrics` is kept as a thin compat wrapper.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -21,29 +21,103 @@ from torch import Tensor
 from ..eval.ranking import compute_ranks
 
 
-class StreamingRankingMetrics:
-    """Streaming MRR + Hits@k accumulator for labeled-prediction batches.
+@dataclass
+class StreamingRanking:
+    """Mutable state for streaming MRR + Hits@k.
 
-    Designed for training loops that want to accumulate per-batch ranks
-    on GPU without tensor allocations or GPU→CPU syncs until ``compute()``.
-    Internally stores one GPU scalar per metric and uses ``Tensor.add_``
-    for in-place accumulation.
-
-    Usage::
-
-        metric = StreamingRankingMetrics(ks=(1, 3, 10))
-        for batch in loader:
-            y_pred, y_true = batch
-            metric.update(y_pred, y_true)
-        out = metric.compute()  # {"MRR": ..., "Hits@1": ..., ...}
+    GPU accumulators are allocated lazily on the first
+    :func:`streaming_update` call (so the state is device-agnostic at
+    construction time and can be reused across train/val splits).
 
     Args:
-        ks: Hits cutoffs. Default ``(1, 3, 10)``.
-        pad_value: Label value to ignore (default ``-1``).
-        positive_value: Label value marking positives (default ``1``).
-        metric_key: Output key for MRR. Set to ``"mrrmetric"`` for the
-            lowercase convention used by some codebases; default
-            ``"MRR"`` matches :func:`kge_kernels.eval.metrics_from_ranks`.
+        ks: Hits@k cutoffs.
+        pad_value: ``y_true`` value marking ignored cells.
+        positive_value: ``y_true`` value marking the positive cell.
+        metric_key: Output key for MRR. ``"MRR"`` matches
+            :func:`kge_kernels.eval.metrics_from_ranks`; ``"mrrmetric"``
+            uses the lowercase ``"hits@k"`` convention some consumers expect.
+    """
+    ks: Tuple[int, ...] = (1, 3, 10)
+    pad_value: int = -1
+    positive_value: int = 1
+    metric_key: str = "MRR"
+    # GPU accumulators (None until first update)
+    _mrr_sum: Optional[Tensor] = field(default=None, repr=False)
+    _count: Optional[Tensor] = field(default=None, repr=False)
+    _hits_sums: Dict[int, Tensor] = field(default_factory=dict, repr=False)
+
+
+def streaming_reset(state: StreamingRanking) -> None:
+    """Zero all accumulators in-place. Reuses allocated tensors if any."""
+    if state._mrr_sum is not None and state._count is not None:
+        state._mrr_sum.zero_()
+        state._count.zero_()
+        for k in state.ks:
+            state._hits_sums[k].zero_()
+    else:
+        state._mrr_sum = None
+        state._count = None
+        state._hits_sums = {}
+
+
+def streaming_update(state: StreamingRanking, y_pred: Tensor, y_true: Tensor) -> None:
+    """Accumulate one batch without GPU→CPU sync.
+
+    ``y_true`` is a per-cell label tensor: ``positive_value`` marks
+    positives, ``pad_value`` marks ignored cells, anything else is a
+    distractor. We pick the best-scored positive per row and rank it
+    among valid cells.
+
+    Float32 accumulators match torch-ns's pre-consolidation
+    ``FusedRankingMetrics`` byte-for-byte (float64 is overkill for MRR
+    summations and adds a measurable per-batch promotion cost).
+    """
+    if state._mrr_sum is None:
+        device = y_pred.device
+        state._mrr_sum = torch.zeros((), device=device, dtype=torch.float32)
+        state._count = torch.zeros((), device=device, dtype=torch.long)
+        for k in state.ks:
+            state._hits_sums[k] = torch.zeros((), device=device, dtype=torch.long)
+
+    valid_cells = y_true != state.pad_value
+    is_positive = y_true == state.positive_value
+    valid = valid_cells.any(dim=1) & is_positive.any(dim=1)
+    best_pos_idx = y_pred.masked_fill(~is_positive, float("-inf")).argmax(dim=1)
+    ranks = compute_ranks(y_pred, best_pos_idx, valid_mask=valid_cells)
+
+    inv_ranks = (1.0 / ranks).masked_fill_(~valid, 0.0)
+    state._mrr_sum.add_(inv_ranks.sum())
+    state._count.add_(valid.sum())
+    for k in state.ks:
+        state._hits_sums[k].add_((ranks.le(k) & valid).sum())
+
+
+def streaming_compute(state: StreamingRanking) -> Dict[str, float]:
+    """Return ``{metric_key: mrr, "Hits@k": ...}`` as Python floats.
+
+    Final division uses float32 (matching torch-ns legacy). The hits
+    prefix follows ``state.metric_key``: ``"MRR"`` → ``"Hits@k"``,
+    ``"mrrmetric"`` → ``"hits@k"``.
+    """
+    hits_prefix = "hits" if state.metric_key == "mrrmetric" else "Hits"
+    if state._count is None or state._mrr_sum is None:
+        out: Dict[str, float] = {state.metric_key: 0.0}
+        for k in state.ks:
+            out[f"{hits_prefix}@{k}"] = 0.0
+        return out
+    count = state._count.clamp(min=1).float()
+    results: Dict[str, float] = {state.metric_key: (state._mrr_sum / count).item()}
+    for k in state.ks:
+        results[f"{hits_prefix}@{k}"] = (state._hits_sums[k].float() / count).item()
+    return results
+
+
+class StreamingRankingMetrics:
+    """Compat shim around :class:`StreamingRanking`.
+
+    Existing callers (``ns/experiment.py:617-623``, tests) use the
+    class-style API. The class delegates to the functional API so all
+    semantics are preserved bit-for-bit.
     """
 
     def __init__(
@@ -53,93 +127,33 @@ class StreamingRankingMetrics:
         positive_value: int = 1,
         metric_key: str = "MRR",
     ) -> None:
-        self.ks = tuple(ks)
-        self.pad_value = pad_value
-        self.positive_value = positive_value
-        self.metric_key = metric_key
-        self._initialized = False
-        self._mrr_sum: Optional[Tensor] = None
-        self._count: Optional[Tensor] = None
-        self._hits_sums: Dict[int, Tensor] = {}
+        self._state = StreamingRanking(
+            ks=tuple(ks), pad_value=pad_value,
+            positive_value=positive_value, metric_key=metric_key,
+        )
+
+    @property
+    def ks(self) -> Tuple[int, ...]:
+        return self._state.ks
+
+    @property
+    def metric_key(self) -> str:
+        return self._state.metric_key
 
     def reset(self) -> None:
-        """Zero the accumulators (reusing allocated tensors if any)."""
-        if self._initialized and self._mrr_sum is not None and self._count is not None:
-            self._mrr_sum.zero_()
-            self._count.zero_()
-            for k in self.ks:
-                self._hits_sums[k].zero_()
-        else:
-            self._mrr_sum = None
-            self._count = None
-            self._hits_sums = {}
-            self._initialized = False
-
-    def _init(self, device: torch.device) -> None:
-        # Float32 accumulators match torch-ns's pre-consolidation
-        # FusedRankingMetrics byte-for-byte. float64 is overkill for MRR /
-        # Hits@k summations (ranks are at most ~vocab_size, 1/rank ≥ 1e-5
-        # has plenty of float32 precision) and the extra float32→float64
-        # cast on the hot path measurably slowed torch-ns test_train_speed
-        # via per-validation-batch overhead.
-        self._mrr_sum = torch.zeros((), device=device, dtype=torch.float32)
-        self._count = torch.zeros((), device=device, dtype=torch.long)
-        for k in self.ks:
-            self._hits_sums[k] = torch.zeros((), device=device, dtype=torch.long)
-        self._initialized = True
+        streaming_reset(self._state)
 
     def update(self, y_pred: Tensor, y_true: Tensor) -> None:
-        """Accumulate one batch without any GPU→CPU sync.
-
-        ``y_true`` is a per-cell label tensor: ``positive_value`` marks
-        positives, ``pad_value`` marks ignored cells, anything else is a
-        distractor. We pick the best-scored positive per row and rank it.
-
-        All operations run in ``y_pred.dtype`` (typically float32) with
-        no dtype promotion. The in-place ``masked_fill_`` avoids
-        allocating a fresh tensor per batch.
-        """
-        if not self._initialized:
-            self._init(y_pred.device)
-        assert self._mrr_sum is not None and self._count is not None
-
-        # Pick the highest-scored positive per row, rank it among valid cells.
-        valid_cells = y_true != self.pad_value
-        is_positive = y_true == self.positive_value
-        valid = valid_cells.any(dim=1) & is_positive.any(dim=1)
-        best_pos_idx = y_pred.masked_fill(~is_positive, float("-inf")).argmax(dim=1)
-        ranks = compute_ranks(y_pred, best_pos_idx, valid_mask=valid_cells)
-
-        inv_ranks = (1.0 / ranks).masked_fill_(~valid, 0.0)
-        self._mrr_sum.add_(inv_ranks.sum())
-        self._count.add_(valid.sum())
-        for k in self.ks:
-            self._hits_sums[k].add_((ranks.le(k) & valid).sum())
+        streaming_update(self._state, y_pred, y_true)
 
     def compute(self) -> Dict[str, float]:
-        """Return ``{metric_key: mrr, "Hits@{k}": hits@k}`` as Python floats.
-
-        The final division uses float32 to match torch-ns legacy behavior.
-        For the ``mrrmetric`` / ``hits@k`` lowercase convention, set
-        ``metric_key="mrrmetric"`` at construction time.
-        """
-        hits_prefix = "Hits"
-        if self.metric_key == "mrrmetric":
-            hits_prefix = "hits"
-        if not self._initialized or self._count is None or self._mrr_sum is None:
-            out: Dict[str, float] = {self.metric_key: 0.0}
-            for k in self.ks:
-                out[f"{hits_prefix}@{k}"] = 0.0
-            return out
-        count = self._count.clamp(min=1).float()
-        results: Dict[str, float] = {
-            self.metric_key: (self._mrr_sum / count).item(),
-        }
-        for k in self.ks:
-            results[f"{hits_prefix}@{k}"] = (
-                self._hits_sums[k].float() / count
-            ).item()
-        return results
+        return streaming_compute(self._state)
 
 
-__all__ = ["StreamingRankingMetrics"]
+__all__ = [
+    "StreamingRanking",
+    "StreamingRankingMetrics",
+    "streaming_compute",
+    "streaming_reset",
+    "streaming_update",
+]

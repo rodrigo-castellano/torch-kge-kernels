@@ -183,6 +183,7 @@ class KnowledgeBase:
         permissive: bool = False,
         valid_size: Optional[int] = None,
         padding_idx: Optional[int] = 0,
+        use_reciprocal: bool = False,
     ) -> None:
         self._reset()
         self.padding_idx = padding_idx if padding_idx is not None else 0
@@ -191,6 +192,8 @@ class KnowledgeBase:
         # that case) so downstream code can read a single attribute, but
         # internally the loader uses ``_padding_idx`` to drive the shift.
         self._padding_idx = padding_idx
+        self.use_reciprocal = use_reciprocal
+        self.num_relations_orig = 0   # populated after load if reciprocal applied
         if dataset_name is None:
             # Lazy-init: subclass will call ``self.load_dataset(...)`` (or
             # equivalently :meth:`_load_dataset`) after its own setup.
@@ -203,6 +206,28 @@ class KnowledgeBase:
             fact_file=fact_file, domain_file=domain_file,
             permissive=permissive, valid_size=valid_size,
         )
+        if use_reciprocal:
+            self._apply_reciprocal_relations()
+
+    def _apply_reciprocal_relations(self) -> None:
+        """Augment training triples + relation vocab with reciprocal relations.
+
+        For each ``(r, h, t)`` adds ``(r + num_relations_orig, t, h)``
+        where the inverse relation is named ``<r>__inv``. Updates
+        ``relation2id``, ``predicates``, ``num_relations``, and
+        ``train_idx``. Validation/test are NOT augmented (only training
+        sees the reciprocal pairs).
+        """
+        from .transforms import add_reciprocal_triples
+        self.num_relations_orig = self.num_relations
+        new_train_idx, new_relation2id, new_num_relations = add_reciprocal_triples(
+            self.train_idx, self.relation2id, inv_suffix="__inv",
+        )
+        self.train_idx = new_train_idx
+        self.relation2id = new_relation2id
+        self.num_relations = new_num_relations
+        self.predicates = sorted(new_relation2id.keys())
+        self.predicates_set = frozenset(self.predicates)
 
     def _reset(self) -> None:
         """Initialize all bundle attributes to empty defaults.
@@ -955,6 +980,9 @@ class KnowledgeBase:
         seed: int = 0,
         device: Optional[Any] = None,
         order_negatives: bool = False,
+        kind: str = "regular",
+        train_triples_for_bern: Optional[Any] = None,
+        with_domain: bool = True,
     ) -> "Sampler":
         """Construct a tkk ``Sampler`` from the loaded id space + filters + domains.
 
@@ -970,13 +998,25 @@ class KnowledgeBase:
             seed: RNG seed for the underlying torch generator.
             device: Optional device override; defaults to CPU.
             order_negatives: Forwarded to ``Sampler.from_data``.
+            kind: ``"regular"`` (the default :class:`Sampler`) or
+                ``"bernoulli"`` (the :class:`BernoulliSampler` with
+                per-relation head/tail-corrupt probabilities). Bernoulli
+                is used by tkk's ``train_model`` when
+                ``corruption_scheme == "both"``.
+            train_triples_for_bern: When ``kind="bernoulli"``, the
+                training triples used to compute Bernoulli probabilities.
+                Falls back to ``self.train_idx``.
+            with_domain: When ``False``, drop the domain restriction on
+                this sampler (used to build a no-domain training sampler
+                from a kb that carries domain info for eval).
 
         Returns:
-            A configured :class:`kge_kernels.scoring.Sampler`.
+            A configured :class:`kge_kernels.scoring.Sampler` (or
+            :class:`BernoulliSampler` when ``kind="bernoulli"``).
         """
         import torch
 
-        from ..scoring import Sampler
+        from ..scoring import BernoulliSampler, Sampler
 
         device = device or torch.device("cpu")
         if self.ground_facts_idx_set:
@@ -985,6 +1025,34 @@ class KnowledgeBase:
             )
         else:
             all_known = torch.empty((0, 3), dtype=torch.long)
+
+        # ``min_entity_idx`` is derived from the padding convention:
+        # id 0 reserved → entities start at 1; ``padding_idx=None`` (dense
+        # 0-based ids) → entities start at 0. Read the private
+        # ``_padding_idx`` because the public ``padding_idx`` defaults
+        # to 0 in the dense-id case for backwards compat.
+        min_entity_idx = 1 if self._padding_idx == 0 else 0
+        d2i = (self.domain2idx or None) if with_domain else None
+        e2d = (self.entity2domain_idx or None) if with_domain else None
+
+        if kind == "bernoulli":
+            train_t = train_triples_for_bern
+            if train_t is None:
+                train_t = torch.tensor(self.train_idx, dtype=torch.long)
+            return BernoulliSampler.from_data(
+                all_known_triples_idx=all_known,
+                num_entities=self.num_entities,
+                num_relations=self.num_relations,
+                device=device,
+                bern_probs=BernoulliSampler.compute_probs(
+                    train_t, self.num_relations,
+                ),
+                min_entity_idx=min_entity_idx,
+                domain2idx=d2i,
+                entity2domain=e2d,
+            )
+        if kind != "regular":
+            raise ValueError(f"Unknown sampler kind: {kind!r}")
         return Sampler.from_data(
             all_known_triples_idx=all_known,
             num_entities=self.num_entities,
@@ -992,13 +1060,10 @@ class KnowledgeBase:
             device=device,
             default_mode=default_mode,
             seed=seed,
-            domain2idx=(self.domain2idx or None),
-            entity2domain=(self.entity2domain_idx or None),
+            domain2idx=d2i,
+            entity2domain=e2d,
             order_negatives=order_negatives,
-            # ``min_entity_idx`` is derived from the padding convention:
-            # when id 0 is reserved for padding, the entity pool starts
-            # at 1; otherwise it starts at 0.
-            min_entity_idx=1 if self.padding_idx == 0 else 0,
+            min_entity_idx=min_entity_idx,
         )
 
     def split_idx(self, split: str) -> List[Tuple[int, int, int]]:

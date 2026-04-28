@@ -1,15 +1,19 @@
-"""KGE training: lean inner loop, full pipeline, config, and checkpoints.
+"""KGE training: full pipeline, config, primitives, and checkpoints.
 
-Two levels of abstraction:
+Public surface:
 
-  - ``train_kge`` — lean inner loop; caller handles validation, early
-    stopping, checkpointing via ``on_epoch_end``.
-  - ``pipeline``  — full pipeline: data loading, model construction,
-    training, validation, early stopping, final evaluation, checkpoint
-    saving.
+  - ``pipeline``  — full training pipeline (data → model → train → eval → save)
+  - ``train_epoch`` / ``train_step`` / ``nssa_train_step`` — per-epoch + per-step primitives
+  - ``iterate_epoch_batches`` / ``pick_query_batch`` — batching helpers
+  - ``set_seed`` — reproducibility
+  - ``StreamingRankingMetrics`` — training-time observability
+  - ``TrainConfig`` (alias ``KGETrainConfig``) — hyperparameter dataclass
+  - checkpoint save/load helpers
 
-Both share ``TrainConfig`` (all hyperparameters) and the checkpoint /
-utility helpers.
+The ``pipeline`` entry is wired by :mod:`kge_kernels.training.cli` for
+``python -m kge_kernels.training.cli``. ``train_epoch`` is the shared
+per-epoch primitive used by both tkk's ``pipeline`` and torch-ns's
+training path.
 """
 from __future__ import annotations
 
@@ -28,42 +32,58 @@ from .checkpoints import (
     unwrap_model,
     write_json_payload,
 )
-from .batching import iterate_epoch_batches, pick_query_batch
-from .config import KGETrainConfig, TrainArtifacts, TrainConfig
-from .epoch import clear_train_cache, train_epoch
-from .loop import (
-    OnEpochEnd,
-    TripleDataset,
-    make_cosine_warmup_scheduler,
-    set_seed,
-    train_kge,
-    wrap_model_for_training,
+from .builder import (
+    Callbacks,
+    DataBundle,
+    OptimBundle,
+    build_callbacks,
+    build_data,
+    build_evaluator,
+    build_model,
+    build_optimizer,
+    run_evaluation,
 )
-from .loss import train_step
-from .metrics import StreamingRankingMetrics
+from .config import KGETrainConfig, TrainArtifacts, TrainConfig
+from .epoch import (
+    clear_train_cache,
+    iterate_epoch_batches,
+    pick_query_batch,
+    set_seed,
+    train_epoch,
+)
 from .experiment import pipeline
+from .loss import nssa_train_step, train_step
+from .metrics import StreamingRankingMetrics
+from .train import train
 
 __all__ = [
     # Config
     "KGETrainConfig",
     "TrainArtifacts",
     "TrainConfig",
-    # Inner loop
-    "OnEpochEnd",
-    "TripleDataset",
+    # Per-epoch + per-step primitives
     "clear_train_cache",
     "iterate_epoch_batches",
+    "nssa_train_step",
     "pick_query_batch",
-    "make_cosine_warmup_scheduler",
     "set_seed",
     "train_epoch",
-    "train_kge",
     "train_step",
-    "wrap_model_for_training",
     # Streaming metrics for training-time observability
     "StreamingRankingMetrics",
     # Full pipeline
     "pipeline",
+    # Builder + train (DpRL-aligned factory layer)
+    "Callbacks",
+    "DataBundle",
+    "OptimBundle",
+    "build_callbacks",
+    "build_data",
+    "build_evaluator",
+    "build_model",
+    "build_optimizer",
+    "run_evaluation",
+    "train",
     # Checkpoints
     "build_config_payload",
     "config_from_payload",

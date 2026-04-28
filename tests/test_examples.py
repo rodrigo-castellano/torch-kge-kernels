@@ -15,8 +15,6 @@ import pytest
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 EXAMPLE_SCRIPTS = [
     "01_sbr_exhaustive.py",
-    "02_train_kge.py",
-    "03_filtered_eval.py",
 ]
 
 

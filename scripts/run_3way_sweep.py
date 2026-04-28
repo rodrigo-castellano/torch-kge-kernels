@@ -3,10 +3,9 @@
 
 Two columns:
 
-- ``tkk``: ``kge_kernels.training.train_model`` directly (currently its
-  own inline loop in pipeline.py; task #58 will wire it through
-  ``train_epoch`` too).
-- ``ns``:  ``experiments.train.main`` with ``model_name=no_reasoner``,
+- ``tkk``: ``kge_kernels.training.pipeline`` — runs the unified
+  ``train_epoch`` path; loss is BCE by default, NSSA via ``cfg.loss``.
+- ``ns``:  ``torch_ns.train.main`` with ``model_name=no_reasoner``,
   which routes through ``train_loop`` → ``train_epoch`` (the shared
   static-buffer compiled path).
 
@@ -17,16 +16,18 @@ overhead on a KGE-only model.
 import os, sys, time, argparse
 from types import SimpleNamespace
 
-# Add torch-ns to path for direct import.
-# Default to the checkout the current env has installed editable.
+# Resolve the torch-ns checkout via its editable install. tkk-consolidation
+# renamed the umbrella package from ``experiments``/``ns_lib`` to
+# ``torch_ns``; ``find_spec`` here also exists to surface a clean error if
+# torch-ns isn't installed in the active env.
 import importlib.util
-_spec = importlib.util.find_spec("experiments")
+_spec = importlib.util.find_spec("torch_ns")
 if _spec and _spec.submodule_search_locations:
     NS_REPO = os.path.dirname(next(iter(_spec.submodule_search_locations)))
 else:
     NS_REPO = os.environ.get(
         "NS_REPO",
-        os.path.expanduser("~/repos/torch-ns-swarm/main"),
+        os.path.expanduser("~/repos/torch-ns-swarm/tkk-consolidation"),
     )
     sys.path.insert(0, NS_REPO)
 
@@ -59,7 +60,7 @@ PAPER = {
 
 
 def run_tkk(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
-    from kge_kernels.training import TrainConfig, train_model
+    from kge_kernels.training import TrainConfig, pipeline
     scheme = "both" if corrupt_mode == "HEAD_AND_TAIL" else corrupt_mode.lower()
     dom = None
     if domain_file:
@@ -78,67 +79,42 @@ def run_tkk(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
         eval_num_corruptions=eval_negs, domain_file=dom,
     )
     t0 = time.perf_counter()
-    art = train_model(cfg)
+    art = pipeline(cfg)
     dt = time.perf_counter() - t0
     m = art.metrics or {}
     return m.get("test_mrr", 0) * 100, dt
 
 
 def _make_ns_args(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
-    return SimpleNamespace(
+    """Build an NSTrainConfig matching the tkk-side cfg used in run_tkk()."""
+    from torch_ns.config import NSTrainConfig
+    return NSTrainConfig(
         dataset_name=dataset, data_path=DATA_ROOT,
         model_name='no_reasoner', kge=model,
-        kge_atom_embedding_size=100,
-        entity_embedding_size=None, relation_embedding_size=None,
         epochs=epochs, learning_rate=0.01,
         batch_size=256, num_negatives=1,
-        lr_sched='none', weight_loss=0.5,
-        optimizer='adam', loss='binary_crossentropy',
+        lr_sched='none',
+        loss='binary_crossentropy',
         corrupt_mode=corrupt_mode,
         test_negatives=eval_negs, valid_negatives=eval_negs,
         test_batch_size=4096, val_batch_size=-1,
         seed=SEED, seed_run_i=SEED,
-        no_compile=True, compile_mode='reduce-overhead',
+        no_compile=True,
         domain_file=domain_file,
-        format='functional',
-        train_file='train.txt', valid_file='valid.txt',
-        test_file='test.txt', facts_file='facts.txt',
-        grounder='sld.prune.d1',
-        kge_regularization=0.001, kge_dropout_rate=0.0,
-        reasoner_regularization_factor=0.001, reasoner_dropout_rate=0.0,
-        reasoner_atom_embedding_size=100,
-        reasoner_formula_hidden_embedding_size=100,
-        reasoner_depth=1, reasoner_single_model=False,
-        aggregation_type='max', signed=True, temperature=1.0,
-        resnet=False, embedding_resnet=False,
-        num_rules=9999, rules_file='rules.txt',
-        raw_kge_output=False, grad_clip=0.0,
-        early_stopping=False, no_early_stopping=False,
-        valid_frequency=1, valid_size=None,
+        valid_frequency=1,
         checkpoint_mode='none',
-        _run_root=None, _tb_log_dir=None, _run_model_writer=None,
-        experiment_name=None, output_root=os.path.join(NS_REPO, 'output'),
-        distill=False, stop_kge_gradients=False,
-        max_groundings=32, max_total_groundings=64, max_facts_per_query=64,
-        filter_num_heads=1, filter_activity_regularization=0.0,
-        provable_set_method='spmm', compute_aucpr=False, amp=False,
-        inflated_eval=False, all_anchors=False,
-        gate_reg_lambda=0.01, gate_type='linear',
-        formula_hidden_size=64, num_formulas=4, r2n_dropout_rate=0.0,
-        patience=20, lr_patience=10,
-        cdcr_use_positional_embeddings=True, cdcr_num_formulas=3,
-        r2n_prediction_type='full',
-        engine_num_adaptive_constants=0, engine_pure_adaptive=False,
-        engine_dot_product=False,
+        output_root=os.path.join(NS_REPO, 'output'),
+        early_stopping=False,
+        num_rules=0, reasoner_depth=0,  # ensured by normalize_kge_only_args anyway
     )
 
 
 def run_ns(dataset, model, corrupt_mode, domain_file, epochs, eval_negs):
-    from experiments.train import main as ns_main
+    from torch_ns.experiment import pipeline as ns_pipeline
     args = _make_ns_args(dataset, model, corrupt_mode, domain_file,
                          epochs, eval_negs)
     t0 = time.perf_counter()
-    train_m, valid_m, test_m, _ = ns_main(DATA_ROOT, args)
+    train_m, valid_m, test_m, _ = ns_pipeline(args)
     dt = time.perf_counter() - t0
     mrr = test_m.get('kge_score_mrrmetric', 0) * 100
     return mrr, dt
@@ -158,7 +134,7 @@ def _open_run_bundle(experiment_name: str | None, run_name: str | None):
     from datetime import datetime, timezone
     from pathlib import Path
 
-    from kge_kernels.logging.context import _TeeStream  # type: ignore
+    from kge_kernels.runs.context import _TeeStream  # type: ignore
 
     repo_root = Path(__file__).resolve().parents[1]
     if experiment_name is None:
@@ -199,6 +175,8 @@ def main():
                         help="Dataset substrings to skip (e.g. 'wn18rr')")
     parser.add_argument("--only", nargs="*", default=None,
                         help="Only include datasets matching these substrings")
+    parser.add_argument("--kge", nargs="*", default=None,
+                        help="Only include KGE models in this list (e.g. complex)")
     parser.add_argument("--experiment_name", type=str, default=None,
                         help="Subdirectory under output/runs/. "
                              "Default: YYYYMMDD-3way-kge-sweep")
@@ -223,6 +201,8 @@ def _run_sweep(args, run_dir):
     configs = CONFIGS
     if args.only:
         configs = [c for c in configs if any(s in c[0] for s in args.only)]
+    if args.kge:
+        configs = [c for c in configs if c[1] in args.kge]
     for ex in args.exclude:
         configs = [c for c in configs if ex not in c[0]]
 
