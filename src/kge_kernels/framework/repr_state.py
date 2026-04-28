@@ -94,6 +94,72 @@ class TNormStateRepr(nn.Module):
         return Repr(scores=reduced)
 
 
+class RuleWeightedStateRepr(nn.Module):
+    """T-norm aggregator scaled by per-rule learnable weights.
+
+    Implements the RNM (sigmoid) and DeepStocklog (softmax) state-repr
+    rows of framework.pdf §11. After the t-norm reduction over body
+    atoms, multiplies each grounding by a per-rule weight gathered from
+    the rule index of that grounding::
+
+        score(g) = activation(w_{rule(g)}) * tnorm(body_atom_scores)
+
+    ``weight_mode`` chooses how the per-rule scalar is normalized:
+
+    - ``"sigmoid"`` — element-wise σ(w_r), independent per rule (RNM).
+      ``w`` initializes to 0 → σ(0) = 0.5 (uniform mid-prior).
+    - ``"softmax"`` — softmax over rules, competitive (DeepStocklog).
+      ``w`` initializes to 1 → softmax(1) = 1/R (uniform).
+
+    The structured-vs-legacy layout decision matches
+    :class:`TNormStateRepr`: the activation is broadcast against the
+    rule-index tensor, whose shape lines up with the t-norm output —
+    ``[B, P]`` for legacy flat evidence (``rule_idx``), ``[B, P, D]``
+    for structured evidence (``rule_idx`` per depth). Invalid groundings
+    typically carry ``rule_idx = -1``; PyTorch's negative tensor
+    indexing wraps to ``rule_weights[R-1]``, which downstream
+    ``MaxQueryRepr`` masks out via ``evidence.mask`` — so the wrong
+    weight cannot leak into the final score.
+
+    Pair upstream with :class:`KGEScoreAtom` (RNM/DeepStocklog ship as
+    score-path reasoners; no body embeddings).
+    """
+
+    def __init__(
+        self,
+        num_rules: int,
+        *,
+        weight_mode: Literal["sigmoid", "softmax"] = "sigmoid",
+        tnorm: Literal["min", "product"] = "min",
+    ) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError("num_rules must be >= 1")
+        if weight_mode not in ("sigmoid", "softmax"):
+            raise ValueError(f"Unknown weight_mode: {weight_mode}")
+        self.num_rules = num_rules
+        self.weight_mode = weight_mode
+        # RNM convention: zeros → σ(0) = 0.5.
+        # DeepStocklog convention: ones → softmax(1) = 1/R.
+        init = torch.zeros(num_rules) if weight_mode == "sigmoid" else torch.ones(num_rules)
+        self.rule_weights = nn.Parameter(init)
+        self._tnorm_repr = TNormStateRepr(tnorm)
+
+    def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
+        s_repr = self._tnorm_repr(atom_repr, evidence)
+        scores = s_repr.scores
+        if self.weight_mode == "sigmoid":
+            weights = torch.sigmoid(self.rule_weights)
+        else:
+            weights = F.softmax(self.rule_weights, dim=0)
+        # rule_idx aligns with state_repr's leading shape: structured
+        # evidence has [B, P, D] and the t-norm output is [B, P, D];
+        # legacy flat evidence has [B, P] and the output is [B, P].
+        rule_idx = evidence.rule_idx
+        per_grounding_weight = weights[rule_idx.long()]
+        return Repr(scores=per_grounding_weight * scores)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Embedding-path aggregators (Sum / Mean / Max / Concat)
 # ═══════════════════════════════════════════════════════════════════════
@@ -295,6 +361,7 @@ __all__ = [
     "MaxStateRepr",
     "MeanStateRepr",
     "PhiPsiStateRepr",
+    "RuleWeightedStateRepr",
     "SumStateRepr",
     "TNormStateRepr",
 ]

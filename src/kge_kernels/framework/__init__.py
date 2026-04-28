@@ -46,6 +46,7 @@ from .repr_state import (
     MaxStateRepr,
     MeanStateRepr,
     PhiPsiStateRepr,
+    RuleWeightedStateRepr,
     SumStateRepr,
     TNormStateRepr,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "MaxStateRepr",
     "MeanStateRepr",
     "PhiPsiStateRepr",
+    "RuleWeightedStateRepr",
     "SumStateRepr",
     "TNormStateRepr",
     # Traj reprs
