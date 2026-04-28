@@ -27,6 +27,7 @@ from .repr import Repr
 from .repr_atom import (
     KGEBothAtom,
     KGEEmbedAtom,
+    KGEPairAtom,
     KGEScoreAtom,
     MLPAtom,
     RemappedKGEScoreAtom,
@@ -43,6 +44,7 @@ from .repr_query import (
 )
 from .repr_state import (
     ConcatStateRepr,
+    GatedTNormStateRepr,
     MaxStateRepr,
     MeanStateRepr,
     PhiPsiStateRepr,
@@ -91,11 +93,13 @@ __all__ = [
     "classify_atoms",
     "KGEBothAtom",
     "KGEEmbedAtom",
+    "KGEPairAtom",
     "KGEScoreAtom",
     "MLPAtom",
     "RemappedKGEScoreAtom",
     # State reprs
     "ConcatStateRepr",
+    "GatedTNormStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",
     "PhiPsiStateRepr",

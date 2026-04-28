@@ -84,6 +84,47 @@ class KGEBothAtom(nn.Module):
         )
 
 
+def _entity_table(model) -> Tensor:
+    for name in ("entity_embeddings", "ent"):
+        mod = getattr(model, name, None)
+        if isinstance(mod, nn.Embedding):
+            return mod.weight
+    raise AttributeError("model must expose entity_embeddings or ent (Embedding)")
+
+
+class KGEPairAtom(nn.Module):
+    """Per-atom KGE score + entity-pair concat embedding.
+
+    Scores via ``model.score(h, r, t)`` (same as :class:`KGEScoreAtom`).
+    The embedding ignores the relation and concatenates the entity table
+    rows: ``cat(entity_table[h], entity_table[t])``. Used by gate /
+    filter primitives where the pair characteristics are the relevant
+    feature, not the full triple composition (e.g. GatedSBR's gate).
+
+    Returns ``Repr(scores=..., embeddings=...)`` so it can pair with
+    state-repr primitives that want both signals (e.g.
+    :class:`~kge_kernels.framework.repr_state.GatedTNormStateRepr`).
+    """
+
+    def __init__(self, normalize_score: bool = True) -> None:
+        super().__init__()
+        self.normalize_score = normalize_score
+
+    def forward(self, preds: Tensor, subjs: Tensor, objs: Tensor, model) -> Repr:
+        r, h, t, leading = _flatten_for_lookup(preds, subjs, objs)
+        ent = _entity_table(model)
+        h_emb = F.embedding(h, ent)
+        t_emb = F.embedding(t, ent)
+        pair_emb = torch.cat([h_emb, t_emb], dim=-1)
+        sc = _score_triples(model, h, r, t)
+        if self.normalize_score:
+            sc = torch.sigmoid(sc)
+        return Repr(
+            scores=sc.reshape(leading),
+            embeddings=pair_emb.reshape(*leading, pair_emb.shape[-1]),
+        )
+
+
 class MLPAtom(nn.Module):
     """MLP atom embedder over concat(h_emb, r_emb, t_emb).
 
@@ -170,6 +211,7 @@ class RemappedKGEScoreAtom(nn.Module):
 __all__ = [
     "KGEBothAtom",
     "KGEEmbedAtom",
+    "KGEPairAtom",
     "KGEScoreAtom",
     "MLPAtom",
     "RemappedKGEScoreAtom",

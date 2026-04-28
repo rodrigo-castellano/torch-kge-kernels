@@ -160,6 +160,113 @@ class RuleWeightedStateRepr(nn.Module):
         return Repr(scores=per_grounding_weight * scores)
 
 
+class GatedTNormStateRepr(nn.Module):
+    """Gated SBR's gate-blended t-norm state aggregator (framework.pdf §11).
+
+    Implements the GatedSBR row: a learned per-grounding gate decides how
+    much to trust the t-norm body-min vs. defaulting to a vacuous-true 1::
+
+        gate_g = sigmoid(gate_net(flatten(masked_atom_embeddings_g)))
+        head_g = gate_g * tnorm_min(body_atom_scores_g)
+                 + (1 - gate_g) * 1.0
+
+    The residual to ``1.0`` prevents gate collapse: even when the network
+    drives ``gate → 0``, valid groundings still score 1, so a query
+    that has any valid grounding cannot collapse to 0 from the gate
+    alone (it can still fail through ``MaxQueryRepr``'s mask handling).
+
+    Pair upstream with an atom_repr that produces both scores AND
+    per-atom embeddings — :class:`KGEPairAtom` (entity-pair concat,
+    matches ns's pre-migration GatedSBRReasoning) or
+    :class:`KGEBothAtom` (full triple compose). The gate input is the
+    flattened embeddings, so the constructor needs to know the per-atom
+    embedding dim and the maximum body atoms per grounding.
+
+    Gate regularization (``L_gate = E[(gate - 0.5)²]`` over valid
+    groundings) is exposed via the :attr:`gate_regularization` attribute
+    after each forward call. The caller adds it to the training loss
+    with a configurable λ — this primitive itself does not multiply by λ.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        max_body_atoms: int,
+        *,
+        gate_type: Literal["linear", "mlp"] = "linear",
+        hidden_dim: int = 32,
+        dropout: float = 0.3,
+        tnorm: Literal["min", "product"] = "min",
+    ) -> None:
+        super().__init__()
+        if gate_type not in ("linear", "mlp"):
+            raise ValueError(f"Unknown gate_type: {gate_type}")
+        self.embed_dim = embed_dim
+        self.max_body_atoms = max_body_atoms
+        self.gate_type = gate_type
+        self._tnorm_repr = TNormStateRepr(tnorm)
+
+        gate_input_dim = max_body_atoms * embed_dim
+        if gate_type == "mlp":
+            layer1 = nn.Linear(gate_input_dim, hidden_dim)
+            layer2 = nn.Linear(hidden_dim, 1)
+            # Init final layer at 0 → sigmoid(0)=0.5 (neutral blend at start).
+            nn.init.zeros_(layer2.weight)
+            nn.init.constant_(layer2.bias, 0.0)
+            self.gate = nn.Sequential(
+                layer1, nn.ReLU(),
+                nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
+                layer2, nn.Sigmoid(),
+            )
+        else:
+            gate_linear = nn.Linear(gate_input_dim, 1)
+            nn.init.zeros_(gate_linear.weight)
+            nn.init.constant_(gate_linear.bias, 0.0)
+            self.gate = nn.Sequential(gate_linear, nn.Sigmoid())
+
+        # Updated by every forward; read by the caller to add to loss.
+        self.gate_regularization: Optional[Tensor] = None
+
+    def forward(self, atom_repr: Repr, evidence: ProofEvidence) -> Repr:
+        if not atom_repr.has_scores or not atom_repr.has_embeddings:
+            raise ValueError(
+                "GatedTNormStateRepr requires atom_repr with both scores "
+                "and embeddings (use KGEPairAtom or KGEBothAtom upstream)."
+            )
+
+        # 1. T-norm body-min (probabilistic head) over the body atoms.
+        s_repr = self._tnorm_repr(atom_repr, evidence)
+        prob_head = s_repr.scores
+
+        # 2. Gate from masked embeddings. Zero out invalid atoms before
+        # flattening so padding can't bias the gate.
+        emb = atom_repr.embeddings
+        atom_mask = _per_atom_validity_mask(tuple(emb.shape[:-1]), evidence, emb.device)
+        masked_emb = emb * atom_mask.unsqueeze(-1).to(emb.dtype)
+        leading_shape = masked_emb.shape[:-2]            # [B, P] or [B, P, D]
+        M = masked_emb.shape[-2]
+        E = masked_emb.shape[-1]
+        gate_input = masked_emb.reshape(-1, M * E)
+        gate = self.gate(gate_input).reshape(leading_shape)
+
+        # 3. Residual blend.
+        blended = gate * prob_head + (1.0 - gate)
+
+        # 4. Stash the regularization signal for the caller.
+        # Mask the centered-deviation by valid groundings so padded slots
+        # don't dilute the mean toward 0.25.
+        proof_mask = evidence.mask.to(gate.dtype)
+        # ``proof_mask`` is [B, P]; ``gate`` matches the state-repr leading
+        # shape. For structured evidence the gate is [B, P, D] and the
+        # mask broadcasts naturally.
+        if gate.dim() > proof_mask.dim():
+            proof_mask = proof_mask.unsqueeze(-1).expand_as(gate)
+        centered = (gate - 0.5) ** 2 * proof_mask
+        self.gate_regularization = centered.sum() / proof_mask.sum().clamp(min=1.0)
+
+        return Repr(scores=blended)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Embedding-path aggregators (Sum / Mean / Max / Concat)
 # ═══════════════════════════════════════════════════════════════════════
@@ -358,6 +465,7 @@ class PhiPsiStateRepr(nn.Module):
 
 __all__ = [
     "ConcatStateRepr",
+    "GatedTNormStateRepr",
     "MaxStateRepr",
     "MeanStateRepr",
     "PhiPsiStateRepr",
