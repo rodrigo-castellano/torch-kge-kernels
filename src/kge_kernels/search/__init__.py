@@ -47,6 +47,7 @@ from .searcher import (
     ScoreFn,
     Searcher,
     SearchSpec,
+    _rule_loop,
     make_scorer_from_searcher,
 )
 
@@ -211,6 +212,7 @@ __all__ = [
     "ScoreFn",
     "SearchSpec",
     "Searcher",
+    "_rule_loop",
     "make_scorer_from_searcher",
     "make_searcher",
 ]

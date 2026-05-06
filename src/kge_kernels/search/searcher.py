@@ -39,12 +39,20 @@ from ..framework.protocols import (
     AtomRepr,
     QueryRepr,
     ResolutionOp,
+    RuleStateRepr,
+    RuleTrajRepr,
     Select,
     StateRepr,
     TrajRepr,
 )
 from ..framework.repr import Repr
-from ..framework.types import ProofEvidence, ProofState
+from ..framework.types import (
+    FiringsTensors,
+    ProofEvidence,
+    ProofState,
+    RuleGroundings,
+    build_firings_from_rule_groundings,
+)
 
 Mode = Literal["head", "tail"]
 ScoreFn = Callable[[Tensor, Tensor, Mode], Tensor]
@@ -205,6 +213,54 @@ def _canonical_loop(
     if not out.has_scores:
         raise RuntimeError("query_repr must return Repr with scores")
     return out.scores
+
+
+def _rule_loop(
+    pool_init: Tensor,
+    rule_groundings: RuleGroundings,
+    *,
+    traj_repr: RuleTrajRepr,
+    state_repr_fn: RuleStateRepr,
+    query_repr: Callable[[Tensor, Tensor, Tensor], Tensor],
+    M_max: Optional[int] = None,
+    pad_idx: int = 0,
+) -> Tensor:
+    """Reference scoring loop for the rule-based reasoning path.
+
+    Runs the K-iteration pool-iter loop and gathers per-query scores
+    from the final pool. Used by exhaustive methods (SBR / DCR / R2N
+    via :func:`grounder.bc.bc.BCGrounder.run_bc`).
+
+    Args:
+        pool_init: ``[N_pool, E]`` (R2N) or ``[N_pool]`` (SBR/DCR) — the
+            initial pool, typically ``atom_repr`` over
+            ``rule_groundings.atom_table``.
+        rule_groundings: object satisfying :class:`RuleGroundings`
+            Protocol (e.g., grounder's :class:`RuleGroundings`
+            dataclass with ``query_pool_idx`` populated).
+        traj_repr: K-iteration pool loop (:class:`RuleTrajRepr`).
+        state_repr_fn: per-firing rule operator (:class:`RuleStateRepr`).
+        query_repr: callable ``(pool, query_pool_idx, ever_written) →
+            [B]`` (e.g., :class:`LookupAtPool` or
+            :class:`OutputLayerAtPool`).
+        M_max: optional pad target body width; defaults to max-M over
+            present rules in ``rule_groundings``.
+        pad_idx: pool slot to use for invalid body atom positions
+            (default 0 — the padding slot).
+
+    Returns:
+        ``[B]`` per-query scalar scores.
+    """
+    firings = build_firings_from_rule_groundings(
+        rule_groundings, M_max=M_max, pad_idx=pad_idx,
+    )
+    pool, ever_written = traj_repr(pool_init, firings, state_repr_fn)
+    if rule_groundings.query_pool_idx is None:
+        raise RuntimeError(
+            "_rule_loop requires rule_groundings.query_pool_idx populated. "
+            "Use BCGrounder.run_bc to obtain RuleGroundings with queries pinned."
+        )
+    return query_repr(pool, rule_groundings.query_pool_idx, ever_written)
 
 
 class ProofScorer(nn.Module):
@@ -426,5 +482,6 @@ __all__ = [
     "ScoreFn",
     "SearchSpec",
     "Searcher",
+    "_rule_loop",
     "make_scorer_from_searcher",
 ]

@@ -17,8 +17,11 @@ from __future__ import annotations
 from .atom_classification import classify_atoms
 from .protocols import (
     AtomRepr,
+    ProofTrajRepr,
     QueryRepr,
     ResolutionOp,
+    RuleStateRepr,
+    RuleTrajRepr,
     Select,
     StateRepr,
     TrajRepr,
@@ -42,6 +45,7 @@ from .repr_query import (
     SumQueryRepr,
     TrajectoryScoreQueryRepr,
 )
+from .repr_query_pool import LookupAtPool, OutputLayerAtPool
 from .repr_state import (
     ClusteredFilterSignStateRepr,
     ConcatStateRepr,
@@ -54,6 +58,7 @@ from .repr_state import (
     SumStateRepr,
     TNormStateRepr,
 )
+from .repr_state_rule import FilterSignRuleState, MinRuleState, RuleMLPState
 from .repr_traj import (
     BestCumulativeTrajRepr,
     BestEverStateScoreTrajRepr,
@@ -69,6 +74,7 @@ from .repr_traj import (
     SBRBodyMinTrajRepr,
     TNormTrajRepr,
 )
+from .repr_traj_rule import DCRPoolLoop, MinPoolLoop, RuleMLPPoolLoop
 from .select import (
     BeamSelect,
     ExhaustiveSelect,
@@ -76,18 +82,31 @@ from .select import (
     SampleSelect,
     StateFactory,
 )
-from .types import ProofEvidence, ProofState, SelectInfo
+from .types import (
+    FiringsTensors,
+    ProofEvidence,
+    ProofState,
+    RuleGroundings,
+    SelectInfo,
+    build_firings_from_rule_groundings,
+)
 
 __all__ = [
     # Containers / types
     "Repr",
     "ProofState",
     "ProofEvidence",
+    "RuleGroundings",
+    "FiringsTensors",
     "SelectInfo",
+    "build_firings_from_rule_groundings",
     # Protocols
     "AtomRepr",
+    "ProofTrajRepr",
     "QueryRepr",
     "ResolutionOp",
+    "RuleStateRepr",
+    "RuleTrajRepr",
     "Select",
     "StateRepr",
     "TrajRepr",
@@ -99,7 +118,7 @@ __all__ = [
     "KGEScoreAtom",
     "MLPAtom",
     "RemappedKGEScoreAtom",
-    # State reprs
+    # State reprs (proof path — per grounding tree)
     "ClusteredFilterSignStateRepr",
     "ConcatStateRepr",
     "FilterSignStateRepr",
@@ -110,7 +129,11 @@ __all__ = [
     "RuleWeightedStateRepr",
     "SumStateRepr",
     "TNormStateRepr",
-    # Traj reprs
+    # State reprs (rule path — per firing)
+    "FilterSignRuleState",
+    "MinRuleState",
+    "RuleMLPState",
+    # Traj reprs (proof path — sequential init/step)
     "BestCumulativeTrajRepr",
     "BestEverStateScoreTrajRepr",
     "BestPrefixAvgTrajRepr",
@@ -124,7 +147,11 @@ __all__ = [
     "RuleMLPTrajRepr",
     "SBRBodyMinTrajRepr",
     "TNormTrajRepr",
-    # Query reprs
+    # Traj reprs (rule path — K-iter pool loop)
+    "DCRPoolLoop",
+    "MinPoolLoop",
+    "RuleMLPPoolLoop",
+    # Query reprs (proof path)
     "ConceptMaxQueryRepr",
     "LogSumExpQueryRepr",
     "MLPSumQueryRepr",
@@ -133,6 +160,9 @@ __all__ = [
     "SumQueryRepr",
     "TrajectoryScoreQueryRepr",
     "ALL_TRAJECTORY_SCORE_MODES",
+    # Query reprs (rule path — pool gather)
+    "LookupAtPool",
+    "OutputLayerAtPool",
     # Select
     "BeamSelect",
     "ExhaustiveSelect",
