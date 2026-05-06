@@ -73,6 +73,10 @@ def _run_scalar_pool(
     loop = loop_cls(K=K)
     new_pool, ever_written = loop(pool, firings, state_repr_fn)
 
+    # Pin unwritten_score=0.0 so the algebraic tests are independent
+    # of the pool's KGE-init value (each test sets pool slots
+    # explicitly above; an unwritten query slot would otherwise leak
+    # the seed init value into the assertion).
     qpr = LookupAtPool(unwritten_score=0.0)
     score = qpr(new_pool, torch.tensor([query_idx]), ever_written)
     return float(score.item())
