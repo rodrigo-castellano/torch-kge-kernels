@@ -134,6 +134,7 @@ class RankingEvaluator:
         device: torch.device,
         compile: bool = True,
         compile_mode: str = "reduce-overhead",
+        compile_fullgraph: bool = True,
         tie_handling: Literal["average", "random"] = "average",
         seed: int = 0,
     ) -> None:
@@ -174,7 +175,9 @@ class RankingEvaluator:
                 return _fn
             fn = _make()
             if self._compile_enabled:
-                fn = torch.compile(fn, fullgraph=True, mode=compile_mode)
+                fn = torch.compile(
+                    fn, fullgraph=compile_fullgraph, mode=compile_mode,
+                )
             self._compiled[mode] = fn
 
     @torch.no_grad()
