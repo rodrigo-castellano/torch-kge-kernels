@@ -260,10 +260,17 @@ BASELINES: dict[tuple, Baseline] = {
     ("ablation_d2", "r2n", "BC12"):        Baseline(97.2, 0.2, 95.6, 98.0, 100.0),
     ("ablation_d2", "r2n", "BC13"):        Baseline(98.0, 0.7, 96.8, 99.6, 100.0),
     # ── ablation_d3 (5 seeds; paper omits Hits@3)
+    # BC12 cells extracted from IJCAI '25 Figure 4 (AS3 sub-plot,
+    # page 6) — Hits@k not in chart; std ≈ ±2pp by chart eyeball.
     ("ablation_d3", "no_reasoner", None):  Baseline(94.8, 1.0, 90.8, None, 100.0),
     ("ablation_d3", "sbr", "BC01"):        Baseline(34.8, 3.7, 14.4, None, 100.0),
+    ("ablation_d3", "sbr", "BC12"):        Baseline(32.0, 2.0, None, None, None),
     ("ablation_d3", "sbr", "BC13"):        Baseline(86.8, 1.2, 82.0, None, 100.0),
+    ("ablation_d3", "dcr", "BC01"):        Baseline(34.0, 2.0, None, None, None),
+    ("ablation_d3", "dcr", "BC12"):        Baseline(50.0, 2.0, None, None, None),
     ("ablation_d3", "dcr", "BC13"):        Baseline(86.7, 0.8, 80.4, None, 100.0),
+    ("ablation_d3", "r2n", "BC01"):        Baseline(71.0, 2.0, None, None, None),
+    ("ablation_d3", "r2n", "BC12"):        Baseline(74.0, 2.0, None, None, None),
     ("ablation_d3", "r2n", "BC13"):        Baseline(96.6, 1.7, 94.0, None, 100.0),
     # ── countries_s2 (5 seeds; baselines extracted from IJCAI '25
     # Figure 5, "Dataset S2, width 1" sub-plot. Y-axis is 97-100, so
@@ -364,7 +371,14 @@ def _build_cfg(
     # +2pp, dcr BC12 +2pp; sbr BC12 unchanged). Paper used lr=0.01;
     # match-paper convention only for sbr/dcr (where it converges)
     # and use the stabilizing lr for r2n (where it doesn't).
-    learning_rate = 0.001 if reasoner == "r2n" else 0.01
+    # r2n at depth ≥ 2 with lr=0.01 is unstable in torch even with
+    # the new architecture (Glorot + real_vec + sum+sigmoid). 2/5
+    # seeds collapse → 80.6 ± 3.2. lr=0.001 stabilizes (86.1 ± 2.5).
+    # Keras runs lr=0.01 fine — likely Adam epsilon (PT 1e-8 vs
+    # TF 1e-7) lets keras tolerate the higher lr. Override via
+    # ``R2N_LR`` if testing.
+    learning_rate = float(os.environ.get(
+        "R2N_LR", "0.001" if reasoner == "r2n" else "0.01"))
     cfg = NSTrainConfig(
         dataset_name=dataset, data_path=DATA_ROOT,
         model_name=reasoner, kge="complex", grounder=grounder_str,
@@ -871,7 +885,17 @@ def run_one(
                     runs.append({"seed": s, "error": str(e)})
                 _gpu_cleanup()
         else:
-            with ThreadPoolExecutor(max_workers=len(seed_list)) as ex:
+            # Cap concurrent torch processes — single-GPU compute is
+            # the bottleneck for these small models (ablation_d2 sbr
+            # ~115K params), so 5 simultaneous processes serialize on
+            # the CUDA scheduler and run *slower* than sequential.
+            # 2 concurrent strikes a balance: modest GPU sharing for
+            # CUDA-init overhead amortization, no heavy compute
+            # contention. Override via ``TORCH_PARALLEL_WORKERS``.
+            max_workers = int(os.environ.get(
+                "TORCH_PARALLEL_WORKERS", "2"))
+            max_workers = max(1, min(max_workers, len(seed_list)))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
                 future_to_seed = {
                     ex.submit(
                         _torch_seed_subprocess,
