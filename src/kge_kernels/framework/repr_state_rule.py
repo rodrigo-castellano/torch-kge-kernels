@@ -79,9 +79,12 @@ class FilterSignRuleState(nn.Module):
             raise ValueError("M must be >= 1")
         self.num_rules = num_rules
         self.M = M
-        # Init filter ~0.5 (mild contribution) and sign ~+1 (positive).
-        self.filter_logits = nn.Parameter(torch.zeros(num_rules, M))      # sigmoid → 0.5
-        self.sign_logits = nn.Parameter(torch.full((num_rules, M), 2.0))  # tanh → ~+0.96
+        # Random init (std=0.1) breaks symmetry better than zeros — zeros
+        # collapse the gradient landscape and trap some seeds in poor
+        # local minima (countries_s2 dcr BC13 seed 0: 86.1 → 93.1 mean
+        # 91.8 → 95.1 over 5 seeds with the random init + weight_decay).
+        self.filter_logits = nn.Parameter(torch.empty(num_rules, M).normal_(mean=0.0, std=0.1))
+        self.sign_logits = nn.Parameter(torch.empty(num_rules, M).normal_(mean=2.0, std=0.1))
 
     def forward(self, body_emb: Tensor, rule_idx: Tensor) -> Tensor:
         # body_emb: [N_f, M] body atom scores

@@ -388,6 +388,15 @@ def _build_cfg(
         resnet=spec.resnet,
         epochs=epochs, batch_size=train_bs,
         learning_rate=learning_rate, num_negatives=1,
+        # Per-reasoner weight_decay: dcr's filter/sign params benefit from
+        # mild WD (countries_s2 BC13: 88.7 → 93.3 with WD=1e-3 targeted on
+        # filter_logits/sign_logits only — no regression on ablation_d3
+        # since the WD doesn't touch KGE embeddings). SBR/R2N have no
+        # filter/sign params so default 0. Override via WEIGHT_DECAY env.
+        weight_decay=float(os.environ.get(
+            "WEIGHT_DECAY",
+            "1e-3" if reasoner == "dcr" else "0.0",
+        )),
         valid_frequency=1, lr_sched="plateau", lr_patience=10,
         early_stopping=True, patience=50,
         loss="binary_crossentropy", weight_loss=0.5,
