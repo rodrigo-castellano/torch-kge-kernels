@@ -15,6 +15,37 @@ Paper figures for `ablation_d2`, `ablation_d3`, `countries_s2`, `countries_s3` a
 
 For BC01/BC11 cells where Paper(infl) < 50%, `Paper(real)` clamps to 0; comparing to Paper(infl) is more meaningful.
 
+## countries_s2 paper baselines (Figure 5)
+
+The IJCAI '25 paper reports countries_s2 numbers in Figure 5 (page 6),
+NOT in a table. We extracted approximate values from the
+"Dataset S2, width 1" sub-plot (y-axis 97-100; ±1 error bars):
+
+| Reasoner | BC01 / BC11 | BC12 | BC13 |
+|---|---:|---:|---:|
+| no_reasoner | 98.5 | — | — |
+| SBR | 99.5 | 99.5 | 99.5 |
+| DCR | 99.5 | 99.0 | 97.0 |
+| R2N | 99.0 | 99.0 | 99.0 |
+
+These are inflated (TAIL-only); `Paper(real) = max(0, 2·Paper(infl) − 100)`
+applies. Chart-read estimates carry ±1pp uncertainty per cell.
+
+## u (last-step unknown cap) — paper always uses u=0
+
+The paper's BC_{w,d} grounders **always use u=0** (`max_unknown_fact_count_last_step=0`). Every body atom at the last grounding step must be a known fact — no approximate (unknown-leaf) firings ever survive. This is the convention `keras-ns` reproduces when `prune_incomplete_proofs=True` AND we explicitly hardcode `max_unknown_fact_count_last_step=0` (see our patch in `keras-ns/ns_lib/grounding/grounder_factory.py`). The original `keras-ns` source set `max_unknown_fact_count_last_step=backward_width`, which **diverges** from the paper for `backward_width>0` and produces extra firings; that's a keras-ns bug, not the paper's intent.
+
+**Implication for BC_{w,1} cells (BC01, BC11):** at depth=1 the only step IS the last step, so `u=0` zeroes out the intermediate `w` and **BC₀,₁ ≡ BC₁,₁ ≡ … no rule firings at all**. The reasoner just sees an empty rule_groundings.
+
+What the cell evaluates to therefore depends on the reasoner's behaviour with no firings:
+- **SBR / DCR**: scalar `reasoning_score = 0` → final task = `max(KGE, 0) = KGE`. With `resnet=False` (ablation), the task head bypasses KGE entirely and outputs a constant → random ~33% MRR for 3-class TAIL.
+- **R2N**: even with empty firings, R2N's `output_layer(KGE_pool_init)` (Linear+Sigmoid on KGE embeddings) is a learned non-trivial projection. So R2N can still beat random — the paper's `R2N · BC₁,₁ = 71%` for ablation_d2 is exactly this learnable-head signal, NOT rule reasoning.
+- **No-reasoner / ComplEx**: KGE-only, gives the dataset's KGE ceiling.
+
+When the paper writes `BC₁,₁` for R2N rows but `BC₀,₁` for SBR/DCR rows in the same table, that's purely notational — both denote the same u=0 d=1 grounder (no firings). The choice of `w` doesn't change the firing set at d=1 with u=0; the paper just picked whichever `w` value made the row label least confusing per reasoner.
+
+**Implication for our parity sweep:** torch-ns running `BC01` (= `enum.fp_batch.w0.d1.flat`, w_last_depth=0) reproduces the paper's `BC₀,₁` and `BC₁,₁` rows. Both should match. Don't be misled by paper-row labels — at u=0+d=1 they're identical.
+
 ## ablation_d2 — ✅ done (5 seeds, ComplEx, resnet=False)
 
 | Reasoner | Grounder | Paper(infl) | Paper(real) | **Ours** | Δ vs real | H@1 / H@3 / H@10 | ms/batch | Notes |

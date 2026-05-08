@@ -25,20 +25,45 @@ context, no investigation notes.
 ## Grounder mapping (paper notation → tkk grounder string)
 
 The paper's grounders are named `BC_{w}_{d}` (backward chaining with
-width `w` and depth `d`). The mapping to tkk's `create_grounder`
-type-string vocabulary:
+width `w` and depth `d`). **The paper always uses u=0** — i.e.
+`max_unknown_fact_count_last_step = 0`, every body atom at the leaf
+step must be a known fact, no approximate proofs survive. This is the
+convention of the IJCAI '25 paper everywhere; the original keras-ns
+source set `u = backward_width` which silently diverges from the
+paper for `w>0` (an extra layer of approximate firings keras-ns admits
+that the paper doesn't), so our parity sweep patches keras-ns to
+hardcode `u=0` to match the paper.
 
-| Paper | keras-ns name | Meaning | tkk type-string |
+| Paper | keras-ns name | Meaning (u=0 always) | tkk type-string |
 |---|---|---|---|
-| BC₀,₁ | `backward_0_1` | depth=1, width=0 (all body atoms must be known facts; no free vars) | `enum.fp_batch.w0.d1` (with `--preground` for rules with ≥2 free vars) |
-| BC₁,₁ | `backward_1_1` | depth=1, width=1 (1 free var per rule) | `enum.fp_batch.d1` |
-| BC₁,₂ | `backward_1_2` | depth=2, width=1 | `enum.none.w1.d2` |
-| BC₁,₃ | `backward_1_3` | depth=3, width=1 | `enum.none.w1.d3` |
+| BC₀,₁ | `backward_0_1` | depth=1, w=0; every body atom is a fact | `enum.fp_batch.w0.d1.flat` |
+| BC₁,₁ | `backward_1_1` | depth=1, w=1, **u=0** ⇒ identical firings to BC₀,₁ | `enum.fp_batch.d1.flat` |
+| BC₁,₂ | `backward_1_2` | depth=2, w=1, u=0 | `enum.fp_batch.w1.d2.flat` |
+| BC₁,₃ | `backward_1_3` | depth=3, w=1, u=0 | `enum.fp_batch.w1.d3.flat` |
 
-`fp_batch` filters out unsoundable proofs at depth 1; for depth ≥ 2 the
-filter is `none` because cross-step intermediate atoms aren't pruned
-within a single batch. Pure-KGE rows use the special config
-`model_name='no_reasoner'` (no grounder, no rules).
+**Important: at u=0 with d=1, BC₀,₁ ≡ BC₁,₁.** With depth=1 there's
+only one grounding step, which IS the last step, so `u=0` zeroes out
+the intermediate `w` and both grounders admit only fully-fact bodies
+(i.e. zero rule applications for any test query whose head isn't
+already directly entailed by the facts under that rule). The paper
+sometimes labels the row `BC₁,₁` (e.g. R2N rows in Table 1) and
+sometimes `BC₀,₁` (e.g. SBR/DCR rows) — these are notationally
+different but the **firing set is the same** at u=0+d=1 and any
+parity sweep should give equal numbers for the two variants. The
+choice between row labels is a paper authoring style; it doesn't
+change what's being measured.
+
+What differs between BC₀,₁ and BC₁,₁ at u=0+d=1 is just the
+*reasoner's* treatment of empty firings, not the firings themselves.
+SBR/DCR with empty firings collapse to KGE (or random when
+`resnet=False`); R2N with empty firings still applies its learnable
+output head over KGE pool init, which is why R2N's BC₁,₁ paper
+number can be high even though there are zero rule firings.
+
+`fp_batch` filters out unsoundable proofs by Kleene fixpoint at
+every depth (paper convention `prune_incomplete_proofs=True`).
+Pure-KGE rows use the special config `model_name='no_reasoner'`
+(no grounder, no rules).
 
 ## Shared hyperparameters
 
@@ -133,18 +158,32 @@ keras-ns CSVs we have. **Source**:
 `output/legacy/experiments-logs/ijcai25/` and the keras-ns CSVs (the
 torch-ns reproduction in `results_IJCAI.md` confirms these).
 
-### countries_s2  (paper Table — **DATA NOT YET LOCATED**)
+### countries_s2  (5 seeds, TAIL-only, **inflated**, resnet=True)
 
-The keras-ns `experiments/runs/indiv_runs/` directory does not contain
-`_ind_log-countries_s2-...csv` files; only `countries_s3` ran in the
-saved CSVs. The paper's Table 1 reports countries_s2 numbers but those
-need to be transcribed from the PDF / the original experiment output.
-Marked **TODO**: ask the user for the table or rerun keras-ns on
-countries_s2 to fill this in before the parity sweep covers it.
+The IJCAI '25 paper reports countries_s2 numbers in Figure 5 (page 6),
+NOT in a numerical table. The numbers below are extracted from the
+"Dataset S2, width 1" sub-plot of Figure 5 (y-axis 97-100; ±1pp
+error bars). Read approximately from chart markers; carry ±1pp
+uncertainty per cell.
 
-> The parity script in Phase 2 should accept countries_s2 in its
-> config list but skip the comparison row when this section is
-> unfilled.
+| Reasoner | Grounder | MRR (approx, from Fig 5) |
+|---|---|---:|
+| ComplEx (no_reasoner) | — | 98.5 ± 1 |
+| SBR | BC₀,₁ | 99.5 ± 1 |
+| SBR | BC₁,₂ | 99.5 ± 1 |
+| SBR | BC₁,₃ | 99.5 ± 1 |
+| DCR | BC₀,₁ | 99.5 ± 1 |
+| DCR | BC₁,₂ | 99.0 ± 1 |
+| DCR | BC₁,₃ | 97.0 ± 2 |
+| R2N | BC₁,₁ | 99.0 ± 1 |
+| R2N | BC₁,₂ | 99.0 ± 1 |
+| R2N | BC₁,₃ | 99.0 ± 1 |
+
+Paper convention is u=0 throughout; under u=0 BC₀,₁ ≡ BC₁,₁ (see
+"Grounder mapping" section above for details). Numbers entered into
+the parity script's BASELINES dict carry these ±1pp uncertainties; if
+exact paper numbers become available later (via author table dump),
+swap them in.
 
 ### countries_s3  (5 seeds, TAIL-only, **inflated**, resnet=True)
 

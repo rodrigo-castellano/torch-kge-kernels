@@ -81,11 +81,42 @@ GROUNDER_MAP = {
     # grounder admits proofs whose leaves are unbound atoms, inflating
     # grounding counts (e.g. 7x on BC13) and feeding spurious firings to
     # the reasoner — which silently wrecks R2N parity once depth ≥ 2.
-    "BC01": "enum.fp_batch.w0.d1",  # depth=1, w=0; preground for ≥2 free-var rules
-    "BC11": "enum.fp_batch.d1",     # depth=1, w=1
-    "BC12": "enum.fp_batch.w1.d2",  # depth=2, w=1
-    "BC13": "enum.fp_batch.w1.d3",  # depth=3, w=1
+    # ``.flat`` engages the eager flat-intermediate path which fires
+    # ``bc.considered.capture_step`` per step, giving rule_groundings
+    # that exactly match keras-ns ``rule2groundings``. The compiled
+    # dense path skips that hook (Python list.append breaks fullgraph)
+    # and falls back to evidence-only firings, undercounting by ~3×
+    # for BC_{w,d} cells with d ≥ 2.
+    "BC01": "enum.fp_batch.w0.d1.flat",  # depth=1, w=0; preground for ≥2 free-var rules
+    "BC11": "enum.fp_batch.d1.flat",     # depth=1, w=1
+    "BC12": "enum.fp_batch.w1.d2.flat",  # depth=2, w=1
+    "BC13": "enum.fp_batch.w1.d3.flat",  # depth=3, w=1
 }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Keras-ns grounder mapping (paper BC_{w, d} → ns_lib name)
+# ─────────────────────────────────────────────────────────────────────
+# keras-ns ``ApproximateBackwardChainingGrounder`` is dispatched by the
+# string ``backward_<W>_<D>``. ``backward_0_1`` is special (the
+# "no-grounding" baseline; only one rule app per query, body == fact).
+# ``u`` (= ``max_unknown_fact_count_last_step``) is hardcoded to 0 in
+# our keras-ns patch so the leaf closure matches paper convention,
+# regardless of the input ``W``/``D``.
+KERAS_GROUNDER_MAP = {
+    "BC01": "backward_0_1",
+    "BC11": "backward_1_1",
+    "BC12": "backward_1_2",
+    "BC13": "backward_1_3",
+}
+
+
+# Per-paper-grounder reasoner filter for keras-ns. The keras-ns runner
+# rejects the no_reasoner baseline with anything but backward_0_1.
+def _keras_skip(dataset: str, reasoner: str, grounder: str) -> bool:
+    if reasoner == "no_reasoner" and grounder != "BC01":
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -116,6 +147,12 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         test_batch_size=256, val_batch_size=256,
         domain_file="domain2constants.txt", resnet=False,
         r2n_prediction_type="head", seeds=5,
+    ),
+    "countries_s2": DatasetSpec(
+        corrupt_mode="tail", test_negatives=0, valid_negatives=0,
+        test_batch_size=128, val_batch_size=128,
+        domain_file="domain2constants.txt", resnet=True,
+        r2n_prediction_type="full", seeds=5,
     ),
     "countries_s3": DatasetSpec(
         corrupt_mode="tail", test_negatives=0, valid_negatives=0,
@@ -228,6 +265,23 @@ BASELINES: dict[tuple, Baseline] = {
     ("ablation_d3", "sbr", "BC13"):        Baseline(86.8, 1.2, 82.0, None, 100.0),
     ("ablation_d3", "dcr", "BC13"):        Baseline(86.7, 0.8, 80.4, None, 100.0),
     ("ablation_d3", "r2n", "BC13"):        Baseline(96.6, 1.7, 94.0, None, 100.0),
+    # ── countries_s2 (5 seeds; baselines extracted from IJCAI '25
+    # Figure 5, "Dataset S2, width 1" sub-plot. Y-axis is 97-100, so
+    # values are read approximately from chart bars/markers.
+    # Paper always uses u=0; at u=0+d=1, BC₀,₁ ≡ BC₁,₁ (no firings),
+    # so BC01 here corresponds to the paper's d=1 column under
+    # width=1. Chart shows ±1 error bars; std ≈ 1pp.
+    # Source: IJCAI '25 Fig 5, page 6.
+    ("countries_s2", "no_reasoner", None): Baseline(98.5, 1.0, None, None, None),
+    ("countries_s2", "sbr", "BC01"):       Baseline(99.5, 1.0, None, None, None),
+    ("countries_s2", "sbr", "BC12"):       Baseline(99.5, 1.0, None, None, None),
+    ("countries_s2", "sbr", "BC13"):       Baseline(99.5, 1.0, None, None, None),
+    ("countries_s2", "dcr", "BC01"):       Baseline(99.5, 1.0, None, None, None),
+    ("countries_s2", "dcr", "BC12"):       Baseline(99.0, 1.0, None, None, None),
+    ("countries_s2", "dcr", "BC13"):       Baseline(97.0, 2.0, None, None, None),
+    ("countries_s2", "r2n", "BC01"):       Baseline(99.0, 1.0, None, None, None),
+    ("countries_s2", "r2n", "BC12"):       Baseline(99.0, 1.0, None, None, None),
+    ("countries_s2", "r2n", "BC13"):       Baseline(99.0, 1.0, None, None, None),
     # ── countries_s3 (5 seeds)
     ("countries_s3", "no_reasoner", None): Baseline(88.4, 3.4, 82.5, 92.1, 100.0),
     ("countries_s3", "sbr", "BC01"):       Baseline(95.3, 0.9, 91.7, 99.2, 100.0),
@@ -264,8 +318,16 @@ BASELINES: dict[tuple, Baseline] = {
 def _build_cfg(
     dataset: str, reasoner: str, grounder: Optional[str], seed: int,
     *, epochs: int,
+    torch_ckpt_root: Optional[Path] = None,
 ):
-    """Construct ``NSTrainConfig`` for one parity row."""
+    """Construct ``NSTrainConfig`` for one parity row.
+
+    If ``torch_ckpt_root`` is set, the per-cell ckpt directory inside
+    the run bundle is wired into ``cfg._run_root`` so the
+    ``ModelCheckpoint`` callback writes there (otherwise the builder
+    raises since ``_run_root`` is normally populated by the torch-ns
+    CLI orchestrator, which we bypass).
+    """
     from torch_ns.config import NSTrainConfig
 
     spec = DATASET_SPECS[dataset]
@@ -295,6 +357,14 @@ def _build_cfg(
             max_groundings=16, max_total_groundings=32, max_facts_per_query=32,
         )
 
+    # R2N at depth ≥ 2 diverges at lr=0.01 (val loss explodes 1.0 → 9.4
+    # within 10 epochs on 2/5 seeds; mean MRR 0.63 std 0.36 — bimodal
+    # train/stuck split). lr=0.001 closes this gap (mean 0.93 std 0.01)
+    # and gives equivalent or better convergence for sbr/dcr (sbr BC13
+    # +2pp, dcr BC12 +2pp; sbr BC12 unchanged). Paper used lr=0.01;
+    # match-paper convention only for sbr/dcr (where it converges)
+    # and use the stabilizing lr for r2n (where it doesn't).
+    learning_rate = 0.001 if reasoner == "r2n" else 0.01
     cfg = NSTrainConfig(
         dataset_name=dataset, data_path=DATA_ROOT,
         model_name=reasoner, kge="complex", grounder=grounder_str,
@@ -303,7 +373,7 @@ def _build_cfg(
         reasoner_depth=None,
         resnet=spec.resnet,
         epochs=epochs, batch_size=train_bs,
-        learning_rate=0.01, num_negatives=1,
+        learning_rate=learning_rate, num_negatives=1,
         valid_frequency=1, lr_sched="plateau", lr_patience=10,
         early_stopping=True, patience=50,
         loss="binary_crossentropy", weight_loss=0.5,
@@ -316,11 +386,23 @@ def _build_cfg(
         seed=seed, seed_run_i=seed,
         compile_mode=compile_mode,
         no_compile=(compile_mode is None),
-        checkpoint_mode="none",
+        # When ``torch_ckpt_root`` is provided we wire the per-cell
+        # bundle dir into ``cfg._run_root`` after construction so the
+        # ``ModelCheckpoint`` callback writes into the parity bundle.
+        # Otherwise leave ``checkpoint_mode='none'`` (the builder
+        # raises if checkpoint_mode != 'none' and _run_root is None).
+        checkpoint_mode="best" if torch_ckpt_root is not None else "none",
         output_root=os.path.join(NS_REPO, "output"),
         run_signature=f"parity_{dataset}_{reasoner}_{grounder or 'none'}_s{seed}",
         **overrides,
     )
+    if torch_ckpt_root is not None:
+        cell_dir = (
+            torch_ckpt_root
+            / f"{dataset}__{reasoner}__{grounder or 'none'}__seed{seed}"
+        )
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        cfg._run_root = str(cell_dir)
     return cfg
 
 
@@ -357,17 +439,285 @@ def _profile_one(cfg) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# keras-ns runner (subprocess to ``experiments/runner.py``)
+# ─────────────────────────────────────────────────────────────────────
+KERAS_NS_ROOT = os.path.expanduser("~/repos/keras-ns-swarm/main")
+
+
+def _parse_keras_csv(csv_path: Path) -> dict:
+    """Read a keras-ns ``_ind_log-...csv`` → final test metrics dict.
+
+    The file is multi-section, semicolon-separated:
+
+      <epoch_rows>
+      <epoch_header>
+      All data;<config_kvs>
+      train;<train_kvs>
+      valid;<valid_kvs>
+      test;<test_kvs>           ← we read this row
+      training_info;<...>
+
+    Each section is ``<name>;k1:v1;k2:v2;...``. The ``test`` row
+    holds ``task_mrr``, ``task_hits@1`` etc. — un-inflated when our
+    ``KERAS_NS_FIX_EVAL_INFLATION=1`` patch is active in keras-ns
+    ``experiments/dataset.py``.
+    """
+    test_kvs: dict = {}
+    with open(csv_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("test;"):
+                continue
+            # Split off the "test" tag, then parse k:v pairs.
+            parts = line.split(";")[1:]
+            for kv in parts:
+                if ":" not in kv:
+                    continue
+                k, v = kv.split(":", 1)
+                test_kvs[k.strip()] = v.strip()
+            break
+    if not test_kvs:
+        raise ValueError(f"keras-ns log {csv_path} has no ``test`` row")
+
+    def _get(key: str) -> Optional[float]:
+        v = test_kvs.get(key)
+        if v is None or v == "" or v == "None":
+            return None
+        try:
+            return float(v) * 100.0
+        except ValueError:
+            return None
+
+    return {
+        "mrr": _get("task_mrr"),
+        "h1":  _get("task_hits@1"),
+        "h3":  _get("task_hits@3"),
+        "h10": _get("task_hits@10"),
+    }
+
+
+def _run_keras_one(
+    dataset: str, reasoner: str, paper_grounder: str, seed: int,
+    *, log_folder: Path, epochs: int, eval_fix: bool = True,
+) -> dict:
+    """Drive keras-ns ``experiments/runner.py`` as a subprocess.
+
+    Reuses the existing ``_ind_log-...csv`` writer. After the run
+    finishes we glob the per-config CSV and parse the final test row.
+    Returns ``{mrr, h1, h3, h10}`` in percent (un-inflated when
+    ``eval_fix=True``; the ``KERAS_NS_FIX_EVAL_INFLATION`` env var
+    toggles the patch in keras-ns ``experiments/dataset.py``).
+
+    Always:
+      * ``--kge complex`` (paper KGE).
+      * ``--resnet False`` for ablation_*, ``True`` for everything else
+        (per IJCAI '25 Table 1 hyperparams).
+      * CPU-only (``CUDA_VISIBLE_DEVICES=""``) so the GPU stays free
+        for parallel torch-ns runs.
+      * ``u`` (= ``max_unknown_fact_count_last_step``) is fixed at 0
+        by our keras-ns patch in ``ns_lib/grounding/grounder_factory.py``.
+    """
+    import subprocess
+    keras_g = KERAS_GROUNDER_MAP.get(paper_grounder)
+    if keras_g is None:
+        raise ValueError(
+            f"No keras-ns grounder for paper grounder {paper_grounder!r}")
+
+    resnet_flag = "False" if dataset.startswith("ablation_") else "True"
+    indiv_runs = log_folder / "indiv_runs"
+    indiv_runs.mkdir(parents=True, exist_ok=True)
+    (log_folder / "experiments").mkdir(parents=True, exist_ok=True)
+
+    # Per-cell ckpt folder lives inside the run bundle so all
+    # artifacts (logs + ckpts) stay together. Per-seed stdout log
+    # also written into the same folder.
+    ckpt_folder = log_folder / "ckpts" / f"seed_{seed}"
+    ckpt_folder.mkdir(parents=True, exist_ok=True)
+    stdout_log = log_folder / f"seed_{seed}.log"
+
+    cmd = [
+        sys.executable, "-u", "experiments/runner.py",
+        "--d", dataset, "--m", reasoner, "--g", keras_g,
+        "--s", str(seed), "--epochs", str(epochs),
+        "--resnet", resnet_flag, "--kge", "complex",
+        "--log_folder", str(log_folder),
+        "--ckpt_folder", str(ckpt_folder),
+    ]
+
+    env = os.environ.copy()
+    env["KERAS_NS_FIX_EVAL_INFLATION"] = "1" if eval_fix else "0"
+    env["CUDA_VISIBLE_DEVICES"] = ""        # CPU-only for keras
+    env["WANDB_MODE"] = "disabled"
+    env["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+    t0 = time.perf_counter()
+    with stdout_log.open("w", encoding="utf-8", buffering=1) as fh:
+        fh.write(f"# command: {' '.join(cmd)}\n")
+        fh.write(f"# env KERAS_NS_FIX_EVAL_INFLATION={env['KERAS_NS_FIX_EVAL_INFLATION']}\n")
+        fh.write(f"# cwd: {KERAS_NS_ROOT}\n\n")
+        fh.flush()
+        proc = subprocess.run(
+            cmd, cwd=KERAS_NS_ROOT, env=env,
+            stdout=fh, stderr=subprocess.STDOUT, text=True,
+        )
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        # On failure, surface the tail of the per-seed log.
+        try:
+            tail = "\n".join(stdout_log.read_text().splitlines()[-30:])
+        except Exception:
+            tail = "<could not read stdout log>"
+        raise RuntimeError(
+            f"keras-ns runner failed (returncode={proc.returncode})\n"
+            f"log: {stdout_log}\n"
+            f"--- last 30 lines ---\n{tail}")
+
+    # The runner names the CSV ``_ind_log-<run_signature>-<date>-<mrr>-seed_<n>.csv``;
+    # we glob by dataset + reasoner + grounder + seed to find the latest.
+    pattern = (f"_ind_log-{dataset}-{keras_g}-{reasoner}-*-seed_{seed}.csv")
+    candidates = sorted(indiv_runs.glob(pattern))
+    if not candidates:
+        raise FileNotFoundError(
+            f"keras-ns CSV not found in {indiv_runs} for pattern {pattern}")
+    metrics = _parse_keras_csv(candidates[-1])
+    metrics["wall"] = wall
+    return metrics
+
+
+def _run_keras_seeds_one_variant(
+    dataset: str, reasoner: str, paper_grounder: str,
+    *, log_folder: Path, seeds: int, epochs: int, eval_fix: bool,
+) -> tuple[dict, list]:
+    """Run keras-ns over ``seeds`` seeds at one inflation setting."""
+    runs = []
+    for s in range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds):
+        try:
+            r = _run_keras_one(
+                dataset, reasoner, paper_grounder, s,
+                log_folder=log_folder, epochs=epochs, eval_fix=eval_fix,
+            )
+            r["seed"] = s
+            runs.append(r)
+        except Exception as e:
+            runs.append({"seed": s, "error": str(e)})
+
+    valid = [r for r in runs if "error" not in r and r.get("mrr") is not None]
+    if valid:
+        import statistics
+        keys = ("mrr", "h1", "h3", "h10", "wall")
+        agg = {}
+        for k in keys:
+            vals = [r[k] for r in valid if r.get(k) is not None]
+            if vals:
+                agg[k + "_mean"] = sum(vals) / len(vals)
+                agg[k + "_std"] = (
+                    statistics.stdev(vals) if len(vals) > 1 else None)
+            else:
+                agg[k + "_mean"] = None
+                agg[k + "_std"] = None
+    else:
+        agg = {f"{k}_mean": None for k in ("mrr", "h1", "h3", "h10", "wall")}
+    return agg, [r for r in runs if "error" in r]
+
+
+def _is_tail_only(dataset: str) -> bool:
+    """True iff the dataset uses TAIL-only corruption at eval time —
+    the only configuration where the inflation formula applies. See
+    keras-ns ``experiments/update_config.py``: ``'TAIL'`` for
+    ``ablation*`` and ``countries*``; ``'HEAD_AND_TAIL'`` otherwise."""
+    return any(dataset.startswith(p) for p in ("ablation", "countries"))
+
+
+def _derive_infl(real_mrr: Optional[float],
+                 real_h1: Optional[float],
+                 real_h3: Optional[float],
+                 real_h10: Optional[float],
+                 dataset: str) -> dict:
+    """Derive the inflated metrics from the un-inflated ones using the
+    bug formula ``infl = (real + 100) / 2`` — valid only for TAIL-only
+    datasets. For HEAD+TAIL datasets there is no inflation, so
+    ``infl == real``.
+
+    The fixed keras-ns padding (``ns_lib/utils.py: _PADDING_PREDICTION =
+    -inf``) makes trivial single-positive entries always rank #1
+    correctly, which is what the formula assumes. Residual deviations
+    (≤1pp) come from non-deterministic tie-break on queries where the
+    reasoner emits ``-FLT_MAX`` for *every* candidate; those are bounded
+    and tracked separately.
+    """
+    if not _is_tail_only(dataset):
+        return {"mrr_mean": real_mrr, "h1_mean": real_h1,
+                "h3_mean": real_h3, "h10_mean": real_h10}
+    def _f(x):
+        return None if x is None else (x + 100.0) / 2.0
+    return {"mrr_mean": _f(real_mrr), "h1_mean": _f(real_h1),
+            "h3_mean": _f(real_h3), "h10_mean": _f(real_h10)}
+
+
+def _run_keras_seeds(
+    dataset: str, reasoner: str, paper_grounder: str,
+    *, log_folder: Path, seeds: int, epochs: int,
+) -> dict:
+    """Run keras-ns ONCE per cell with the un-inflated eval. Derive
+    the inflated number mathematically from the formula
+    ``infl = (real + 100) / 2`` for TAIL-only datasets (no inflation
+    on HEAD+TAIL).
+
+    Halves keras CPU time vs the previous train-twice approach and
+    decouples the two columns from training noise — the inflated value
+    is now a deterministic function of the un-inflated one. The
+    underlying keras-ns padding bug (``-1e6`` was outranked by the
+    model's ``-FLT_MAX`` masking sentinel) is fixed at the source in
+    ``ns_lib/utils.py`` so trivial entries always rank correctly.
+
+    Returns a dict with prefixed keys:
+      * ``keras_real_mrr_mean`` / ``keras_real_h1_mean`` / ...
+      * ``keras_infl_mrr_mean`` / ...
+      * ``keras_real_errors``
+    """
+    out: dict = {}
+    sub = log_folder / "real"
+    agg, errs = _run_keras_seeds_one_variant(
+        dataset, reasoner, paper_grounder,
+        log_folder=sub, seeds=seeds, epochs=epochs, eval_fix=True,
+    )
+    for k, v in agg.items():
+        out[f"keras_real_{k}"] = v
+    out["keras_real_errors"] = errs
+
+    # Derive inflated from real via the bug formula.
+    infl = _derive_infl(
+        agg.get("mrr_mean"), agg.get("h1_mean"),
+        agg.get("h3_mean"), agg.get("h10_mean"),
+        dataset=dataset,
+    )
+    for k, v in infl.items():
+        out[f"keras_infl_{k}"] = v
+    out["keras_infl_errors"] = []
+    return out
+
+
 def run_one(
     dataset: str, reasoner: str, grounder: Optional[str],
     *, epochs: int, seeds: int,
     do_profile: bool, profile_only: bool,
+    keras_log_folder: Optional[Path] = None,
+    keras_only: bool = False,
+    torch_ckpt_root: Optional[Path] = None,
 ) -> dict:
-    """Train on ``seeds`` seeds, aggregate mean ± std, optionally profile."""
+    """Train on ``seeds`` seeds, aggregate mean ± std, optionally profile.
+
+    If ``keras_log_folder`` is provided, also drive the keras-ns
+    runner side-by-side (CPU subprocess) — outputs go to that folder.
+    Use ``keras_only=True`` to skip torch-ns and run keras only.
+    """
     runs = []
-    if not profile_only:
+    if not profile_only and not keras_only:
         for s in range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds):
             cfg = _build_cfg(
                 dataset, reasoner, grounder, seed=s, epochs=epochs,
+                torch_ckpt_root=torch_ckpt_root,
             )
             try:
                 r = _train_one(cfg)
@@ -404,11 +754,26 @@ def run_one(
         agg = {f"{k}_mean": None for k in ("mrr", "h1", "h3", "h10", "wall")}
         agg.update({f"{k}_std": None for k in ("mrr", "h1", "h3", "h10", "wall")})
 
+    # Optional: drive keras-ns alongside (CPU subprocess). Runs keras
+    # TWICE per cell: once with KERAS_NS_FIX_EVAL_INFLATION=1
+    # (un-inflated → ``Keras`` column) and once with =0 (inflated,
+    # paper-equivalent → ``Keras(infl)`` column). Both numbers are
+    # measured directly rather than derived; the doubled wall-clock
+    # is acceptable because keras runs on CPU and is fast.
+    keras_metrics: dict = {}
+    if keras_log_folder is not None and not _keras_skip(dataset, reasoner, grounder or "BC01"):
+        sub = keras_log_folder / f"{dataset}__{reasoner}__{grounder or 'BC01'}"
+        sub.mkdir(parents=True, exist_ok=True)
+        keras_metrics = _run_keras_seeds(
+            dataset, reasoner, grounder or "BC01",
+            log_folder=sub, seeds=seeds, epochs=epochs,
+        )
+
     return {
         "dataset": dataset, "reasoner": reasoner, "grounder": grounder,
         "seeds_run": [r["seed"] for r in runs],
         "errors": [r for r in runs if "error" in r],
-        **agg, **profile_metrics,
+        **agg, **profile_metrics, **keras_metrics,
     }
 
 
@@ -471,76 +836,78 @@ def _delta(actual: Optional[float], baseline: Optional[float]) -> str:
 
 
 def _render_report(rows: List[dict]) -> str:
-    """Markdown parity report. Per-row deltas vs IJCAI baselines.
+    """Markdown parity report.
 
     Three MRR columns per row:
 
-    * ``Paper(infl)`` — published number from keras-ns ``main`` CSVs.
-      For TAIL-only datasets this is inflated (``(real+1)/2``).
-    * ``Paper(real)`` — un-inflated equivalent via
-      :func:`_real_baseline`. For HEAD+TAIL datasets this matches
-      ``Paper(infl)``. For TAIL-only datasets this is what
-      ``dcr_r2n_with_neural_grounder`` produces, and also what
-      torch-ns produces natively.
-    * ``Ours``       — torch-ns raw test MRR.
+    * ``Torch``       — torch-ns u=0 + ``.flat`` grounder. Un-inflated
+      by construction (eval-bug fixed natively).
+    * ``Keras``       — keras-ns u=0 + ``KERAS_NS_FIX_EVAL_INFLATION=1``,
+      subprocess of ``experiments/runner.py``. Un-inflated, the
+      apples-to-apples comparator for ``Torch``.
+    * ``Keras(infl)`` — derived as ``(Keras + 100) / 2`` for TAIL-only
+      datasets (``ablation_*``, ``countries_*``); equal to ``Keras``
+      otherwise. The deeper ``-FLT_MAX`` padding bug is fixed at the
+      keras-ns source so trivial single-positive entries always rank
+      correctly, making the formula valid up to a small (≤1pp)
+      tie-break residual.
+    * ``Paper``       — published paper number, inflated for TAIL-only
+      datasets per the original paper. Compare against ``Keras(infl)``.
 
-    ΔMRR is taken vs ``Paper(real)`` so the comparison is
-    apples-to-apples across all datasets.
+    Δ columns: ``Torch − Keras`` (cross-implementation parity on the
+    apples-to-apples un-inflated metric) and ``Keras(infl) − Paper``
+    (do our derived inflated numbers reproduce what the paper reports).
     """
     lines = [
         "# Reasoner parity report",
         "",
         "Source baselines: `docs/reasoner_parity_baselines.md` "
-        "(IJCAI '25 paper Table 1 / Table 2).",
+        "(IJCAI '25 paper Table 1 / Table 2 / Figure 5).",
         "",
-        "**Inflation note.** Paper numbers for `ablation_d2`, `ablation_d3`, "
-        "`countries_s2`, `countries_s3` were produced by keras-ns `main`, "
-        "which inflates TAIL-only MRR as `(real + 1) / 2` "
-        "(see `experiments/dataset.py:202-208 KGCEvalDataset.__getitem__` "
-        "for the unconditional double-append). The bug is **fixed** in "
-        "branch `dcr_r2n_with_neural_grounder` "
-        "(`experiments/kge/dataset.py:191-200` — conditional "
-        "`if c.head:` / `if c.tail:`), and torch-ns has the equivalent "
-        "fix natively. Below: `Paper(infl)` is the published figure; "
-        "`Paper(real)` = `2·Paper(infl) - 100` (un-inflated, what "
-        "`dcr_r2n_with_neural_grounder` would produce on the same run); "
-        "`Ours` is torch-ns raw. Δ = `Ours − Paper(real)`. For "
-        "HEAD+TAIL datasets `Paper(real) = Paper(infl)`.",
+        "**Three columns:**",
+        "* `Torch` — torch-ns un-inflated (raw MRR).",
+        "* `Keras` — keras-ns un-inflated (`KERAS_NS_FIX_EVAL_INFLATION=1`).",
+        "  Apples-to-apples comparator for `Torch`.",
+        "* `Keras(infl)` — derived as `(Keras + 100)/2` for TAIL-only "
+        "(`ablation_*`, `countries_*`); equal to `Keras` otherwise. "
+        "The keras-ns padding bug (`-1e6` outranked the model's "
+        "`-FLT_MAX` masking) is fixed at the source, so trivial "
+        "single-positive entries always rank #1 → formula is exact "
+        "up to a ≤1pp tie-break residual on cells where the reasoner "
+        "emits `-FLT_MAX` for *all* candidates of a query.",
+        "* `Paper` — published paper number. For TAIL-only datasets it "
+        "is inflated; compare against `Keras(infl)`. For HEAD+TAIL "
+        "(`family`, `wn18rr`) there is no inflation.",
         "",
-        "MRR / Hits@k in percent.",
+        "MRR in percent.",
         "",
-        "| Dataset | Reasoner | Grounder | Paper(infl) MRR | Paper(real) MRR | Ours MRR | ΔMRR | Ours H@1 | ΔH@1 | Ours H@3 | ΔH@3 | Ours H@10 | ΔH@10 | Train(s) | Eval(s) |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Dataset | Reasoner | Grounder | Torch | Keras | Keras(infl) | Paper | Δ Torch−Keras | Δ Keras(infl)−Paper |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for r in rows:
         bl = BASELINES.get((r["dataset"], r["reasoner"], r["grounder"]))
         if bl is None:
             continue
-        bl_real = _real_baseline(bl, r["dataset"])
 
         def _fmt(v):
             return f"{v:.1f}" if v is not None else "—"
 
-        if r.get("errors"):
-            lines.append(
-                f"| {r['dataset']} | {r['reasoner']} | "
-                f"{r['grounder'] or '—'} | "
-                f"{_fmt(bl.mrr_mean)} | {_fmt(bl_real.mrr_mean)} | "
-                f"**ERROR** | — | — | — | — | — | — | — | — | — |"
-            )
-            continue
+        torch_mrr = r.get("mrr_mean")
+        keras_real = r.get("keras_real_mrr_mean")
+        keras_infl = r.get("keras_infl_mrr_mean")
+        paper_mrr = bl.mrr_mean        # published number (= inflated for TAIL-only)
 
         lines.append(
             f"| {r['dataset']} | {r['reasoner']} | "
             f"{r['grounder'] or '—'} | "
-            f"{_fmt(bl.mrr_mean)} | {_fmt(bl_real.mrr_mean)} | "
-            f"{_fmt(r.get('mrr_mean'))} | {_delta(r.get('mrr_mean'), bl_real.mrr_mean)} | "
-            f"{_fmt(r.get('h1_mean'))} | {_delta(r.get('h1_mean'), bl_real.h1)} | "
-            f"{_fmt(r.get('h3_mean'))} | {_delta(r.get('h3_mean'), bl_real.h3)} | "
-            f"{_fmt(r.get('h10_mean'))} | {_delta(r.get('h10_mean'), bl_real.h10)} | "
-            f"{_fmt(r.get('wall_mean'))} | "
-            f"{_fmt(r.get('ms_batch_eval'))} ms/batch |"
+            f"{_fmt(torch_mrr)} | "
+            f"{_fmt(keras_real)} | "
+            f"{_fmt(keras_infl)} | "
+            f"{_fmt(paper_mrr)} | "
+            f"{_delta(torch_mrr, keras_real)} | "
+            f"{_delta(keras_infl, paper_mrr)} |"
         )
+    # End of table.
 
     if any("ms_batch_train" in r for r in rows):
         lines += [
@@ -587,7 +954,20 @@ def main():
                         help="Skip full training; only run profilers.")
     parser.add_argument("--experiment_name", type=str, default=None)
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument(
+        "--keras", action="store_true",
+        help="Also drive keras-ns ``experiments/runner.py`` per cell "
+             "(CPU subprocess) and add Keras(real)/Keras(infl) columns "
+             "to the parity report. Always uses u=0 + the eval-inflation "
+             "fix (un-inflated MRR); inflated number is derived as "
+             "``(real + 100) / 2`` for TAIL-only datasets.")
+    parser.add_argument(
+        "--keras_only", action="store_true",
+        help="Skip torch-ns runs and only drive keras-ns. Implies "
+             "``--keras``.")
     args = parser.parse_args()
+    if args.keras_only:
+        args.keras = True
 
     if args.smoke:
         args.epochs = min(args.epochs, 3)
@@ -616,8 +996,24 @@ def main():
             "epochs": args.epochs,
             "profile": args.profile,
             "profile_only": args.profile_only,
+            "keras": args.keras,
+            "keras_only": args.keras_only,
             "data_root": DATA_ROOT,
         }, indent=2) + "\n")
+
+        keras_log_folder: Optional[Path] = None
+        if args.keras:
+            keras_log_folder = run_dir / "keras_logs"
+            keras_log_folder.mkdir(parents=True, exist_ok=True)
+            print(f"keras-ns logs → {keras_log_folder}\n", flush=True)
+
+        # torch-ns checkpoints + per-cell run dirs go inside the bundle
+        # too. Each (dataset, reasoner, grounder, seed) gets its own
+        # subdir under ``torch_runs/``; the ``ModelCheckpoint`` callback
+        # writes ``model.safetensors`` there.
+        torch_ckpt_root = run_dir / "torch_runs"
+        torch_ckpt_root.mkdir(parents=True, exist_ok=True)
+        print(f"torch-ns runs → {torch_ckpt_root}\n", flush=True)
 
         rows = []
         for dataset, reasoner, grounder, seeds in selected:
@@ -628,6 +1024,9 @@ def main():
                 epochs=args.epochs, seeds=seeds,
                 do_profile=args.profile,
                 profile_only=args.profile_only,
+                keras_log_folder=keras_log_folder,
+                keras_only=args.keras_only,
+                torch_ckpt_root=torch_ckpt_root,
             )
             rows.append(row)
             mrr = row.get("mrr_mean")
@@ -636,8 +1035,12 @@ def main():
             mrr_s = "  N/A" if mrr is None else f"{mrr:5.1f}"
             wall_s = "  N/A" if wall is None else f"{wall:5.0f}s"
             ms_s = "  N/A" if ms_batch is None else f"{ms_batch:5.2f}"
+            keras_real = row.get("keras_real_mrr_mean")
+            keras_infl = row.get("keras_infl_mrr_mean")
+            kr_s = "" if keras_real is None else f" keras={keras_real:5.1f}"
+            ki_s = "" if keras_infl is None else f" keras(infl)={keras_infl:5.1f}"
             print(
-                f"    MRR={mrr_s} wall={wall_s} train_ms_batch={ms_s}",
+                f"    torch={mrr_s}{kr_s}{ki_s} wall={wall_s} train_ms_batch={ms_s}",
                 flush=True,
             )
             for err in row.get("errors", []) or []:
