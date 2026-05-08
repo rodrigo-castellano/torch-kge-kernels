@@ -369,6 +369,13 @@ def _build_cfg(
         dataset_name=dataset, data_path=DATA_ROOT,
         model_name=reasoner, kge="complex", grounder=grounder_str,
         kge_atom_embedding_size=100,
+        # ``formula_hidden_size`` controls the per-rule MLP hidden
+        # width (R2N's two-layer MLP). torch-ns' default is 64, but
+        # keras-ns uses ``reasoner_formula_hidden_embedding_size=100``
+        # for every published cell (matches the paper). Without this
+        # override torch-ns r2n trains a smaller MLP and underperforms
+        # keras by 4–8pp on BC12/BC13 cells.
+        formula_hidden_size=100,
         num_rules=9999,
         reasoner_depth=None,
         resnet=spec.resnet,
