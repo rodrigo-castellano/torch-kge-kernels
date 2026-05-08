@@ -369,13 +369,6 @@ def _build_cfg(
         dataset_name=dataset, data_path=DATA_ROOT,
         model_name=reasoner, kge="complex", grounder=grounder_str,
         kge_atom_embedding_size=100,
-        # ``formula_hidden_size`` controls the per-rule MLP hidden
-        # width (R2N's two-layer MLP). torch-ns' default is 64, but
-        # keras-ns uses ``reasoner_formula_hidden_embedding_size=100``
-        # for every published cell (matches the paper). Without this
-        # override torch-ns r2n trains a smaller MLP and underperforms
-        # keras by 4–8pp on BC12/BC13 cells.
-        formula_hidden_size=100,
         num_rules=9999,
         reasoner_depth=None,
         resnet=spec.resnet,
@@ -446,6 +439,41 @@ def _train_one(cfg) -> dict:
     }
 
 
+def _torch_seed_subprocess(
+    dataset: str, reasoner: str, grounder: Optional[str], seed: int,
+    *, epochs: int, torch_ckpt_root: Optional[Path] = None,
+) -> dict:
+    """Run one (dataset, reasoner, grounder, seed) torch training in
+    a fresh subprocess so multiple seeds can share the GPU
+    concurrently. Each subprocess gets its own CUDA context. The
+    spawned process re-invokes this script with ``--torch-cell``.
+    """
+    import subprocess, json, tempfile
+    out = Path(tempfile.NamedTemporaryFile(
+        mode='w', suffix='.json', delete=False).name)
+    cell_arg = f"{dataset}:{reasoner}:{grounder or ''}:{seed}"
+    cmd = [
+        sys.executable, "-u", __file__,
+        "--torch-cell", cell_arg,
+        "--torch-cell-out", str(out),
+        "--epochs", str(epochs),
+    ]
+    if torch_ckpt_root is not None:
+        cmd += ["--torch-cell-ckpt-root", str(torch_ckpt_root)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Surface tail of stderr for easier debugging.
+        tail = "\n".join(proc.stderr.splitlines()[-30:])
+        raise RuntimeError(
+            f"torch subprocess failed (returncode={proc.returncode})\n"
+            f"--- stderr tail ---\n{tail}")
+    try:
+        with open(out) as fh:
+            return json.load(fh)
+    finally:
+        out.unlink(missing_ok=True)
+
+
 def _profile_one(cfg) -> dict:
     """ms/batch + peak memory via ns's existing profile_train + profile_eval."""
     sys.path.insert(0, os.path.join(NS_REPO, "tests"))
@@ -468,6 +496,17 @@ def _profile_one(cfg) -> dict:
 # keras-ns runner (subprocess to ``experiments/runner.py``)
 # ─────────────────────────────────────────────────────────────────────
 KERAS_NS_ROOT = os.path.expanduser("~/repos/keras-ns-swarm/main")
+
+# Backend registry. Each entry maps a short name (used in column
+# headings and log subdirs) to the keras-ns checkout root. ``main`` is
+# our patched copy (un-inflated eval, u=0 grounder factory, -inf MRR
+# padding) — produces apples-to-apples un-inflated MRRs. ``ijcai`` is
+# the IJCAI '25 paper code (no patches) — its CSVs match the
+# published ``Paper(infl)`` figures up to seed variance.
+KERAS_BACKENDS: dict[str, Path] = {
+    "main":  Path("~/repos/keras-ns-swarm/main").expanduser(),
+    "ijcai": Path("~/repos/keras-ns-swarm/ijcai").expanduser(),
+}
 
 
 def _parse_keras_csv(csv_path: Path) -> dict:
@@ -525,23 +564,30 @@ def _parse_keras_csv(csv_path: Path) -> dict:
 def _run_keras_one(
     dataset: str, reasoner: str, paper_grounder: str, seed: int,
     *, log_folder: Path, epochs: int, eval_fix: bool = True,
+    keras_root: Path,
 ) -> dict:
-    """Drive keras-ns ``experiments/runner.py`` as a subprocess.
+    """Drive ``experiments/runner.py`` of one keras-ns checkout as a subprocess.
 
     Reuses the existing ``_ind_log-...csv`` writer. After the run
     finishes we glob the per-config CSV and parse the final test row.
-    Returns ``{mrr, h1, h3, h10}`` in percent (un-inflated when
-    ``eval_fix=True``; the ``KERAS_NS_FIX_EVAL_INFLATION`` env var
-    toggles the patch in keras-ns ``experiments/dataset.py``).
+    Returns ``{mrr, h1, h3, h10}`` in percent.
+
+    The ``keras_root`` parameter selects the checkout (e.g.
+    ``~/repos/keras-ns-swarm/main`` for the patched copy or
+    ``~/repos/keras-ns-swarm/ijcai`` for the un-patched IJCAI '25
+    paper code). The same CLI surface (``--epochs --resnet --kge
+    --log_folder --ckpt_folder``) is used in both — the ijcai branch
+    accepts these via a small CLI-compat patch.
+
+    The ``KERAS_NS_FIX_EVAL_INFLATION`` env var only takes effect on
+    branches that implement it (``main``); on ``ijcai`` it's ignored
+    and the original eval (with the inflation bug) runs.
 
     Always:
       * ``--kge complex`` (paper KGE).
-      * ``--resnet False`` for ablation_*, ``True`` for everything else
-        (per IJCAI '25 Table 1 hyperparams).
+      * ``--resnet False`` for ablation_*, ``True`` for everything else.
       * CPU-only (``CUDA_VISIBLE_DEVICES=""``) so the GPU stays free
         for parallel torch-ns runs.
-      * ``u`` (= ``max_unknown_fact_count_last_step``) is fixed at 0
-        by our keras-ns patch in ``ns_lib/grounding/grounder_factory.py``.
     """
     import subprocess
     keras_g = KERAS_GROUNDER_MAP.get(paper_grounder)
@@ -561,29 +607,62 @@ def _run_keras_one(
     ckpt_folder.mkdir(parents=True, exist_ok=True)
     stdout_log = log_folder / f"seed_{seed}.log"
 
-    cmd = [
-        sys.executable, "-u", "experiments/runner.py",
-        "--d", dataset, "--m", reasoner, "--g", keras_g,
-        "--s", str(seed), "--epochs", str(epochs),
-        "--resnet", resnet_flag, "--kge", "complex",
-        "--log_folder", str(log_folder),
-        "--ckpt_folder", str(ckpt_folder),
-    ]
+    # Backend dispatch: ``main`` accepts main-runner CLI flags
+    # (--epochs / --resnet / --kge / --log_folder / --ckpt_folder).
+    # ``ijcai`` is the paper repo and only accepts its original CLI
+    # surface (--d / --m / --g / --s) with --s as a list literal —
+    # we keep ijcai untouched, so route logs to its own ``experiments/
+    # runs/indiv_runs/`` and glob the latest matching CSV from there.
+    backend_name = keras_root.name
+    if backend_name == "ijcai":
+        cmd = [
+            sys.executable, "-u", "experiments/runner.py",
+            "--d", dataset, "--m", reasoner, "--g", keras_g,
+            "--s", f"[{seed}]",
+        ]
+        ijcai_csv_dir = keras_root / "experiments" / "runs" / "indiv_runs"
+        # ijcai's runner short-circuits if it sees an existing CSV
+        # for this (run_signature, seed). Clean any stale files for
+        # the same (dataset, grounder, seed) so the run actually
+        # executes. Also clean ``_tmp_log-...`` from a prior crashed
+        # run to avoid the logger appending to it.
+        for stale in ijcai_csv_dir.glob(
+                f"_ind_log-{dataset}-{keras_g}-*-seed_{seed}.csv"):
+            stale.unlink()
+        for stale in (keras_root / "experiments" / "runs").glob(
+                f"_tmp_log-{dataset}-{keras_g}-*-seed_{seed}.csv"):
+            stale.unlink()
+    else:
+        cmd = [
+            sys.executable, "-u", "experiments/runner.py",
+            "--d", dataset, "--m", reasoner, "--g", keras_g,
+            "--s", str(seed), "--epochs", str(epochs),
+            "--resnet", resnet_flag, "--kge", "complex",
+            "--log_folder", str(log_folder),
+            "--ckpt_folder", str(ckpt_folder),
+        ]
+        ijcai_csv_dir = None
 
     env = os.environ.copy()
     env["KERAS_NS_FIX_EVAL_INFLATION"] = "1" if eval_fix else "0"
     env["CUDA_VISIBLE_DEVICES"] = ""        # CPU-only for keras
     env["WANDB_MODE"] = "disabled"
     env["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    # Limit per-process CPU threads so we can run many subprocesses
+    # in parallel without thrashing. The ablation_d2 sbr model is
+    # small (~55K params); 2 threads per process is plenty.
+    env.setdefault("OMP_NUM_THREADS", "2")
+    env.setdefault("TF_NUM_INTRAOP_THREADS", "2")
+    env.setdefault("TF_NUM_INTEROP_THREADS", "1")
 
     t0 = time.perf_counter()
     with stdout_log.open("w", encoding="utf-8", buffering=1) as fh:
         fh.write(f"# command: {' '.join(cmd)}\n")
         fh.write(f"# env KERAS_NS_FIX_EVAL_INFLATION={env['KERAS_NS_FIX_EVAL_INFLATION']}\n")
-        fh.write(f"# cwd: {KERAS_NS_ROOT}\n\n")
+        fh.write(f"# cwd: {keras_root}\n\n")
         fh.flush()
         proc = subprocess.run(
-            cmd, cwd=KERAS_NS_ROOT, env=env,
+            cmd, cwd=str(keras_root), env=env,
             stdout=fh, stderr=subprocess.STDOUT, text=True,
         )
     wall = time.perf_counter() - t0
@@ -598,13 +677,20 @@ def _run_keras_one(
             f"log: {stdout_log}\n"
             f"--- last 30 lines ---\n{tail}")
 
-    # The runner names the CSV ``_ind_log-<run_signature>-<date>-<mrr>-seed_<n>.csv``;
-    # we glob by dataset + reasoner + grounder + seed to find the latest.
-    pattern = (f"_ind_log-{dataset}-{keras_g}-{reasoner}-*-seed_{seed}.csv")
-    candidates = sorted(indiv_runs.glob(pattern))
+    # The runner names the CSV ``_ind_log-<run_signature>-<date>-<mrr>-seed_<n>.csv``.
+    # main writes to ``log_folder/indiv_runs/``; ijcai writes to its
+    # own ``experiments/runs/indiv_runs/`` (we don't override its
+    # log_folder to keep the paper repo untouched).
+    pattern = (f"_ind_log-{dataset}-{keras_g}-*-seed_{seed}.csv")
+    if ijcai_csv_dir is not None:
+        candidates = sorted(
+            ijcai_csv_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    else:
+        candidates = sorted(indiv_runs.glob(pattern))
     if not candidates:
         raise FileNotFoundError(
-            f"keras-ns CSV not found in {indiv_runs} for pattern {pattern}")
+            f"keras-ns CSV not found "
+            f"({'ijcai' if ijcai_csv_dir else 'main'}) for pattern {pattern}")
     metrics = _parse_keras_csv(candidates[-1])
     metrics["wall"] = wall
     return metrics
@@ -613,19 +699,52 @@ def _run_keras_one(
 def _run_keras_seeds_one_variant(
     dataset: str, reasoner: str, paper_grounder: str,
     *, log_folder: Path, seeds: int, epochs: int, eval_fix: bool,
+    keras_root: Path,
 ) -> tuple[dict, list]:
-    """Run keras-ns over ``seeds`` seeds at one inflation setting."""
-    runs = []
-    for s in range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds):
-        try:
-            r = _run_keras_one(
+    """Run one keras-ns checkout over ``seeds`` seeds in parallel.
+
+    Each seed launches a CPU subprocess (``CUDA_VISIBLE_DEVICES=""``)
+    via :func:`_run_keras_one`, so spawning all of them concurrently
+    just multiplies CPU usage. ``OMP_NUM_THREADS=2`` is set in
+    ``_run_keras_one`` to keep each subprocess lightweight.
+
+    For the ``ijcai`` backend (the paper repo, untouched), the
+    ``FileLogger.exists_experiment`` check reads ``<root>/experiments/
+    runs/experiments/experiments.csv`` and short-circuits any
+    re-run with a matching ``run_signature``. Clean that file once
+    per cell so the seeds we're about to launch actually execute.
+    """
+    if keras_root.name == "ijcai":
+        ijcai_exp_csv = (
+            keras_root / "experiments" / "runs"
+            / "experiments" / "experiments.csv"
+        )
+        if ijcai_exp_csv.exists():
+            try:
+                ijcai_exp_csv.unlink()
+            except FileNotFoundError:
+                pass
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    runs: List[dict] = []
+    seed_list = list(range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds))
+    with ThreadPoolExecutor(max_workers=max(1, len(seed_list))) as ex:
+        future_to_seed = {
+            ex.submit(
+                _run_keras_one,
                 dataset, reasoner, paper_grounder, s,
                 log_folder=log_folder, epochs=epochs, eval_fix=eval_fix,
-            )
-            r["seed"] = s
-            runs.append(r)
-        except Exception as e:
-            runs.append({"seed": s, "error": str(e)})
+                keras_root=keras_root,
+            ): s
+            for s in seed_list
+        }
+        for f in as_completed(future_to_seed):
+            s = future_to_seed[f]
+            try:
+                r = f.result()
+                r["seed"] = s
+                runs.append(r)
+            except Exception as e:
+                runs.append({"seed": s, "error": str(e)})
 
     valid = [r for r in runs if "error" not in r and r.get("mrr") is not None]
     if valid:
@@ -683,43 +802,32 @@ def _derive_infl(real_mrr: Optional[float],
 def _run_keras_seeds(
     dataset: str, reasoner: str, paper_grounder: str,
     *, log_folder: Path, seeds: int, epochs: int,
+    backends: dict[str, Path],
 ) -> dict:
-    """Run keras-ns ONCE per cell with the un-inflated eval. Derive
-    the inflated number mathematically from the formula
-    ``infl = (real + 100) / 2`` for TAIL-only datasets (no inflation
-    on HEAD+TAIL).
+    """Run each configured keras backend over ``seeds`` seeds.
 
-    Halves keras CPU time vs the previous train-twice approach and
-    decouples the two columns from training noise — the inflated value
-    is now a deterministic function of the un-inflated one. The
-    underlying keras-ns padding bug (``-1e6`` was outranked by the
-    model's ``-FLT_MAX`` masking sentinel) is fixed at the source in
-    ``ns_lib/utils.py`` so trivial entries always rank correctly.
+    For every backend in ``backends`` (e.g. ``{"main": ..., "ijcai":
+    ...}``) runs the keras-ns subprocess once per seed and aggregates
+    per-backend metrics under prefixed keys. The ``main`` backend
+    runs with ``KERAS_NS_FIX_EVAL_INFLATION=1`` (un-inflated MRR);
+    ``ijcai`` ignores that env var and reproduces the original paper
+    eval (inflated for TAIL-only datasets).
 
-    Returns a dict with prefixed keys:
-      * ``keras_real_mrr_mean`` / ``keras_real_h1_mean`` / ...
-      * ``keras_infl_mrr_mean`` / ...
-      * ``keras_real_errors``
+    Returns a dict with keys ``keras_{backend}_{metric}_{stat}``,
+    e.g. ``keras_main_mrr_mean`` / ``keras_ijcai_mrr_mean``.
     """
     out: dict = {}
-    sub = log_folder / "real"
-    agg, errs = _run_keras_seeds_one_variant(
-        dataset, reasoner, paper_grounder,
-        log_folder=sub, seeds=seeds, epochs=epochs, eval_fix=True,
-    )
-    for k, v in agg.items():
-        out[f"keras_real_{k}"] = v
-    out["keras_real_errors"] = errs
-
-    # Derive inflated from real via the bug formula.
-    infl = _derive_infl(
-        agg.get("mrr_mean"), agg.get("h1_mean"),
-        agg.get("h3_mean"), agg.get("h10_mean"),
-        dataset=dataset,
-    )
-    for k, v in infl.items():
-        out[f"keras_infl_{k}"] = v
-    out["keras_infl_errors"] = []
+    for backend_name, backend_root in backends.items():
+        sub = log_folder / backend_name
+        agg, errs = _run_keras_seeds_one_variant(
+            dataset, reasoner, paper_grounder,
+            log_folder=sub, seeds=seeds, epochs=epochs,
+            eval_fix=True,                 # only main honors this
+            keras_root=backend_root,
+        )
+        for k, v in agg.items():
+            out[f"keras_{backend_name}_{k}"] = v
+        out[f"keras_{backend_name}_errors"] = errs
     return out
 
 
@@ -730,6 +838,7 @@ def run_one(
     keras_log_folder: Optional[Path] = None,
     keras_only: bool = False,
     torch_ckpt_root: Optional[Path] = None,
+    keras_backends: Optional[dict[str, Path]] = None,
 ) -> dict:
     """Train on ``seeds`` seeds, aggregate mean ± std, optionally profile.
 
@@ -739,18 +848,45 @@ def run_one(
     """
     runs = []
     if not profile_only and not keras_only:
-        for s in range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds):
-            cfg = _build_cfg(
-                dataset, reasoner, grounder, seed=s, epochs=epochs,
-                torch_ckpt_root=torch_ckpt_root,
-            )
-            try:
-                r = _train_one(cfg)
-                r["seed"] = s
-                runs.append(r)
-            except Exception as e:
-                runs.append({"seed": s, "error": str(e)})
-            _gpu_cleanup()
+        # Parallel torch: spawn one subprocess per seed sharing the
+        # GPU. ablation_d2/d3 sbr/dcr/r2n models are tiny (~55K-115K
+        # params); 5 concurrent CUDA contexts comfortably fit in
+        # 24 GB. The orchestrator subprocess (this same script) is
+        # invoked with ``--torch-cell`` to run a single seed and
+        # write metrics to JSON. Sequential fallback if
+        # ``TORCH_PARALLEL=0`` (e.g. for debugging).
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        seed_list = list(range(PAPER_SEED_BASE, PAPER_SEED_BASE + seeds))
+        if os.environ.get("TORCH_PARALLEL", "1") == "0" or len(seed_list) <= 1:
+            for s in seed_list:
+                cfg = _build_cfg(
+                    dataset, reasoner, grounder, seed=s, epochs=epochs,
+                    torch_ckpt_root=torch_ckpt_root,
+                )
+                try:
+                    r = _train_one(cfg)
+                    r["seed"] = s
+                    runs.append(r)
+                except Exception as e:
+                    runs.append({"seed": s, "error": str(e)})
+                _gpu_cleanup()
+        else:
+            with ThreadPoolExecutor(max_workers=len(seed_list)) as ex:
+                future_to_seed = {
+                    ex.submit(
+                        _torch_seed_subprocess,
+                        dataset, reasoner, grounder, s,
+                        epochs=epochs, torch_ckpt_root=torch_ckpt_root,
+                    ): s for s in seed_list
+                }
+                for f in as_completed(future_to_seed):
+                    s = future_to_seed[f]
+                    try:
+                        r = f.result()
+                        r["seed"] = s
+                        runs.append(r)
+                    except Exception as e:
+                        runs.append({"seed": s, "error": str(e)})
 
     profile_metrics = {}
     if do_profile or profile_only:
@@ -786,12 +922,15 @@ def run_one(
     # measured directly rather than derived; the doubled wall-clock
     # is acceptable because keras runs on CPU and is fast.
     keras_metrics: dict = {}
-    if keras_log_folder is not None and not _keras_skip(dataset, reasoner, grounder or "BC01"):
+    if (keras_log_folder is not None
+            and keras_backends
+            and not _keras_skip(dataset, reasoner, grounder or "BC01")):
         sub = keras_log_folder / f"{dataset}__{reasoner}__{grounder or 'BC01'}"
         sub.mkdir(parents=True, exist_ok=True)
         keras_metrics = _run_keras_seeds(
             dataset, reasoner, grounder or "BC01",
             log_folder=sub, seeds=seeds, epochs=epochs,
+            backends=keras_backends,
         )
 
     return {
@@ -863,75 +1002,114 @@ def _delta(actual: Optional[float], baseline: Optional[float]) -> str:
 def _render_report(rows: List[dict]) -> str:
     """Markdown parity report.
 
-    Three MRR columns per row:
+    Columns are dynamic — one ``Keras-{backend}`` column per backend
+    actually run in this sweep (e.g. ``Keras-main``, ``Keras-ijcai``).
+    The ``Paper`` column shows the published baseline as-is (inflated
+    for TAIL-only datasets, raw otherwise).
 
-    * ``Torch``       — torch-ns u=0 + ``.flat`` grounder. Un-inflated
-      by construction (eval-bug fixed natively).
-    * ``Keras``       — keras-ns u=0 + ``KERAS_NS_FIX_EVAL_INFLATION=1``,
-      subprocess of ``experiments/runner.py``. Un-inflated, the
-      apples-to-apples comparator for ``Torch``.
-    * ``Keras(infl)`` — derived as ``(Keras + 100) / 2`` for TAIL-only
-      datasets (``ablation_*``, ``countries_*``); equal to ``Keras``
-      otherwise. The deeper ``-FLT_MAX`` padding bug is fixed at the
-      keras-ns source so trivial single-positive entries always rank
-      correctly, making the formula valid up to a small (≤1pp)
-      tie-break residual.
-    * ``Paper``       — published paper number, inflated for TAIL-only
-      datasets per the original paper. Compare against ``Keras(infl)``.
-
-    Δ columns: ``Torch − Keras`` (cross-implementation parity on the
-    apples-to-apples un-inflated metric) and ``Keras(infl) − Paper``
-    (do our derived inflated numbers reproduce what the paper reports).
+    Δ columns: ``Torch − Keras-main``, plus ``Keras-{backend} − Paper``
+    and ``Torch − Paper`` for per-system comparison against the paper
+    baseline.
     """
+    # Discover which backends were run (any row that has a
+    # ``keras_{name}_mrr_mean`` key).
+    backends = []
+    for r in rows:
+        for k in r.keys():
+            if k.startswith("keras_") and k.endswith("_mrr_mean"):
+                name = k[len("keras_"):-len("_mrr_mean")]
+                if name and name not in backends:
+                    backends.append(name)
+    # Stable backend order — main first, then ijcai, then any others
+    # in discovery order.
+    _preferred = ["main", "ijcai"]
+    backends.sort(key=lambda n: (
+        _preferred.index(n) if n in _preferred else 99 + backends.index(n)
+    ))
+
+    headers = ["Dataset", "Reasoner", "Grounder", "Torch"]
+    headers += [f"Keras-{n}" for n in backends]
+    headers += ["Paper"]
+    if backends:
+        headers += [f"Δ Torch−Keras-{backends[0]}"]
+    for n in backends:
+        headers += [f"Δ Keras-{n}−Paper"]
+    headers += ["Δ Torch−Paper"]
+
+    seps = ["---"] * 3 + ["---:"] * (len(headers) - 3)
+
     lines = [
         "# Reasoner parity report",
         "",
         "Source baselines: `docs/reasoner_parity_baselines.md` "
         "(IJCAI '25 paper Table 1 / Table 2 / Figure 5).",
         "",
-        "**Three columns:**",
-        "* `Torch` — torch-ns un-inflated (raw MRR).",
-        "* `Keras` — keras-ns un-inflated (`KERAS_NS_FIX_EVAL_INFLATION=1`).",
-        "  Apples-to-apples comparator for `Torch`.",
-        "* `Keras(infl)` — derived as `(Keras + 100)/2` for TAIL-only "
-        "(`ablation_*`, `countries_*`); equal to `Keras` otherwise. "
-        "The keras-ns padding bug (`-1e6` outranked the model's "
-        "`-FLT_MAX` masking) is fixed at the source, so trivial "
-        "single-positive entries always rank #1 → formula is exact "
-        "up to a ≤1pp tie-break residual on cells where the reasoner "
-        "emits `-FLT_MAX` for *all* candidates of a query.",
-        "* `Paper` — published paper number. For TAIL-only datasets it "
-        "is inflated; compare against `Keras(infl)`. For HEAD+TAIL "
-        "(`family`, `wn18rr`) there is no inflation.",
+        "Numerical columns:",
+        "* `Torch` — torch-ns MRR (un-inflated by construction).",
+    ]
+    for n in backends:
+        if n == "main":
+            lines.append(
+                "* `Keras-main` — patched keras-ns "
+                "(``KERAS_NS_FIX_EVAL_INFLATION=1``, u=0 grounder, "
+                "-inf MRR padding). Un-inflated.")
+        elif n == "ijcai":
+            lines.append(
+                "* `Keras-ijcai` — original IJCAI '25 paper code "
+                "(no patches). Inflated for TAIL-only datasets.")
+        else:
+            lines.append(f"* `Keras-{n}` — keras-ns checkout `{n}`.")
+    lines += [
+        "* `Paper` — published baseline (inflated for TAIL-only).",
         "",
         "MRR in percent.",
         "",
-        "| Dataset | Reasoner | Grounder | Torch | Keras | Keras(infl) | Paper | Δ Torch−Keras | Δ Keras(infl)−Paper |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join(seps) + "|",
     ]
-    for r in rows:
-        bl = BASELINES.get((r["dataset"], r["reasoner"], r["grounder"]))
-        if bl is None:
-            continue
 
-        def _fmt(v):
-            return f"{v:.1f}" if v is not None else "—"
+    # Sort rows by dataset → reasoner → grounder so the table is
+    # always in canonical order regardless of how cells were
+    # scheduled.
+    _DS_ORDER = {
+        "ablation_d2": 0, "ablation_d3": 1,
+        "countries_s2": 2, "countries_s3": 3,
+        "family": 4, "wn18rr": 5,
+    }
+    _RZ_ORDER = {"no_reasoner": 0, "sbr": 1, "dcr": 2, "r2n": 3}
+    _GR_ORDER = {None: 0, "BC01": 1, "BC12": 2, "BC13": 3}
 
-        torch_mrr = r.get("mrr_mean")
-        keras_real = r.get("keras_real_mrr_mean")
-        keras_infl = r.get("keras_infl_mrr_mean")
-        paper_mrr = bl.mrr_mean        # published number (= inflated for TAIL-only)
-
-        lines.append(
-            f"| {r['dataset']} | {r['reasoner']} | "
-            f"{r['grounder'] or '—'} | "
-            f"{_fmt(torch_mrr)} | "
-            f"{_fmt(keras_real)} | "
-            f"{_fmt(keras_infl)} | "
-            f"{_fmt(paper_mrr)} | "
-            f"{_delta(torch_mrr, keras_real)} | "
-            f"{_delta(keras_infl, paper_mrr)} |"
+    def _row_key(r):
+        return (
+            _DS_ORDER.get(r["dataset"], 99),
+            _RZ_ORDER.get(r["reasoner"], 99),
+            _GR_ORDER.get(r["grounder"], 99),
         )
+
+    def _fmt(v):
+        return f"{v:.1f}" if v is not None else "—"
+
+    for r in sorted(rows, key=_row_key):
+        bl = BASELINES.get((r["dataset"], r["reasoner"], r["grounder"]))
+        paper_mrr = bl.mrr_mean if bl is not None else None
+        torch_mrr = r.get("mrr_mean")
+        keras_mrrs = {
+            n: r.get(f"keras_{n}_mrr_mean") for n in backends
+        }
+
+        cells = [
+            r["dataset"], r["reasoner"], r["grounder"] or "—",
+            _fmt(torch_mrr),
+        ]
+        for n in backends:
+            cells.append(_fmt(keras_mrrs[n]))
+        cells.append(_fmt(paper_mrr))
+        if backends:
+            cells.append(_delta(torch_mrr, keras_mrrs[backends[0]]))
+        for n in backends:
+            cells.append(_delta(keras_mrrs[n], paper_mrr))
+        cells.append(_delta(torch_mrr, paper_mrr))
+        lines.append("| " + " | ".join(cells) + " |")
     # End of table.
 
     if any("ms_batch_train" in r for r in rows):
@@ -981,32 +1159,91 @@ def main():
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument(
         "--keras", action="store_true",
-        help="Also drive keras-ns ``experiments/runner.py`` per cell "
-             "(CPU subprocess) and add Keras(real)/Keras(infl) columns "
-             "to the parity report. Always uses u=0 + the eval-inflation "
-             "fix (un-inflated MRR); inflated number is derived as "
-             "``(real + 100) / 2`` for TAIL-only datasets.")
+        help="Also drive each configured keras backend per cell "
+             "(CPU subprocess). Default backend set: ``main`` only. "
+             "Use ``--keras-backends`` to override.")
     parser.add_argument(
         "--keras_only", action="store_true",
-        help="Skip torch-ns runs and only drive keras-ns. Implies "
-             "``--keras``.")
+        help="Skip torch-ns runs and only drive keras backends. "
+             "Implies ``--keras``.")
+    parser.add_argument(
+        "--keras-backends", nargs='+', default=["main"],
+        choices=list(KERAS_BACKENDS.keys()),
+        help="Which keras-ns checkouts to drive per cell. Each one "
+             "produces its own ``Keras-{name}`` column in the report. "
+             "``main`` is the patched copy (un-inflated eval, u=0); "
+             "``ijcai`` is the original IJCAI '25 paper code "
+             "(inflated eval, default ``u``).")
+    # Internal: single-cell torch subprocess mode for parallel seeds.
+    parser.add_argument(
+        "--torch-cell", default=None,
+        help="Internal use only. ``ds:reasoner:grounder:seed``. "
+             "Runs one torch training and writes metrics to "
+             "``--torch-cell-out``, then exits. Used by run_one to "
+             "spawn parallel torch subprocesses on the GPU.")
+    parser.add_argument("--torch-cell-out", default=None)
+    parser.add_argument("--torch-cell-ckpt-root", default=None)
     args = parser.parse_args()
+
+    # Single-cell mode: build cfg, train, write JSON, exit.
+    if args.torch_cell is not None:
+        ds, reasoner, gr_str, seed_str = args.torch_cell.split(":")
+        grounder = gr_str if gr_str else None
+        seed = int(seed_str)
+        ckpt_root = (
+            Path(args.torch_cell_ckpt_root)
+            if args.torch_cell_ckpt_root else None
+        )
+        cfg = _build_cfg(
+            ds, reasoner, grounder, seed=seed, epochs=args.epochs,
+            torch_ckpt_root=ckpt_root,
+        )
+        metrics = _train_one(cfg)
+        with open(args.torch_cell_out, "w") as fh:
+            json.dump(metrics, fh)
+        return 0
+
     if args.keras_only:
         args.keras = True
 
     if args.smoke:
         args.epochs = min(args.epochs, 3)
 
+    # Canonical iteration order — show every (dataset, reasoner,
+    # grounder) cell regardless of whether the paper reports a
+    # baseline for it. The Paper column shows ``—`` when the
+    # baseline is missing. ``no_reasoner`` is grounder-free
+    # (only BC01 makes sense; the no_reasoner cell uses no rules).
+    CANONICAL_DATASETS = [
+        "ablation_d2", "ablation_d3",
+        "countries_s2", "countries_s3",
+        "family", "wn18rr",
+    ]
+    CANONICAL_REASONERS_ORDER = ["no_reasoner", "sbr", "dcr", "r2n"]
+    CANONICAL_GROUNDERS = ["BC01", "BC12", "BC13"]
+
     selected = []
-    for (dataset, reasoner, grounder), bl in BASELINES.items():
+    for dataset in CANONICAL_DATASETS:
+        if dataset not in DATASET_SPECS:
+            continue
         if args.only and not any(s in dataset for s in args.only):
             continue
-        if args.reasoner and reasoner not in args.reasoner:
-            continue
-        if args.grounder and grounder not in (args.grounder or [grounder]):
-            continue
-        seeds = args.seeds if args.seeds is not None else DATASET_SPECS[dataset].seeds
-        selected.append((dataset, reasoner, grounder, seeds))
+        for reasoner in CANONICAL_REASONERS_ORDER:
+            if args.reasoner and reasoner not in args.reasoner:
+                continue
+            grounders = (
+                [None] if reasoner == "no_reasoner"
+                else CANONICAL_GROUNDERS
+            )
+            for grounder in grounders:
+                if args.grounder and grounder is not None and \
+                        grounder not in args.grounder:
+                    continue
+                seeds = (
+                    args.seeds if args.seeds is not None
+                    else DATASET_SPECS[dataset].seeds
+                )
+                selected.append((dataset, reasoner, grounder, seeds))
 
     print(f"\n{'='*110}")
     print(f"REASONER PARITY SWEEP — {len(selected)} configs, "
@@ -1052,6 +1289,10 @@ def main():
                 keras_log_folder=keras_log_folder,
                 keras_only=args.keras_only,
                 torch_ckpt_root=torch_ckpt_root,
+                keras_backends=(
+                    {n: KERAS_BACKENDS[n] for n in args.keras_backends}
+                    if args.keras else None
+                ),
             )
             rows.append(row)
             mrr = row.get("mrr_mean")
@@ -1060,12 +1301,18 @@ def main():
             mrr_s = "  N/A" if mrr is None else f"{mrr:5.1f}"
             wall_s = "  N/A" if wall is None else f"{wall:5.0f}s"
             ms_s = "  N/A" if ms_batch is None else f"{ms_batch:5.2f}"
-            keras_real = row.get("keras_real_mrr_mean")
-            keras_infl = row.get("keras_infl_mrr_mean")
-            kr_s = "" if keras_real is None else f" keras={keras_real:5.1f}"
-            ki_s = "" if keras_infl is None else f" keras(infl)={keras_infl:5.1f}"
+            # Per-backend keras summary — discover dynamically so the
+            # display matches whatever ``--keras-backends`` selected.
+            keras_parts = []
+            for k in row.keys():
+                if k.startswith("keras_") and k.endswith("_mrr_mean"):
+                    name = k[len("keras_"):-len("_mrr_mean")]
+                    val = row.get(k)
+                    if val is not None:
+                        keras_parts.append(f" keras-{name}={val:5.1f}")
+            ks_s = "".join(keras_parts)
             print(
-                f"    torch={mrr_s}{kr_s}{ki_s} wall={wall_s} train_ms_batch={ms_s}",
+                f"    torch={mrr_s}{ks_s} wall={wall_s} train_ms_batch={ms_s}",
                 flush=True,
             )
             for err in row.get("errors", []) or []:
