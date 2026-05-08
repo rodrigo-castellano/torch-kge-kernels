@@ -407,11 +407,29 @@ def _build_cfg(
 
 
 def _train_one(cfg) -> dict:
-    """Run a single training+eval and return metrics + wall-clock."""
-    from torch_ns.experiment import pipeline as ns_pipeline
-    t0 = time.perf_counter()
-    train_m, valid_m, test_m, _ = ns_pipeline(cfg)
-    wall = time.perf_counter() - t0
+    """Run a single training+eval and return metrics + wall-clock.
+
+    Plumbs ``R2N_PREDICTION_TYPE`` from the dataset spec to the env var
+    that ``torch_ns.reasoners.make_reasoner_primitives`` reads at model
+    build time. Paper convention: ``"head"`` for ``ablation_*``,
+    ``"full"`` for everything else (countries, family, wn18rr).
+    Without this plumbing R2N falls back to the module default
+    (``"full"``) and ablation runs use the wrong prediction mode.
+    """
+    spec = DATASET_SPECS.get(cfg.dataset_name)
+    prev_r2n_type = os.environ.get("R2N_PREDICTION_TYPE")
+    if spec is not None:
+        os.environ["R2N_PREDICTION_TYPE"] = spec.r2n_prediction_type
+    try:
+        from torch_ns.experiment import pipeline as ns_pipeline
+        t0 = time.perf_counter()
+        train_m, valid_m, test_m, _ = ns_pipeline(cfg)
+        wall = time.perf_counter() - t0
+    finally:
+        if prev_r2n_type is None:
+            os.environ.pop("R2N_PREDICTION_TYPE", None)
+        else:
+            os.environ["R2N_PREDICTION_TYPE"] = prev_r2n_type
     return {
         "mrr":  test_m.get("MRR", 0.0) * 100.0,
         "h1":   test_m.get("Hits@1", 0.0) * 100.0,
