@@ -165,8 +165,13 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         r2n_prediction_type="full", seeds=5,
     ),
     "family": DatasetSpec(
+        # test_batch_size=4 from legacy config → 8h+ per cell because
+        # eval dominates per-epoch time. Bumped to 16 to make 100-epoch
+        # training × per-epoch eval finish in reasonable time without
+        # OOMing on the 19845-fact grounder; 64 OOMs at training, 16
+        # fits.
         corrupt_mode="both", test_negatives=0, valid_negatives=0,
-        test_batch_size=4, val_batch_size=4,
+        test_batch_size=16, val_batch_size=16,
         domain_file=None, resnet=True,
         r2n_prediction_type="full", seeds=1,
     ),
