@@ -155,6 +155,10 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         r2n_prediction_type="full", seeds=5,
     ),
     "countries_s3": DatasetSpec(
+        # countries_s3 BC13 grounder OOMs at 24 GiB; BC01/BC12 fit fine
+        # at the standard test_batch_size=128 (matching keras-ns).
+        # The BC13 train+eval batch sizes are clamped to 16/8 in
+        # _build_cfg below.
         corrupt_mode="tail", test_negatives=0, valid_negatives=0,
         test_batch_size=128, val_batch_size=128,
         domain_file="domain2constants.txt", resnet=True,
@@ -358,11 +362,34 @@ def _build_cfg(
         compile_mode = "reduce-overhead"
 
     overrides = {}
+    # Resolve eval batch sizes per cell — start from spec, then override
+    # for memory-constrained corners. Done outside the cfg constructor
+    # because cfg() takes test_batch_size as a positional kwarg already.
+    test_bs = spec.test_batch_size
+    val_bs = spec.val_batch_size
     if grounder == "BC13":
         # Trim grounding budget for the depth-3 OOM corner.
         overrides.update(
             max_groundings=16, max_total_groundings=32, max_facts_per_query=32,
         )
+        # countries_s3 has many constants (~272); BC13 grounder's
+        # fact_index.exists materializes [batch * M_proof, block]
+        # bool tensors that hit OOM at train_bs=64. Shrink batch.
+        if dataset == "countries_s3":
+            train_bs = 16
+            overrides.update(
+                max_groundings=8, max_total_groundings=16,
+                max_facts_per_query=16,
+            )
+            # BC13 also needs smaller eval batches for the same reason.
+            test_bs = 8
+            val_bs = 8
+    # Match keras-ns train_bs=256 for s3 BC12 (defaults to 128 above for
+    # other datasets where it OOMs). countries_s3 BC12 has small enough
+    # grounder footprint to allow the larger batch — and torch was
+    # underperforming keras on s3 sbr/r2n BC12 with bs=128.
+    if dataset == "countries_s3" and grounder == "BC12":
+        train_bs = 256
 
     # R2N at depth ≥ 2 diverges at lr=0.01 (val loss explodes 1.0 → 9.4
     # within 10 epochs on 2/5 seeds; mean MRR 0.63 std 0.36 — bimodal
@@ -403,8 +430,8 @@ def _build_cfg(
         corrupt_mode=spec.corrupt_mode,
         test_negatives=spec.test_negatives,
         valid_negatives=spec.valid_negatives,
-        test_batch_size=spec.test_batch_size,
-        val_batch_size=spec.val_batch_size,
+        test_batch_size=test_bs,
+        val_batch_size=val_bs,
         domain_file=spec.domain_file,
         seed=seed, seed_run_i=seed,
         compile_mode=compile_mode,
