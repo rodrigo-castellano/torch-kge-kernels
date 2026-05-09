@@ -364,6 +364,12 @@ def _build_cfg(
             256
         )
         compile_mode = "reduce-overhead"
+    # family BC12/BC13 hit torch._dynamo recompile_limit and stall before
+    # epoch 1 (compile churn from variable rule_groundings shapes across
+    # 143 rules). Disable compile for those cells — slower per-step but
+    # actually finishes.
+    if dataset == "family" and grounder in ("BC12", "BC13"):
+        compile_mode = None
 
     overrides = {}
     # Resolve eval batch sizes per cell — start from spec, then override
@@ -394,6 +400,13 @@ def _build_cfg(
     # underperforming keras on s3 sbr/r2n BC12 with bs=128.
     if dataset == "countries_s3" and grounder == "BC12":
         train_bs = 256
+    # family BC12/BC13 have a much larger atom pool than BC01; even with
+    # the unhardcoded eval bs=32 cap, the grounder atom budget OOMs at
+    # the default bs. Shrink eval+train at the deeper grounders.
+    if dataset == "family" and grounder in ("BC12", "BC13"):
+        train_bs = 16
+        test_bs = 16
+        val_bs = 16
 
     # R2N at depth ≥ 2 diverges at lr=0.01 (val loss explodes 1.0 → 9.4
     # within 10 epochs on 2/5 seeds; mean MRR 0.63 std 0.36 — bimodal
