@@ -370,6 +370,13 @@ def _build_cfg(
     # actually finishes.
     if dataset == "family" and grounder in ("BC12", "BC13"):
         compile_mode = None
+    # countries_s3 BC13 also hits recompile_limit (rule_groundings varies
+    # per batch under depth=3 grounder + 3 rules). The recompile cache
+    # accumulates 8 graph variants → 22 GiB GPU used → OOM at the next
+    # allocation. Disable compile for this cell — the grounder's
+    # multi-step expansion dominates wall anyway.
+    if dataset == "countries_s3" and grounder == "BC13":
+        compile_mode = None
 
     overrides = {}
     # Resolve eval batch sizes per cell — start from spec, then override
@@ -385,15 +392,19 @@ def _build_cfg(
         # countries_s3 has many constants (~272); BC13 grounder's
         # fact_index.exists materializes [batch * M_proof, block]
         # bool tensors that hit OOM at train_bs=64. Shrink batch.
+        # depth-3 + recursive rules (r1, r2 use locatedInCR in body)
+        # blows up at 24 GiB even at train_bs=16 with budgets=8/16/16.
+        # Drop to bs=2 with the smallest viable budgets (bs=1 hits a
+        # batch-padding shape mismatch in the reasoner forward).
         if dataset == "countries_s3":
-            train_bs = 16
+            train_bs = 2
             overrides.update(
-                max_groundings=8, max_total_groundings=16,
-                max_facts_per_query=16,
+                max_groundings=4, max_total_groundings=8,
+                max_facts_per_query=8,
             )
             # BC13 also needs smaller eval batches for the same reason.
-            test_bs = 8
-            val_bs = 8
+            test_bs = 2
+            val_bs = 2
     # Match keras-ns train_bs=256 for s3 BC12 (defaults to 128 above for
     # other datasets where it OOMs). countries_s3 BC12 has small enough
     # grounder footprint to allow the larger batch — and torch was
