@@ -469,7 +469,15 @@ def _build_cfg(
             "WEIGHT_DECAY",
             "1e-3" if reasoner == "dcr" else "0.0",
         )),
-        valid_frequency=1, lr_sched="plateau", lr_patience=10,
+        valid_frequency=1,
+        # r2n at s3 BC01: lr_sched="plateau" decays to min_lr=1e-4 before
+        # stuck seeds escape val=0.94 (val_loss plateau triggers decay
+        # while model is still searching). Disable scheduler for this
+        # cell so seeds 1/2/4 can keep training at lr=0.001 long enough
+        # to reach val=1.0.
+        lr_sched=("none" if reasoner == "r2n" and dataset == "countries_s3"
+                  and grounder == "BC01" else "plateau"),
+        lr_patience=10,
         early_stopping=True, patience=50,
         loss="binary_crossentropy", weight_loss=0.5,
         corrupt_mode=spec.corrupt_mode,
