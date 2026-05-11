@@ -133,6 +133,22 @@ class DatasetSpec:
     resnet: bool
     r2n_prediction_type: str      # "head" | "full" — preserved for parity hyperparam log
     seeds: int                    # paper-default seed count
+    # Dual-eval sweep additions (sweep-only — trainer behavior unchanged).
+    # ``val_size``: cap on val queries (None = use all; auto-fallback if
+    # dataset has fewer). ``test_negatives_exhaustive``: if not None, the
+    # sweep runs a SECOND test eval after the primary one with this many
+    # negatives (0 = exhaustive over domain). Used for family to report
+    # both the fast sampled MRR and the paper-grade exhaustive MRR in
+    # one cell run. ``rules_file`` overrides the default ``rules.txt``.
+    # For family, set to ``rules_old.txt`` (47 rules) — that's what the
+    # IJCAI'25 paper baselines were computed against; the 143-rule
+    # ``rules.txt`` shipped alongside it is a later coverage-extension
+    # variant we are NOT reproducing here. Without this override both
+    # backends silently pick the 143 file and the resulting MRR
+    # diverges from the published baseline.
+    val_size: Optional[int] = None
+    test_negatives_exhaustive: Optional[int] = None
+    rules_file: str = "rules.txt"
 
 
 DATASET_SPECS: dict[str, DatasetSpec] = {
@@ -165,20 +181,34 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         r2n_prediction_type="full", seeds=5,
     ),
     "family": DatasetSpec(
-        # test_batch_size=4 from legacy config + hardcoded reasoner-eval
-        # batch=8 in builder → eval dominated wall (5min/epoch).
-        # bs=32 with the unhardcoded evaluator + 19845 facts grounder
-        # fits comfortably; bs=64 hangs (likely CUDA-graph thrash).
-        corrupt_mode="both", test_negatives=0, valid_negatives=0,
+        # Dual-eval protocol: val = 100 queries × 100 sampled negatives
+        # for fast per-epoch feedback (matches keras-ns family default
+        # of 100 sampled). Test runs TWICE — once sampled (100 negs,
+        # fast for iteration), once exhaustive (paper-grade metric).
+        # The 100-neg val/test cells reach ~10-20× faster than the
+        # exhaustive 2968-neg pass while still tracking convergence.
+        # Rules: ``rules_old.txt`` (47 rules) is the IJCAI'25 paper
+        # ruleset, which the parity baselines were computed against.
+        # The 143-rule ``rules.txt`` shipped in the data-swarm checkout
+        # is a later coverage-extension augmentation; we are NOT using
+        # that here because the goal of this sweep is reproducing
+        # IJCAI'25 baselines (so both keras-ns + torch-ns must read
+        # the 47-rule file).
+        corrupt_mode="both", test_negatives=100, valid_negatives=100,
         test_batch_size=32, val_batch_size=32,
         domain_file=None, resnet=True,
         r2n_prediction_type="full", seeds=1,
+        val_size=100, test_negatives_exhaustive=0,
+        rules_file="rules_old.txt",
     ),
     "wn18rr": DatasetSpec(
-        corrupt_mode="both", test_negatives=1000, valid_negatives=1000,
+        # wn18rr: 1000 sampled corruptions for both val and test
+        # (the conventional WN18RR benchmark; no exhaustive 2nd pass).
+        corrupt_mode="both", test_negatives=1000, valid_negatives=100,
         test_batch_size=1, val_batch_size=1,
         domain_file=None, resnet=True,
         r2n_prediction_type="full", seeds=1,
+        val_size=100, test_negatives_exhaustive=None,
     ),
 }
 
@@ -488,9 +518,11 @@ def _build_cfg(
         corrupt_mode=spec.corrupt_mode,
         test_negatives=spec.test_negatives,
         valid_negatives=spec.valid_negatives,
+        valid_size=spec.val_size,
         test_batch_size=test_bs,
         val_batch_size=val_bs,
         domain_file=spec.domain_file,
+        rules_file=spec.rules_file,
         seed=seed, seed_run_i=seed,
         compile_mode=compile_mode,
         no_compile=(compile_mode is None),
@@ -523,28 +555,125 @@ def _train_one(cfg) -> dict:
     ``"full"`` for everything else (countries, family, wn18rr).
     Without this plumbing R2N falls back to the module default
     (``"full"``) and ablation runs use the wrong prediction mode.
+
+    Dual-eval (sweep-only): when the dataset spec carries
+    ``test_negatives_exhaustive`` (currently only family), after the
+    primary test eval we run a SECOND test eval over the same trained
+    model with ``cfg.test_negatives`` swapped to the exhaustive value.
+    The two test results land in the returned dict as
+    ``mrr/h1/.../wall`` (the fast / primary pass) plus
+    ``mrr_exhaustive/h1_exhaustive/.../wall_exhaustive`` (the second
+    pass). For datasets without a 2nd-pass spec, the ``*_exhaustive``
+    keys are absent.
     """
     spec = DATASET_SPECS.get(cfg.dataset_name)
     prev_r2n_type = os.environ.get("R2N_PREDICTION_TYPE")
     if spec is not None:
         os.environ["R2N_PREDICTION_TYPE"] = spec.r2n_prediction_type
     try:
-        from torch_ns.experiment import pipeline as ns_pipeline
+        do_dual = (spec is not None
+                   and spec.test_negatives_exhaustive is not None)
+        if not do_dual:
+            # Fast path: existing pipeline (no model retention needed).
+            from torch_ns.experiment import pipeline as ns_pipeline
+            t0 = time.perf_counter()
+            train_m, valid_m, test_m, _ = ns_pipeline(cfg)
+            wall = time.perf_counter() - t0
+            return {
+                "mrr":  test_m.get("MRR", 0.0) * 100.0,
+                "h1":   test_m.get("Hits@1", 0.0) * 100.0,
+                "h3":   test_m.get("Hits@3", 0.0) * 100.0,
+                "h10":  test_m.get("Hits@10", 0.0) * 100.0,
+                "wall": wall,
+            }
+        # Dual-eval path: inline pipeline() so the trained model stays
+        # in scope for a 2nd test eval with k=test_negatives_exhaustive.
+        from torch_ns.experiment import normalize_kge_only_args, set_seed
+        from torch_ns.builder import (
+            build_data, build_model, build_optimizer, build_callbacks,
+        )
+        from torch_ns.evaluator import (
+            build_evaluator, run_evaluation as _run_evaluation,
+        )
+        from torch_ns.train import train as _train_loop
+        from kge_kernels.eval import RankingEvaluator, SamplerCandidates
+
+        cfg = normalize_kge_only_args(cfg)
+        set_seed(cfg.seed_run_i if cfg.seed_run_i else cfg.seed)
+
         t0 = time.perf_counter()
-        train_m, valid_m, test_m, _ = ns_pipeline(cfg)
-        wall = time.perf_counter() - t0
+        data = build_data(cfg)
+        model, compiled_model = build_model(cfg, data)
+        if cfg.stop_kge_gradients and hasattr(model, "kge_model"):
+            for param in model.kge_model.parameters():
+                param.requires_grad = False
+        optim = build_optimizer(cfg, model)
+        evaluator = build_evaluator(cfg, model, data)
+        callbacks = build_callbacks(
+            cfg, model, data, evaluator, optim,
+            compiled_model=compiled_model,
+        )
+        _train_loop(model, compiled_model, data, optim, callbacks,
+                    evaluator, cfg)
+        train_m, valid_m, test_m = _run_evaluation(
+            model, evaluator, data, cfg,
+        )
+        wall_primary = time.perf_counter() - t0
+
+        # Second test eval with the exhaustive corruption count.
+        # ``test_negatives_exhaustive=0`` follows the tkk convention
+        # ``0 → exhaustive (None to the sampler)``; ``N>0`` → N sampled.
+        k_exh = (None if spec.test_negatives_exhaustive == 0
+                 else spec.test_negatives_exhaustive)
+        modes_eval = (("tail", "head") if data.eval_corrupt_mode == "both"
+                      else (data.eval_corrupt_mode,))
+        t_exh_start = time.perf_counter()
+        sc_exh = SamplerCandidates(data.eval_sampler, k=k_exh)
+        evaluator_exh = RankingEvaluator(
+            scorer=model.eval_scores,
+            candidates=sc_exh,
+            batch_size=cfg.test_batch_size,
+            modes=modes_eval,
+            device=data.device,
+            compile=False,
+            tie_handling="random",
+        )
+        # Use a distinct cache key so we don't collide with the primary
+        # test cache (different triple-set ids in the cache index).
+        if hasattr(model, "_active_eval_key"):
+            model._active_eval_key = (id(data.test_triples), "test_exh")
+            model.reset_grounding_cache_idx()
+        try:
+            res_exh = evaluator_exh.evaluate(data.test_triples)
+            test_m_exh = res_exh.metrics()
+        finally:
+            if hasattr(model, "_active_eval_key"):
+                model._active_eval_key = None
+        wall_exh = time.perf_counter() - t_exh_start
+
+        print(f"\nExhaustive test (k={k_exh}, "
+              f"corruptions={'all' if k_exh is None else k_exh}):")
+        for name, value in test_m_exh.items():
+            print(f"  {name}: {value:.4f}")
+        print(f"Exhaustive inference time: {wall_exh:.2f}s")
+
+        return {
+            "mrr":            test_m.get("MRR", 0.0) * 100.0,
+            "h1":             test_m.get("Hits@1", 0.0) * 100.0,
+            "h3":             test_m.get("Hits@3", 0.0) * 100.0,
+            "h10":            test_m.get("Hits@10", 0.0) * 100.0,
+            "wall":           wall_primary + wall_exh,
+            "mrr_exhaustive": test_m_exh.get("MRR", 0.0) * 100.0,
+            "h1_exhaustive":  test_m_exh.get("Hits@1", 0.0) * 100.0,
+            "h3_exhaustive":  test_m_exh.get("Hits@3", 0.0) * 100.0,
+            "h10_exhaustive": test_m_exh.get("Hits@10", 0.0) * 100.0,
+            "wall_exhaustive": wall_exh,
+        }
     finally:
         if prev_r2n_type is None:
             os.environ.pop("R2N_PREDICTION_TYPE", None)
         else:
             os.environ["R2N_PREDICTION_TYPE"] = prev_r2n_type
-    return {
-        "mrr":  test_m.get("MRR", 0.0) * 100.0,
-        "h1":   test_m.get("Hits@1", 0.0) * 100.0,
-        "h3":   test_m.get("Hits@3", 0.0) * 100.0,
-        "h10":  test_m.get("Hits@10", 0.0) * 100.0,
-        "wall": wall,
-    }
 
 
 def _torch_seed_subprocess(
@@ -749,6 +878,30 @@ def _run_keras_one(
             "--log_folder", str(log_folder),
             "--ckpt_folder", str(ckpt_folder),
         ]
+        # Plumb the sweep's val_size / valid_negatives / test_negatives
+        # / rules_file into the keras subprocess so both backends share
+        # the same eval protocol per cell. countries/ablation aren't
+        # passed (config.yaml + ``update_config.py``'s auto-override
+        # give the exhaustive eval behavior we already validated).
+        spec = DATASET_SPECS.get(dataset)
+        if spec is not None and spec.val_size is not None:
+            cmd += ["--valid_size", str(spec.val_size)]
+        if spec is not None and not _is_tail_only(dataset):
+            cmd += [
+                "--valid_negatives", str(spec.valid_negatives),
+                "--test_negatives",  str(spec.test_negatives),
+            ]
+        if spec is not None and spec.rules_file != "rules.txt":
+            # Translate torch-side rule file names to keras-side.
+            # data-swarm ships ``rules_old.txt`` (47 rules, IJCAI'25);
+            # keras-ns's ``experiments/data/family/`` ships the same
+            # 47-rule file as ``rules_amie.txt``. Identical content,
+            # different filename. Add new entries here if other
+            # datasets later need a torch ↔ keras filename remap.
+            keras_rules = {
+                ("family", "rules_old.txt"): "rules_amie.txt",
+            }.get((dataset, spec.rules_file), spec.rules_file)
+            cmd += ["--rules_file", keras_rules]
         ijcai_csv_dir = None
 
     env = os.environ.copy()
