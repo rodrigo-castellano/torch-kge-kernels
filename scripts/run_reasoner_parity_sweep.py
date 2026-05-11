@@ -389,22 +389,16 @@ def _build_cfg(
         overrides.update(
             max_groundings=16, max_total_groundings=32, max_facts_per_query=32,
         )
-        # countries_s3 has many constants (~272); BC13 grounder's
-        # fact_index.exists materializes [batch * M_proof, block]
-        # bool tensors that hit OOM at train_bs=64. Shrink batch.
-        # depth-3 + recursive rules (r1, r2 use locatedInCR in body)
-        # blows up at 24 GiB even at train_bs=16 with budgets=8/16/16.
-        # Drop to bs=2 with the smallest viable budgets (bs=1 hits a
-        # batch-padding shape mismatch in the reasoner forward).
+        # countries_s3 BC13 training is fine at bs=64+ (forward uses
+        # ~1.2 GB at bs=50, profiled). The earlier OOM was from the
+        # eval path (eval_bs=256 vs train_pool=128 buffer mismatch),
+        # now fixed by two-axis chunking in eval_scores. Use the
+        # standard BC13 train_bs and shrink only the eval batches
+        # since exhaustive ranking over ~272 candidates × bs in
+        # rule_tail still has a higher peak.
         if dataset == "countries_s3":
-            train_bs = 2
-            overrides.update(
-                max_groundings=4, max_total_groundings=8,
-                max_facts_per_query=8,
-            )
-            # BC13 also needs smaller eval batches for the same reason.
-            test_bs = 2
-            val_bs = 2
+            test_bs = 8
+            val_bs = 8
     # Match keras-ns train_bs=256 for s3 BC12 (defaults to 128 above for
     # other datasets where it OOMs). countries_s3 BC12 has small enough
     # grounder footprint to allow the larger batch — and torch was
