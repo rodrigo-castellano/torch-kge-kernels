@@ -442,6 +442,14 @@ def _build_cfg(
         train_bs = 16
         test_bs = 16
         val_bs = 16
+        # Decouple eval atom pool from train pool. train_pool_cap=32
+        # would pin c_chunk=2 in eval_scores → 25× more grounder calls
+        # than necessary for the exhaustive 2967-cand test. The grounder
+        # is memory-bound by N_full only (no backward in eval), so we
+        # can fit a much larger pool. 512 = train_pool_cap × 16; capped
+        # at 256 for BC13 since depth-3 atom-table is ~4× heavier than
+        # depth-2's per chunk.
+        overrides["eval_pool_cap"] = 256 if grounder == "BC13" else 512
 
     # R2N at depth ≥ 2 diverges at lr=0.01 (val loss explodes 1.0 → 9.4
     # within 10 epochs on 2/5 seeds; mean MRR 0.63 std 0.36 — bimodal
