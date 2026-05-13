@@ -204,8 +204,12 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
     "wn18rr": DatasetSpec(
         # wn18rr: 1000 sampled corruptions for both val and test
         # (the conventional WN18RR benchmark; no exhaustive 2nd pass).
+        # val/test_batch_size=32 (was 1): each val pass loops over 2824
+        # val triples; at bs=1 the grounder is invoked 2824 times per
+        # eval → ~6 min per epoch on torch (training is 7s). Bumping to
+        # 32 reduces grounder calls 32x with no precision change.
         corrupt_mode="both", test_negatives=1000, valid_negatives=100,
-        test_batch_size=1, val_batch_size=1,
+        test_batch_size=32, val_batch_size=32,
         domain_file=None, resnet=True,
         r2n_prediction_type="full", seeds=1,
         val_size=100, test_negatives_exhaustive=None,
