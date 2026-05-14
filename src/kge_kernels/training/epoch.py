@@ -31,6 +31,7 @@ modules added more navigation cost than separation benefit.
 """
 from __future__ import annotations
 
+import os
 import random
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -57,10 +58,24 @@ __all__ = [
 
 
 def set_seed(seed: int) -> None:
-    """Seed Python, torch, and CUDA RNGs for reproducible training."""
+    """Seed Python, torch, and CUDA RNGs for reproducible training.
+
+    When ``KGE_DETERMINISTIC=1`` is set in the environment, also enable
+    PyTorch's deterministic-algorithms mode. This eliminates within-seed
+    nondeterminism in the multi-hop grounder pathway (BC12/BC13) at
+    ~25% perf cost — appropriate for baseline generation and regression
+    tests, not for production training.
+    """
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    if os.environ.get("KGE_DETERMINISTIC") == "1":
+        # cuBLAS workspace must be set before any cuBLAS allocation.
+        # `setdefault` so an explicit caller-provided value wins.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 # ─── Batching primitives ─────────────────────────────────────────────────
