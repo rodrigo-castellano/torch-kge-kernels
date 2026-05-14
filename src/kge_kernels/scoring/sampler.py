@@ -270,11 +270,15 @@ class Sampler:
 
         # Entity corruption draws with replacement, so when the (post-filter)
         # candidate pool is smaller than k the row contains duplicate
-        # triples. Mark all but the first occurrence of each (r, h, t) tuple
-        # as invalid so callers asking for unique=True get k unique
-        # negatives or zero-padding when the pool is exhausted.
+        # triples. Mark all but the first occurrence of each (r, h, t)
+        # tuple as invalid so callers asking for unique=True get k
+        # unique negatives or zero-padding when the pool is exhausted.
+        # Uses an O(B*k^2) pairwise comparison rather than sort + scatter
+        # because `torch.argsort` on CUDA is non-deterministic even under
+        # ``use_deterministic_algorithms(True, warn_only=True)`` and the
+        # regression suite needs bit-stable MRR across reruns at the same
+        # seed.
         if do_unique and k > 1:
-            INVALID_KEY = 1 << 62
             keys = (
                 neg_rht[:, :, 0] * 10_000_000
                 + neg_rht[:, :, 1] * 10_000
@@ -283,12 +287,15 @@ class Sampler:
             slot_offsets = torch.arange(
                 k, device=device, dtype=keys.dtype
             ).unsqueeze(0)
+            INVALID_KEY = 1 << 62
             keys = torch.where(valid, keys, INVALID_KEY + slot_offsets)
-            sorted_keys, sort_perm = torch.sort(keys, dim=1, stable=True)
-            consec_dup = torch.zeros_like(sorted_keys, dtype=torch.bool)
-            consec_dup[:, 1:] = sorted_keys[:, 1:] == sorted_keys[:, :-1]
-            inv_perm = torch.argsort(sort_perm, dim=1)
-            is_dup = torch.gather(consec_dup, 1, inv_perm)
+            # pairwise_eq[i, j, j'] = (keys[i, j] == keys[i, j'])
+            pairwise_eq = keys.unsqueeze(2) == keys.unsqueeze(1)
+            # strict_lower[j, j'] = True iff j' < j
+            strict_lower = torch.tril(
+                torch.ones(k, k, dtype=torch.bool, device=device), diagonal=-1
+            )
+            is_dup = (pairwise_eq & strict_lower).any(dim=2)
             valid = valid & ~is_dup
 
         neg_rht = neg_rht * valid.unsqueeze(-1)
