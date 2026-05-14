@@ -214,6 +214,22 @@ def build_firings_from_rule_groundings(
     valid_chunks = []
     head_chunks = []
     rule_chunks = []
+    firing_valid_chunks = []
+    # When the grounder padded its outputs to fixed caps (see
+    # ``grounder.groundings.pad_rule_groundings``), ``rg.firings_valid``
+    # carries per-rule ``[G_r]`` bool masks marking real firings vs
+    # padding rows. We forward them into ``FiringsTensors.firing_valid``
+    # so the rule loop masks padded rows out of the T-norm composition.
+    # We also AND the per-firing validity into ``body_atom_valid`` so
+    # the body-side gather/where masks padded firings' body slots to the
+    # T-norm identity — belt-and-suspenders alongside the head-side
+    # ``firing_valid`` mask. Without the body-side mask, the per-firing
+    # operator still consumes ``pool[pad_idx]`` for padded firings; even
+    # though the head is later overwritten to ``-1e4``, downstream
+    # gradient paths through ``state_repr`` (esp. with learnable per-rule
+    # parameters in DCR/R2N) cleaner with the body fully masked too.
+    # When absent (the default unpadded path), every firing is valid.
+    rg_firings_valid = getattr(rg, "firings_valid", None)
     for r in rule_indices:
         A_in_r = rg.A_in[r]                          # [G_r, M_r]
         A_out_r = rg.A_out[r]                        # [G_r, 1]
@@ -233,6 +249,16 @@ def build_firings_from_rule_groundings(
         else:
             body_padded = A_in_r
             valid = torch.ones(G_r, M_max, dtype=torch.bool, device=device)
+        if rg_firings_valid is not None and r in rg_firings_valid:
+            f_valid_r = rg_firings_valid[r]
+            firing_valid_chunks.append(f_valid_r)
+            # AND the per-firing mask into body_atom_valid so padded
+            # firings' body gathers get the T-norm identity.
+            valid = valid & f_valid_r.unsqueeze(-1)
+        else:
+            firing_valid_chunks.append(
+                torch.ones(G_r, dtype=torch.bool, device=device)
+            )
         body_chunks.append(body_padded)
         valid_chunks.append(valid)
         head_chunks.append(A_out_r.squeeze(-1))
@@ -246,7 +272,7 @@ def build_firings_from_rule_groundings(
         body_pool_idx=torch.cat(body_chunks, dim=0),
         body_atom_valid=torch.cat(valid_chunks, dim=0),
         head_pool_idx=torch.cat(head_chunks, dim=0),
-        firing_valid=torch.ones(rule_idx.shape[0], dtype=torch.bool, device=device),
+        firing_valid=torch.cat(firing_valid_chunks, dim=0),
     )
 
 
