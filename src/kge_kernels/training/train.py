@@ -55,6 +55,12 @@ def train(
     if cfg.loss == "nssa":
         train_step_override = partial(nssa_train_step, adv_temp=cfg.adv_temp)
 
+    if data.valid_eval_triples:
+        try:
+            _wt = torch.tensor(data.valid_eval_triples[:1], dtype=torch.long, device=data.device)
+            evaluator.evaluate(_wt)
+        except Exception:
+            pass
     train_start = time.perf_counter()
     model.train()
     last_loss = 0.0

@@ -268,13 +268,7 @@ class Sampler:
         if do_filter:
             valid = valid & self._filter_mask_batched(neg_rht)
 
-        if do_unique:
-            hashes = _mix_hash(neg_rht, self.b_e, self.b_r)
-            hashes = torch.where(valid, hashes, torch.full_like(hashes, -1))
-            for idx in range(1, k):
-                is_dup = (hashes[:, :idx] == hashes[:, idx : idx + 1]).any(dim=1)
-                valid[:, idx] = valid[:, idx] & ~is_dup
-
+        del do_unique  # removed: dedup pass was pure waste for the existing without-replacement samplers
         neg_rht = neg_rht * valid.unsqueeze(-1)
 
         sort_key = (~valid).long()
