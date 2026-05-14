@@ -268,7 +268,29 @@ class Sampler:
         if do_filter:
             valid = valid & self._filter_mask_batched(neg_rht)
 
-        del do_unique  # removed: dedup pass was pure waste for the existing without-replacement samplers
+        # Entity corruption draws with replacement, so when the (post-filter)
+        # candidate pool is smaller than k the row contains duplicate
+        # triples. Mark all but the first occurrence of each (r, h, t) tuple
+        # as invalid so callers asking for unique=True get k unique
+        # negatives or zero-padding when the pool is exhausted.
+        if do_unique and k > 1:
+            INVALID_KEY = 1 << 62
+            keys = (
+                neg_rht[:, :, 0] * 10_000_000
+                + neg_rht[:, :, 1] * 10_000
+                + neg_rht[:, :, 2]
+            )
+            slot_offsets = torch.arange(
+                k, device=device, dtype=keys.dtype
+            ).unsqueeze(0)
+            keys = torch.where(valid, keys, INVALID_KEY + slot_offsets)
+            sorted_keys, sort_perm = torch.sort(keys, dim=1, stable=True)
+            consec_dup = torch.zeros_like(sorted_keys, dtype=torch.bool)
+            consec_dup[:, 1:] = sorted_keys[:, 1:] == sorted_keys[:, :-1]
+            inv_perm = torch.argsort(sort_perm, dim=1)
+            is_dup = torch.gather(consec_dup, 1, inv_perm)
+            valid = valid & ~is_dup
+
         neg_rht = neg_rht * valid.unsqueeze(-1)
 
         sort_key = (~valid).long()
