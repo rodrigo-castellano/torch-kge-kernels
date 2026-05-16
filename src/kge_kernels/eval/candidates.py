@@ -78,10 +78,21 @@ class SamplerCandidates:
         k: Optional[int] = None,
         head_domain: Optional[Dict[int, set]] = None,
         tail_domain: Optional[Dict[int, set]] = None,
+        unique: bool = False,
     ) -> None:
+        """``unique``: forward to ``sampler.corrupt(unique=...)``. The
+        sampler's pairwise-dedup is ``O(B * k^2)`` GPU memory; for
+        exhaustive eval (k = num_entities, ~40k on wn18rr) that's
+        50+ GiB and OOMs. Exhaustive enumeration produces each entity
+        at most once by construction, so dedup is redundant. Default
+        ``False`` is safe for any exhaustive / unique-by-construction
+        caller. DpRL's rollout tests need dedup of sampled draws and
+        pass ``unique=True`` explicitly.
+        """
         self.sampler = sampler
         self.num_entities = sampler.num_entities
         self.k = k
+        self._unique = unique
 
         has_domain = getattr(sampler, "_has_domain_info", lambda: False)()
         if k is None:
@@ -141,7 +152,7 @@ class SamplerCandidates:
             num_negatives=num_neg,
             mode=mode,
             filter=True,
-            unique=True,
+            unique=self._unique,
             return_mask=True,
         )
         # neg: [B, K, 3] in (r, h, t) format; extract the column that was

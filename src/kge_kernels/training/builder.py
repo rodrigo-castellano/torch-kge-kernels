@@ -283,6 +283,7 @@ def build_evaluator(cfg: TrainConfig, model: torch.nn.Module, data: DataBundle):
         data.sampler, k=eval_negs,
         head_domain=data.head_domain if data.use_domain_eval else None,
         tail_domain=data.tail_domain if data.use_domain_eval else None,
+        unique=eval_negs is not None,
     )
     scheme = cfg.corruption_scheme if cfg.corruption_scheme in ("head", "tail", "both") else "both"
     modes = ("head", "tail") if scheme == "both" else (scheme,)

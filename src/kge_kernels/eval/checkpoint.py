@@ -127,9 +127,14 @@ def evaluate_checkpoint(
     )
 
     eval_negs = cfg.eval_num_corruptions or None
+    # ``unique=True`` only when sampling (k>0): the sampler's pairwise dedup
+    # is O(B*k^2) memory — fine for small k, OOMs at k=num_entities. For
+    # exhaustive enumeration (k=None) each entity appears exactly once by
+    # construction so dedup is redundant.
     candidates = SamplerCandidates(
         sampler, k=eval_negs,
         head_domain=head_domain, tail_domain=tail_domain,
+        unique=eval_negs is not None,
     )
 
     scheme = cfg.corruption_scheme if cfg.corruption_scheme in ("head", "tail", "both") else "both"
