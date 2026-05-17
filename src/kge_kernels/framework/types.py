@@ -169,91 +169,120 @@ class FiringsTensors:
 
 
 def build_firings_from_rule_groundings(
-    rg: RuleGroundings,
+    rg: "RuleGroundings",
     *,
     M_max: Optional[int] = None,
     pad_idx: int = 0,
 ) -> FiringsTensors:
-    """Concatenate per-rule (A_in, A_out) into flat per-firing tensors.
+    """Convert a ``RuleGroundings`` to flat per-firing tensors.
 
-    Each rule ``r`` contributes ``G_r = A_in[r].shape[0]`` firings.
-    Total ``N_f = sum_r G_r``. Body widths are padded to ``M_max`` (the
-    max over all rules' body lengths if not provided) with ``pad_idx``
-    (which should index the pool's padding slot 0 for safe gathers).
+    **Fast path** (grounder's ``RuleGroundings`` dataclass, post-flatten):
+    every required tensor (``body_pool_idx``, ``body_atom_valid``,
+    ``head_pool_idx``, ``rule_idx``, ``firing_valid``) already exists
+    in flat form. This function returns them as-is — zero kernels,
+    zero host syncs, fullgraph-traceable. If ``M_max`` is wider than
+    the rg's, the body is right-padded with ``pad_idx``.
 
-    The output preserves the rule_idx ordering of ``sorted(rg.A_in.keys())``
-    so the same (rg, M_max) input always produces byte-identical firings.
+    **Fallback path** (dict-style ``A_in`` / ``A_out`` only — e.g.
+    test fakes that don't carry the flat fields): concatenates per
+    rule. Slower, but used only by unit tests.
 
     Args:
-        rg: ``RuleGroundings``-conforming object (e.g. grounder's
-            ``RuleGroundings`` dataclass).
+        rg: ``RuleGroundings``-conforming object.
         M_max: pad target body width. If None, uses
-            ``max_r M_r`` over present rules; falls back to 1 for empty rg.
+            ``rg.M_max`` (flat path) or
+            ``max_r M_r`` over present rules (dict path).
         pad_idx: pool slot to use for invalid body atom positions.
 
     Returns:
-        ``FiringsTensors`` with all five fields concatenated over rules.
+        ``FiringsTensors`` with all five fields.
     """
-    rule_indices = sorted(rg.A_in.keys())
+    # Fast path: flat fields are present on the rg.
+    if all(hasattr(rg, f) for f in (
+            "body_pool_idx", "body_atom_valid",
+            "head_pool_idx", "rule_idx", "firing_valid")):
+        device = rg.atom_table.device
+        rg_M = int(getattr(rg, "M_max", 0)) or int(rg.body_pool_idx.shape[1]) \
+            if rg.body_pool_idx.ndim == 2 else 1
+        if M_max is None or M_max <= rg_M:
+            return FiringsTensors(
+                rule_idx=rg.rule_idx,
+                body_pool_idx=rg.body_pool_idx,
+                body_atom_valid=rg.body_atom_valid,
+                head_pool_idx=rg.head_pool_idx,
+                firing_valid=rg.firing_valid,
+            )
+        # M_max wider than rg.M_max — pad the body on the right.
+        N = rg.body_pool_idx.shape[0]
+        extra = M_max - rg_M
+        if N == 0:
+            body_pool_idx = torch.full(
+                (0, M_max), pad_idx, dtype=torch.long, device=device)
+            body_atom_valid = torch.zeros(
+                0, M_max, dtype=torch.bool, device=device)
+        else:
+            pad_block = torch.full(
+                (N, extra), pad_idx, dtype=torch.long, device=device)
+            body_pool_idx = torch.cat([rg.body_pool_idx, pad_block], dim=1)
+            valid_pad = torch.zeros(
+                N, extra, dtype=torch.bool, device=device)
+            body_atom_valid = torch.cat([rg.body_atom_valid, valid_pad], dim=1)
+        return FiringsTensors(
+            rule_idx=rg.rule_idx,
+            body_pool_idx=body_pool_idx,
+            body_atom_valid=body_atom_valid,
+            head_pool_idx=rg.head_pool_idx,
+            firing_valid=rg.firing_valid,
+        )
+
+    # Fallback path: dict-style A_in / A_out. Slow but used by tests
+    # with hand-built FakeRuleGroundings.
+    A_in = rg.A_in
+    A_out = rg.A_out
+    rule_indices = sorted(A_in.keys()) if hasattr(A_in, "keys") else []
     device = rg.atom_table.device
 
     if not rule_indices:
         empty_M = M_max or 1
         return FiringsTensors(
             rule_idx=torch.zeros(0, dtype=torch.long, device=device),
-            body_pool_idx=torch.zeros(0, empty_M, dtype=torch.long, device=device),
-            body_atom_valid=torch.zeros(0, empty_M, dtype=torch.bool, device=device),
+            body_pool_idx=torch.zeros(
+                0, empty_M, dtype=torch.long, device=device),
+            body_atom_valid=torch.zeros(
+                0, empty_M, dtype=torch.bool, device=device),
             head_pool_idx=torch.zeros(0, dtype=torch.long, device=device),
             firing_valid=torch.zeros(0, dtype=torch.bool, device=device),
         )
 
     if M_max is None:
-        M_max = max(int(rg.A_in[r].shape[1]) for r in rule_indices)
+        M_max = max(int(A_in[r].shape[1]) for r in rule_indices)
 
     body_chunks = []
     valid_chunks = []
     head_chunks = []
     rule_chunks = []
     firing_valid_chunks = []
-    # When the grounder padded its outputs to fixed caps (see
-    # ``grounder.groundings.pad_rule_groundings``), ``rg.firings_valid``
-    # carries per-rule ``[G_r]`` bool masks marking real firings vs
-    # padding rows. We forward them into ``FiringsTensors.firing_valid``
-    # so the rule loop masks padded rows out of the T-norm composition.
-    # We also AND the per-firing validity into ``body_atom_valid`` so
-    # the body-side gather/where masks padded firings' body slots to the
-    # T-norm identity — belt-and-suspenders alongside the head-side
-    # ``firing_valid`` mask. Without the body-side mask, the per-firing
-    # operator still consumes ``pool[pad_idx]`` for padded firings; even
-    # though the head is later overwritten to ``-1e4``, downstream
-    # gradient paths through ``state_repr`` (esp. with learnable per-rule
-    # parameters in DCR/R2N) cleaner with the body fully masked too.
-    # When absent (the default unpadded path), every firing is valid.
     rg_firings_valid = getattr(rg, "firings_valid", None)
     for r in rule_indices:
-        A_in_r = rg.A_in[r]                          # [G_r, M_r]
-        A_out_r = rg.A_out[r]                        # [G_r, 1]
+        A_in_r = A_in[r]                              # [G_r, M_r]
+        A_out_r = A_out[r]                            # [G_r, 1]
         G_r, M_r = A_in_r.shape
         if M_r < M_max:
             pad = torch.full(
-                (G_r, M_max - M_r), pad_idx, dtype=torch.long, device=device,
+                (G_r, M_max - M_r), pad_idx,
+                dtype=torch.long, device=device,
             )
             body_padded = torch.cat([A_in_r, pad], dim=1)
-            valid = torch.cat(
-                [
-                    torch.ones(G_r, M_r, dtype=torch.bool, device=device),
-                    torch.zeros(G_r, M_max - M_r, dtype=torch.bool, device=device),
-                ],
-                dim=1,
-            )
+            valid = torch.cat([
+                torch.ones(G_r, M_r, dtype=torch.bool, device=device),
+                torch.zeros(G_r, M_max - M_r, dtype=torch.bool, device=device),
+            ], dim=1)
         else:
             body_padded = A_in_r
             valid = torch.ones(G_r, M_max, dtype=torch.bool, device=device)
         if rg_firings_valid is not None and r in rg_firings_valid:
             f_valid_r = rg_firings_valid[r]
             firing_valid_chunks.append(f_valid_r)
-            # AND the per-firing mask into body_atom_valid so padded
-            # firings' body gathers get the T-norm identity.
             valid = valid & f_valid_r.unsqueeze(-1)
         else:
             firing_valid_chunks.append(
@@ -266,9 +295,8 @@ def build_firings_from_rule_groundings(
             torch.full((G_r,), r, dtype=torch.long, device=device)
         )
 
-    rule_idx = torch.cat(rule_chunks, dim=0)
     return FiringsTensors(
-        rule_idx=rule_idx,
+        rule_idx=torch.cat(rule_chunks, dim=0),
         body_pool_idx=torch.cat(body_chunks, dim=0),
         body_atom_valid=torch.cat(valid_chunks, dim=0),
         head_pool_idx=torch.cat(head_chunks, dim=0),
