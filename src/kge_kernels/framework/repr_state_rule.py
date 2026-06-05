@@ -163,8 +163,26 @@ class RuleMLPState(nn.Module):
         nn.init.xavier_uniform_(self.l1)
         nn.init.xavier_uniform_(self.l2)
 
+    # Firing-count crossover: below this the per-rule grouped loop's fixed
+    # overhead (sort + bincount + R sequential matmul launches ≈ 6 ms floor
+    # on family dims) loses to the dense all-rules einsum, which is sub-ms
+    # at small N_f and never large enough to OOM there. Above it, grouped
+    # wins on BOTH speed (up to ~13× at N_f=100k) and memory (~27× lower
+    # peak — fixes the eval OOM). Measured crossover ≈ 7k (full) / 15k
+    # (head) on family (R=47, in=300, h=100); 16384 sits safely past both.
+    _GROUP_MIN_FIRINGS = 16384
+
     def forward(self, body_emb: Tensor, rule_idx: Tensor) -> Tensor:
         out_total = self.num_atoms_out * self.atom_emb_dim
+        N_f = body_emb.shape[0]
+        if N_f < self._GROUP_MIN_FIRINGS:
+            return self._forward_all_rules(body_emb, rule_idx, out_total)
+        return self._forward_grouped(body_emb, rule_idx, out_total)
+
+    def _forward_all_rules(self, body_emb: Tensor, rule_idx: Tensor, out_total: int) -> Tensor:
+        # Dense path: evaluate every firing through ALL R rules then gather
+        # the fired one. R× FLOPs + R× activation memory, but no sort/loop
+        # overhead — fastest at small N_f (train-step batches).
         all_h1 = F.relu(
             torch.einsum("ne,reh->nrh", body_emb, self.l1) + self.b1
         )                                                       # [N_f, R, h]
@@ -175,6 +193,48 @@ class RuleMLPState(nn.Module):
             -1, 1, out_total,
         )                                                       # [N_f, 1, out_total]
         e_flat = torch.gather(all_e, dim=-2, index=gather_idx).squeeze(-2)
+        return e_flat.reshape(-1, self.num_atoms_out, self.atom_emb_dim)
+
+    def _forward_grouped(self, body_emb: Tensor, rule_idx: Tensor, out_total: int) -> Tensor:
+        # Grouped-by-rule (MoE-style routing). Group the N_f firings by their
+        # rule index and run each rule's MLP on ONLY its own firings
+        # (firings=tokens, rules=experts): activations are [N_f, h] (no R dim
+        # → ~R× less memory) and we do N_f×1 rule of work (not N_f×R → ~R×
+        # fewer FLOPs). Numerically identical to the all-rules path up to fp
+        # tolerance — same weights/ReLU/bias, just routed. A stable sort
+        # keeps the scatter deterministic (byte-stable MRR).
+        N_f = body_emb.shape[0]
+        ridx = rule_idx.clamp(min=0)                            # [N_f]
+
+        # Stable sort firings by rule so each rule's firings are contiguous.
+        order = torch.argsort(ridx, stable=True)                # [N_f]
+        ridx_sorted = ridx[order]                               # [N_f]
+        x_sorted = body_emb[order]                              # [N_f, in_dim]
+
+        # Per-rule group sizes / contiguous offsets.
+        counts = torch.bincount(ridx_sorted, minlength=self.num_rules)  # [R]
+        offsets = torch.zeros(self.num_rules + 1, dtype=torch.long, device=body_emb.device)
+        torch.cumsum(counts, dim=0, out=offsets[1:])
+
+        out_sorted = body_emb.new_empty(N_f, out_total)         # [N_f, out_total]
+        # Host-side group bounds: a Python loop over rules is fine because R
+        # is small (tens) and only non-empty groups do work; the per-group
+        # matmul carries the bulk of the cost so it stays compute-bound at
+        # the large N_f seen in eval/val.
+        counts_cpu = counts.tolist()
+        offsets_cpu = offsets.tolist()
+        for r in range(self.num_rules):
+            n_r = counts_cpu[r]
+            if n_r == 0:
+                continue
+            s, e = offsets_cpu[r], offsets_cpu[r + 1]
+            xr = x_sorted[s:e]                                  # [n_r, in_dim]
+            h1 = F.relu(xr @ self.l1[r] + self.b1[r])           # [n_r, h]
+            out_sorted[s:e] = h1 @ self.l2[r] + self.b2[r]      # [n_r, out_total]
+
+        # Scatter back to the original firing order.
+        e_flat = body_emb.new_empty(N_f, out_total)
+        e_flat[order] = out_sorted
         return e_flat.reshape(-1, self.num_atoms_out, self.atom_emb_dim)
 
 
