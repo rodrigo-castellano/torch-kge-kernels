@@ -151,8 +151,12 @@ class KnowledgeBase:
     ground_facts_set: Set[Tuple[str, str, str]] = field(default_factory=set)
 
     # ---- integer-indexed (r, h, t) triples -----------------------------
+    # ``valid_idx`` = val-QUERY view (valid_size-sliced); ``all_valid_idx``
+    # = the full split (filter maps / ground facts / domains) — mirrors the
+    # all_valid_facts / valid_facts duality of the string views.
     train_idx: List[Tuple[int, int, int]] = field(default_factory=list)
     valid_idx: List[Tuple[int, int, int]] = field(default_factory=list)
+    all_valid_idx: List[Tuple[int, int, int]] = field(default_factory=list)
     test_idx: List[Tuple[int, int, int]] = field(default_factory=list)
     known_idx: List[Tuple[int, int, int]] = field(default_factory=list)
     ground_facts_idx_set: Set[Tuple[int, int, int]] = field(default_factory=set)
@@ -275,6 +279,7 @@ class KnowledgeBase:
         self.ground_facts_set = set()
         self.train_idx = []
         self.valid_idx = []
+        self.all_valid_idx = []
         self.test_idx = []
         self.known_idx = []
         self.ground_facts_idx_set = set()
@@ -334,16 +339,23 @@ class KnowledgeBase:
         self.predicates = sorted(rel2id.keys())
         self.predicates_set = frozenset(self.predicates)
         self.train_idx = train_idx
-        self.valid_idx = (
+        self.all_valid_idx = (
             encode_split_triples(valid_path, ent2id, rel2id, "valid")
             if os.path.isfile(valid_path) else []
         )
-        # Keep the integer view consistent with the (possibly valid_size-
-        # sliced) string view above — consumers that build eval tensors from
-        # valid_idx must see the SAME subset as valid_facts (both views are
-        # file-ordered, so a prefix slice corresponds row-for-row).
-        if valid_size is not None:
-            self.valid_idx = self.valid_idx[:valid_size]
+        # ``valid_idx`` is the VAL-QUERY view: kept consistent with the
+        # (possibly valid_size-sliced) string view below — consumers that
+        # build eval tensors from valid_idx must see the SAME subset as
+        # valid_facts (both views are file-ordered, so a prefix slice
+        # corresponds row-for-row). ``all_valid_idx`` is the FULL split:
+        # filter maps / ground-fact sets / relation domains must use it,
+        # or the un-sliced valid positives leak into eval candidate pools
+        # as unfiltered "negatives" (measured -4.6 to -5.5pp test MRR on
+        # family at val_size=1000).
+        self.valid_idx = (
+            self.all_valid_idx[:valid_size]
+            if valid_size is not None else self.all_valid_idx
+        )
         self.test_idx = (
             encode_split_triples(test_path, ent2id, rel2id, "test")
             if os.path.isfile(test_path) else []
@@ -386,12 +398,14 @@ class KnowledgeBase:
             self.test_facts + self.known_facts
         )
         self.ground_facts_idx_set = set(
-            self.train_idx + self.valid_idx + self.test_idx + self.known_idx
+            self.train_idx + self.all_valid_idx + self.test_idx + self.known_idx
         )
 
         # ── 3. Filter maps (for filtered MRR / Hits@K) ──
+        # FULL valid split: every known positive must be filtered from
+        # ranking candidates regardless of the val-query slice.
         self.head_filter, self.tail_filter = build_filter_maps(
-            self.train_idx, self.valid_idx, self.test_idx, self.known_idx,
+            self.train_idx, self.all_valid_idx, self.test_idx, self.known_idx,
         )
 
         # ── 4. Domain mappings + per-relation domain restriction ──
@@ -415,7 +429,7 @@ class KnowledgeBase:
             if self.domain2idx:
                 self.use_domain_eval = True
                 self.head_domain, self.tail_domain = build_relation_domains_typed(
-                    self.train_idx + self.valid_idx + self.test_idx,
+                    self.train_idx + self.all_valid_idx + self.test_idx,
                     self.entity2domain_idx, self.domain2idx,
                 )
 
@@ -933,7 +947,7 @@ class KnowledgeBase:
         # Per-relation domain restriction reflects the catch-all additions.
         if self.use_domain_eval and self.domain2idx:
             self.head_domain, self.tail_domain = build_relation_domains_typed(
-                self.train_idx + self.valid_idx + self.test_idx,
+                self.train_idx + self.all_valid_idx + self.test_idx,
                 self.entity2domain_idx, self.domain2idx,
             )
 

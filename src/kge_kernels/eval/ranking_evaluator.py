@@ -214,6 +214,13 @@ class RankingEvaluator:
         # Skip by default; if needed, callers can do this themselves around the call.
 
         tie_gen = torch.Generator(device=device).manual_seed(self.seed)
+        # Re-seed the candidate source's private generator (if seeded):
+        # every pass draws identical candidates, which both stabilizes the
+        # per-epoch selection signal and makes positionally-keyed caches
+        # (grounding replay) valid across passes.
+        reset = getattr(self.candidates, "reset", None)
+        if callable(reset):
+            reset()
         t0 = time.perf_counter()
 
         if N == 0:

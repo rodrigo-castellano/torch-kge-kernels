@@ -147,6 +147,7 @@ class Sampler:
         count: int,
         is_exhaustive: bool,
         device: torch.device,
+        generator: Optional[torch.Generator] = None,
     ) -> LongTensor:
         """Generate relation corruptions in internal ``(h, r, t)`` layout."""
         batch_size = pos_hrt.shape[0]
@@ -159,7 +160,8 @@ class Sampler:
             indices = indices.clamp(min=0, max=count - 1)
             return torch.gather(all_rels, 1, indices[:, :count])
         orig = pos_hrt[:, 1:2].expand(-1, count)
-        rnd = torch.randint(0, self.num_relations - 1, (batch_size, count), device=device)
+        rnd = torch.randint(0, self.num_relations - 1, (batch_size, count), device=device,
+                            generator=generator)
         return rnd + (rnd >= orig)
 
     def _corrupt_entity_global(
@@ -169,6 +171,7 @@ class Sampler:
         count: int,
         is_exhaustive: bool,
         device: torch.device,
+        generator: Optional[torch.Generator] = None,
     ) -> LongTensor:
         """Generate entity corruptions from the global entity pool."""
         batch_size = pos_hrt.shape[0]
@@ -185,7 +188,8 @@ class Sampler:
             sorted_ents = torch.gather(all_ents, 1, perm)
             return sorted_ents[:, :count]
 
-        rnd = torch.randint(lo, lo + pool_size - 1, (batch_size, count), device=device)
+        rnd = torch.randint(lo, lo + pool_size - 1, (batch_size, count), device=device,
+                            generator=generator)
         return rnd + ((rnd >= orig_ent) & (orig_ent >= lo)).long()
 
     def _corrupt_entity_domain(
@@ -196,6 +200,7 @@ class Sampler:
         is_exhaustive: bool,
         orig_slice: LongTensor,
         device: torch.device,
+        generator: Optional[torch.Generator] = None,
     ) -> LongTensor:
         """Generate entity corruptions restricted to each example's domain."""
         orig_ent = pos_hrt[:, col]
@@ -226,7 +231,9 @@ class Sampler:
         has_alternatives = lengths > 1
 
         pool_len_m1 = (lengths - 1).float().clamp(min=0)
-        rnd = torch.floor(torch.rand(orig_flat.shape, device=device) * pool_len_m1).long()
+        rnd = torch.floor(
+            torch.rand(orig_flat.shape, device=device, generator=generator) * pool_len_m1
+        ).long()
         shifted_idx = rnd + (rnd >= positions)
 
         sampled_ents = self.domain_padded[d_flat, shifted_idx].long()
@@ -327,6 +334,7 @@ class Sampler:
         filter: bool = True,
         unique: bool = True,
         return_mask: bool = False,
+        generator: Optional[torch.Generator] = None,
     ) -> Union[LongTensor, Tuple[LongTensor, torch.BoolTensor]]:
         """Generate corruptions, optionally with an explicit validity mask.
 
@@ -378,12 +386,15 @@ class Sampler:
             if count == 0:
                 continue
             if col == 1:
-                result = self._corrupt_relation_col(pos_hrt, count, is_exhaustive, device)
+                result = self._corrupt_relation_col(pos_hrt, count, is_exhaustive, device,
+                                                    generator=generator)
             elif not self._has_domain_info():
-                result = self._corrupt_entity_global(pos_hrt, col, count, is_exhaustive, device)
+                result = self._corrupt_entity_global(pos_hrt, col, count, is_exhaustive, device,
+                                                     generator=generator)
             else:
                 orig_slice = neg[:, start : start + count, col]
-                result = self._corrupt_entity_domain(pos_hrt, col, count, is_exhaustive, orig_slice, device)
+                result = self._corrupt_entity_domain(pos_hrt, col, count, is_exhaustive,
+                                                     orig_slice, device, generator=generator)
             neg[:, start : start + count, col] = result
             start += count
 
@@ -505,6 +516,7 @@ class BernoulliSampler(Sampler):
         filter: bool = True,
         unique: bool = True,
         return_mask: bool = False,
+        generator: Optional[torch.Generator] = None,
     ) -> Union[LongTensor, Tuple[LongTensor, torch.BoolTensor]]:
         """Corrupt with a per-triple head/tail coin flip (bernoulli) by default.
 
@@ -516,18 +528,21 @@ class BernoulliSampler(Sampler):
             return super().corrupt(
                 positives, num_negatives=num_negatives, mode=mode,
                 device=device, filter=filter, unique=unique, return_mask=return_mask,
+                generator=generator,
             )
         head_neg, head_valid = super().corrupt(
             positives, num_negatives=num_negatives, mode="head",
             device=device, filter=filter, unique=unique, return_mask=True,
+            generator=generator,
         )
         tail_neg, tail_valid = super().corrupt(
             positives, num_negatives=num_negatives, mode="tail",
             device=device, filter=filter, unique=unique, return_mask=True,
+            generator=generator,
         )
         rels = positives[:, 0]
         bern = self._bern_probs.to(device=rels.device)
-        corrupt_head = torch.bernoulli(bern[rels]).bool()
+        corrupt_head = torch.bernoulli(bern[rels], generator=generator).bool()
         ch = corrupt_head[:, None, None]
         neg = torch.where(ch, head_neg, tail_neg)
         valid = torch.where(corrupt_head[:, None], head_valid, tail_valid)

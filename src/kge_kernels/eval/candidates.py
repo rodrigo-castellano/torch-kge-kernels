@@ -79,6 +79,7 @@ class SamplerCandidates:
         head_domain: Optional[Dict[int, set]] = None,
         tail_domain: Optional[Dict[int, set]] = None,
         unique: bool = False,
+        seed: Optional[int] = None,
     ) -> None:
         """``unique``: forward to ``sampler.corrupt(unique=...)``. The
         sampler's pairwise-dedup is ``O(B * k^2)`` GPU memory; for
@@ -93,6 +94,18 @@ class SamplerCandidates:
         self.num_entities = sampler.num_entities
         self.k = k
         self._unique = unique
+        # ``seed``: draw sampled-k candidates from a PRIVATE generator that
+        # ``reset()`` re-seeds at the start of every evaluation pass — every
+        # pass then ranks byte-identical candidates. Without it, sampled-k
+        # draws consume the global RNG, so per-epoch val passes redraw
+        # candidates while positionally-keyed caches (grounding replay)
+        # assume pass-1's — a stale-selection bug. ``None`` keeps the old
+        # global-RNG behavior. Exhaustive (k=None) is deterministic anyway.
+        self._seed = seed
+        self._gen = (
+            torch.Generator(device=sampler.device).manual_seed(seed)
+            if seed is not None else None
+        )
 
         has_domain = getattr(sampler, "_has_domain_info", lambda: False)()
         if k is None:
@@ -140,6 +153,15 @@ class SamplerCandidates:
             mask[int(r), ent_t] = True
         return mask
 
+    def reset(self) -> None:
+        """Re-seed the private candidate generator (start of an eval pass).
+
+        Called by ``RankingEvaluator.evaluate`` so every pass draws the
+        same candidate stream. No-op when constructed without ``seed``.
+        """
+        if self._gen is not None:
+            self._gen.manual_seed(self._seed)
+
     def candidates(
         self,
         queries: Tensor,   # [B, 3] int64, (r, h, t)
@@ -154,6 +176,7 @@ class SamplerCandidates:
             filter=True,
             unique=self._unique,
             return_mask=True,
+            generator=self._gen,
         )
         # neg: [B, K, 3] in (r, h, t) format; extract the column that was
         # actually corrupted — that's our candidate entity for each slot.
