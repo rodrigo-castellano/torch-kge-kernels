@@ -6,7 +6,7 @@ live inside the model — dataset wiring stays in the consumer repos.
 """
 from __future__ import annotations
 
-from .base import KGEModel
+from .base import KGEModel, det_embedding, det_gather_rows
 from .complex import ComplEx
 from .conve import ConvE
 from .distmult import DistMult
@@ -28,6 +28,8 @@ __all__ = [
     "TuckER",
     "build_model",
     "build_training_model",
+    "det_embedding",
+    "det_gather_rows",
     "kge_default_scorer",
     "recommended_eval_batch_size",
 ]

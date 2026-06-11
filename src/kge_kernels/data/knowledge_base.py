@@ -338,6 +338,12 @@ class KnowledgeBase:
             encode_split_triples(valid_path, ent2id, rel2id, "valid")
             if os.path.isfile(valid_path) else []
         )
+        # Keep the integer view consistent with the (possibly valid_size-
+        # sliced) string view above — consumers that build eval tensors from
+        # valid_idx must see the SAME subset as valid_facts (both views are
+        # file-ordered, so a prefix slice corresponds row-for-row).
+        if valid_size is not None:
+            self.valid_idx = self.valid_idx[:valid_size]
         self.test_idx = (
             encode_split_triples(test_path, ent2id, rel2id, "test")
             if os.path.isfile(test_path) else []

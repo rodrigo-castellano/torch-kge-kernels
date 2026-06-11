@@ -31,6 +31,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from ..models.base import det_gather_rows
+
 
 class MinRuleState(nn.Module):
     """SBR per-firing min-over-body operator.
@@ -90,8 +92,8 @@ class FilterSignRuleState(nn.Module):
         # body_emb: [N_f, M] body atom scores
         # rule_idx: [N_f]    per-firing rule
         rule_idx_clamped = rule_idx.clamp(min=0)
-        phi = torch.sigmoid(self.filter_logits)[rule_idx_clamped]      # [N_f, M]
-        sigma = torch.tanh(self.sign_logits)[rule_idx_clamped]         # [N_f, M], in [-1, 1]
+        phi = det_gather_rows(torch.sigmoid(self.filter_logits), rule_idx_clamped)   # [N_f, M]
+        sigma = det_gather_rows(torch.tanh(self.sign_logits), rule_idx_clamped)      # [N_f, M], in [-1, 1]
         # Polarity gate: for sigma=+1 use s, for sigma=-1 use 1-s; linear
         # interpolation keeps the operator differentiable through sign.
         # gate = (1 + σ)/2 * s + (1 - σ)/2 * (1 - s)

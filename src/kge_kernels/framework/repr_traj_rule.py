@@ -36,6 +36,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from ..models.base import det_gather_rows
 from .protocols import RuleStateRepr
 from .types import FiringsTensors
 
@@ -108,7 +109,7 @@ class RuleMLPPoolLoop(nn.Module):
 
         for _ in range(self.K):
             # 1. Gather body atom embeddings; mask invalid body slots to 0.
-            body_emb = pool[firings.body_pool_idx]                      # [N_f, M, E]
+            body_emb = det_gather_rows(pool, firings.body_pool_idx)     # [N_f, M, E]
             body_emb = body_emb * firings.body_atom_valid.unsqueeze(-1)
             body_flat = body_emb.reshape(N_f, M * E_in)
             # 2. Apply per-firing rule MLP → [N_f, K_out, E]
@@ -207,7 +208,7 @@ class _ScalarPoolLoop(nn.Module):
         for _ in range(self.K):
             # 1. Gather body atom scores; mask invalid body slots to +1
             #    (T-norm-min identity).
-            body_scores = pool[firings.body_pool_idx]                       # [N_f, M]
+            body_scores = det_gather_rows(pool, firings.body_pool_idx)      # [N_f, M]
             body_scores = torch.where(
                 firings.body_atom_valid,
                 body_scores,

@@ -132,6 +132,8 @@ from .models import (
     TuckER,
     build_model,
     build_training_model,
+    det_embedding,
+    det_gather_rows,
     kge_default_scorer,
     recommended_eval_batch_size,
 )
@@ -240,6 +242,8 @@ __all__ = [
     "TuckER",
     "build_model",
     "build_training_model",
+    "det_embedding",
+    "det_gather_rows",
     "kge_default_scorer",
     "recommended_eval_batch_size",
 ]

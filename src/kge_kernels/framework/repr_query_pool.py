@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from ..models.base import det_gather_rows
+
 
 class LookupAtPool(nn.Module):
     """Score-pool gather. Used by SBR/DCR (scalar pool ``[N_pool]``).
@@ -57,7 +59,7 @@ class LookupAtPool(nn.Module):
     ) -> Tensor:
         if pool.dim() == 2 and pool.shape[-1] == 1:
             pool = pool.squeeze(-1)
-        scores = pool[query_pool_idx]                          # [B]
+        scores = det_gather_rows(pool, query_pool_idx)         # [B]
         if self.unwritten_score is None:
             return scores
         is_written = ever_written[query_pool_idx]              # [B] bool
@@ -99,7 +101,7 @@ class OutputLayerAtPool(nn.Module):
         query_pool_idx: Tensor,          # [B]
         ever_written: Tensor,            # [N_pool] bool
     ) -> Tensor:
-        emb = pool[query_pool_idx]                              # [B, E]
+        emb = det_gather_rows(pool, query_pool_idx)             # [B, E]
         if self.zero_unwritten:
             is_written = ever_written[query_pool_idx]           # [B] bool
             emb = torch.where(
