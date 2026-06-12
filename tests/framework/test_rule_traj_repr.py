@@ -267,6 +267,7 @@ def _run_emb_pool(
     mlp: RuleMLPState,
     prediction_type: str,
     M_max: int,
+    aggregation: str = "max",
 ) -> Tensor:
     """Helper: build embedding pool + firings, run K iterations, return query embedding."""
     pool = torch.zeros(pool_size, embed_dim, dtype=torch.float32)
@@ -282,7 +283,8 @@ def _run_emb_pool(
     )
     firings = build_firings_from_rule_groundings(rg, M_max=M_max, pad_idx=0)
 
-    loop = RuleMLPPoolLoop(K=K, prediction_type=prediction_type)
+    loop = RuleMLPPoolLoop(
+        K=K, prediction_type=prediction_type, aggregation=aggregation)
     new_pool, ever_written = loop(pool, firings, mlp)
     return new_pool[query_idx]
 
@@ -469,3 +471,90 @@ class TestBuildFirings:
         firings = build_firings_from_rule_groundings(rg)   # M_max not passed
         # Inferred M_max = 3 (from rule 1).
         assert firings.body_pool_idx.shape == (2, 3)
+
+
+class TestR2NAggregation:
+    """The `aggregation` modes of RuleMLPPoolLoop (docs/MONOTONICITY.md in
+    torch-ns: per-dim amax makes the score monotone in the firing set;
+    `gated` selects ONE whole vector by body score and breaks monotonicity)."""
+
+    @staticmethod
+    def _two_rule_mlp(bias_rule1: float = 0.0) -> RuleMLPState:
+        """2 rules, M=2, E=1; MLP_r([a, b]) = a + b (+ per-rule output bias)."""
+        mlp = RuleMLPState(
+            num_rules=2, in_dim=2, atom_emb_dim=1,
+            num_atoms_out=1, hidden_dim=1,
+        )
+        with torch.no_grad():
+            mlp.l1.copy_(torch.tensor([[[1.0], [1.0]]] * 2))
+            mlp.b1.zero_()
+            mlp.l2.copy_(torch.tensor([[[1.0]]] * 2))
+            mlp.b2.zero_()
+            mlp.b2[1] += bias_rule1
+        return mlp
+
+    # pool slots: 0=pad, 1/2 = strong bodies (sigma(sum)≈0.99),
+    # 4/5 = weak bodies (sigma(sum)≈0.007), 3 = head.
+    _COMMON = dict(
+        pool_size=6,
+        embed_dim=1,
+        init_embs={1: [5.0], 2: [5.0], 4: [-5.0], 5: [-5.0], 3: [0.0]},
+        query_idx=3,
+        K=1,
+        prediction_type="head",
+        M_max=2,
+    )
+
+    def test_gated_equals_max_single_firing(self):
+        """One firing per atom: gated and max agree exactly."""
+        kw = dict(self._COMMON,
+                  A_in={0: torch.tensor([[1, 2]])},
+                  A_out={0: torch.tensor([[3]])})
+        out_max = _run_emb_pool(mlp=self._two_rule_mlp(), aggregation="max", **kw)
+        out_gated = _run_emb_pool(mlp=self._two_rule_mlp(), aggregation="gated", **kw)
+        assert torch.equal(out_max, out_gated)
+        assert abs(float(out_max.item()) - 10.0) < 1e-5
+
+    def test_gated_factual_bodies_beat_loud_noise(self):
+        """Firing A: strong bodies (pred relu(10)=10). Firing B: weak bodies
+        but a +100 output bias (pred relu(-10)+100 = 100). max picks the loud
+        noise (100); gated picks the factual-bodied firing (10)."""
+        kw = dict(self._COMMON,
+                  A_in={0: torch.tensor([[1, 2]]), 1: torch.tensor([[4, 5]])},
+                  A_out={0: torch.tensor([[3]]), 1: torch.tensor([[3]])})
+        out_max = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="max", **kw)
+        out_gated = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="gated", **kw)
+        assert abs(float(out_max.item()) - 100.0) < 1e-4   # noise wins the max
+        assert abs(float(out_gated.item()) - 10.0) < 1e-4  # gate keeps the chain
+
+    def test_gated_not_monotone_in_firing_count(self):
+        """Adding a weak-bodied firing leaves the gated output UNCHANGED
+        (score not monotone in the firing set), while max only grows."""
+        solo = dict(self._COMMON,
+                    A_in={0: torch.tensor([[1, 2]])},
+                    A_out={0: torch.tensor([[3]])})
+        both = dict(self._COMMON,
+                    A_in={0: torch.tensor([[1, 2]]), 1: torch.tensor([[4, 5]])},
+                    A_out={0: torch.tensor([[3]]), 1: torch.tensor([[3]])})
+        g_solo = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="gated", **solo)
+        g_both = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="gated", **both)
+        m_solo = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="max", **solo)
+        m_both = _run_emb_pool(
+            mlp=self._two_rule_mlp(bias_rule1=100.0), aggregation="max", **both)
+        assert torch.equal(g_solo, g_both)                 # gated: invariant
+        assert float(m_both.item()) > float(m_solo.item())  # max: inflates
+
+    def test_mean_sum_modes_run(self):
+        """mean/sum (the other keras options) produce the expected algebra."""
+        kw = dict(self._COMMON,
+                  A_in={0: torch.tensor([[1, 2]]), 1: torch.tensor([[4, 5]])},
+                  A_out={0: torch.tensor([[3]]), 1: torch.tensor([[3]])})
+        out_sum = _run_emb_pool(mlp=self._two_rule_mlp(), aggregation="sum", **kw)
+        out_mean = _run_emb_pool(mlp=self._two_rule_mlp(), aggregation="mean", **kw)
+        assert abs(float(out_sum.item()) - 10.0) < 1e-4    # 10 + relu(-10)=0
+        assert abs(float(out_mean.item()) - 5.0) < 1e-4    # (10 + 0) / 2

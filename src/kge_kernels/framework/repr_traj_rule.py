@@ -69,6 +69,7 @@ class RuleMLPPoolLoop(nn.Module):
         K: int,
         *,
         prediction_type: Literal["head", "full"] = "head",
+        aggregation: Literal["max", "mean", "sum", "gated"] = "max",
     ) -> None:
         super().__init__()
         if K < 1:
@@ -77,8 +78,23 @@ class RuleMLPPoolLoop(nn.Module):
             raise ValueError(
                 f"prediction_type must be 'head' or 'full', got {prediction_type!r}"
             )
+        if aggregation not in ("max", "mean", "sum", "gated"):
+            raise ValueError(
+                f"aggregation must be max|mean|sum|gated, got {aggregation!r}")
         self.K = K
         self.prediction_type = prediction_type
+        # Cross-firing aggregation at the same atom. "max" (default) is the
+        # keras-faithful per-dimension envelope (tensor_scatter_nd_max):
+        # score is then MONOTONE in the firing set — any added firing can
+        # only raise an atom's score, which collapses under low-precision
+        # deep evidence (torch-ns docs/MONOTONICITY.md). "mean"/"sum" are
+        # the other keras R2NReasoningLayer options. "gated" selects ONE
+        # whole prediction vector per atom — the firing whose bodies score
+        # best under the score-aligned pool (t-norm min of sigmoid(sum(dims)),
+        # i.e. exactly the guided-beam body score): a weak/hypothesized-body
+        # firing can no longer displace a factual-bodied one, and the score
+        # is NOT monotone in firing count.
+        self.aggregation = aggregation
 
     def forward(
         self,
@@ -109,35 +125,96 @@ class RuleMLPPoolLoop(nn.Module):
 
         for _ in range(self.K):
             # 1. Gather body atom embeddings; mask invalid body slots to 0.
-            body_emb = det_gather_rows(pool, firings.body_pool_idx)     # [N_f, M, E]
-            body_emb = body_emb * firings.body_atom_valid.unsqueeze(-1)
+            body_emb_raw = det_gather_rows(pool, firings.body_pool_idx)  # [N_f, M, E]
+            body_emb = body_emb_raw * firings.body_atom_valid.unsqueeze(-1)
             body_flat = body_emb.reshape(N_f, M * E_in)
             # 2. Apply per-firing rule MLP → [N_f, K_out, E]
             preds = state_repr_fn(body_flat, firings.rule_idx)
-            # 3. Mask invalid scatter slots (drive to -1e4 so scatter_reduce(amax)
-            #    skips them in favor of any real prediction at the same atom).
-            preds = torch.where(
-                valid_for_scatter.unsqueeze(-1),
-                preds,
-                torch.full_like(preds, very_negative),
-            )
             # 4. Flatten (firing × scatter_slot) for scatter_reduce.
-            preds_flat = preds.reshape(N_f * N_scatter, E_in)
             target_flat = scatter_target.reshape(N_f * N_scatter)
             valid_flat = valid_for_scatter.reshape(N_f * N_scatter)
-            # 5. scatter_max into a fresh base. Written slots get the pure
-            #    max over their MLP predictions (no KGE-init floor); unwritten
-            #    slots keep their previous value (KGE on iter 1, prior iter's
-            #    value on later iters).
-            scattered = torch.full_like(pool, very_negative)
             target_expanded = target_flat.unsqueeze(-1).expand(-1, E_in)
-            scattered = scattered.scatter_reduce(
-                dim=0,
-                index=target_expanded,
-                src=preds_flat,
-                reduce="amax",
-                include_self=False,
-            )
+
+            if self.aggregation == "max":
+                # 3. Mask invalid scatter slots (drive to -1e4 so
+                #    scatter_reduce(amax) skips them in favor of any real
+                #    prediction at the same atom).
+                preds_m = torch.where(
+                    valid_for_scatter.unsqueeze(-1),
+                    preds,
+                    torch.full_like(preds, very_negative),
+                )
+                preds_flat = preds_m.reshape(N_f * N_scatter, E_in)
+                # 5. scatter_max into a fresh base. Written slots get the
+                #    pure max over their MLP predictions (no KGE-init floor);
+                #    unwritten slots keep their previous value (KGE on iter 1,
+                #    prior iter's value on later iters).
+                scattered = torch.full_like(pool, very_negative)
+                scattered = scattered.scatter_reduce(
+                    dim=0,
+                    index=target_expanded,
+                    src=preds_flat,
+                    reduce="amax",
+                    include_self=False,
+                )
+            elif self.aggregation in ("mean", "sum"):
+                preds_z = preds * valid_for_scatter.unsqueeze(-1)   # invalid → 0
+                preds_flat = preds_z.reshape(N_f * N_scatter, E_in)
+                scattered = torch.zeros_like(pool).scatter_reduce(
+                    dim=0, index=target_expanded, src=preds_flat,
+                    reduce="sum", include_self=True,
+                )
+                if self.aggregation == "mean":
+                    cnt = torch.zeros(
+                        N_pool, dtype=pool.dtype, device=pool.device)
+                    cnt.scatter_reduce_(
+                        dim=0, index=target_flat,
+                        src=valid_flat.to(pool.dtype),
+                        reduce="sum", include_self=True)
+                    scattered = scattered / cnt.clamp_min(1.0).unsqueeze(-1)
+            else:  # "gated": whole-vector winner-take-all by body score
+                # Per-firing gate = t-norm (min) over VALID bodies of the
+                # score-aligned scalar sigmoid(sum(dims)); body-less firings
+                # gate at 1.0 (fact-level certainty).
+                body_scalar = torch.sigmoid(body_emb_raw.sum(-1))   # [N_f, M]
+                body_scalar = body_scalar.masked_fill(
+                    ~firings.body_atom_valid, 1.0)
+                gate = body_scalar.amin(dim=-1)                      # [N_f]
+                gate_slots = gate.unsqueeze(-1).expand(-1, N_scatter)
+                gate_flat = torch.where(
+                    valid_for_scatter, gate_slots,
+                    torch.full_like(gate_slots, -1.0),
+                ).reshape(N_f * N_scatter)
+                # Pass 1: best gate per atom slot.
+                best = torch.full(
+                    (N_pool,), -1.0, dtype=pool.dtype, device=pool.device)
+                best.scatter_reduce_(
+                    dim=0, index=target_flat, src=gate_flat,
+                    reduce="amax", include_self=True)
+                # Pass 2: deterministic tie-break — lowest flat index among
+                # the gate winners (scatter amin of index over winners).
+                is_winner = valid_flat & (gate_flat >= best[target_flat])
+                idx = torch.arange(
+                    N_f * N_scatter, device=pool.device)
+                idx_masked = torch.where(
+                    is_winner, idx, torch.full_like(idx, N_f * N_scatter))
+                win_idx = torch.full(
+                    (N_pool,), N_f * N_scatter, dtype=idx.dtype,
+                    device=pool.device)
+                win_idx.scatter_reduce_(
+                    dim=0, index=target_flat, src=idx_masked,
+                    reduce="amin", include_self=True)
+                final_win = is_winner & (idx == win_idx[target_flat])
+                # Scatter ONLY the winning firing's full vector.
+                preds_flat = preds.reshape(N_f * N_scatter, E_in)
+                preds_w = torch.where(
+                    final_win.unsqueeze(-1), preds_flat,
+                    torch.full_like(preds_flat, very_negative))
+                scattered = torch.full_like(pool, very_negative)
+                scattered = scattered.scatter_reduce(
+                    dim=0, index=target_expanded, src=preds_w,
+                    reduce="amax", include_self=False,
+                )
             iter_written_int = torch.zeros(N_pool, dtype=torch.long, device=pool.device)
             iter_written_int.scatter_reduce_(
                 dim=0,
