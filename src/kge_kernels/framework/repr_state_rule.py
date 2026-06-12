@@ -57,6 +57,35 @@ class MinRuleState(nn.Module):
         return head_score.unsqueeze(-1)                  # [N_f, 1]
 
 
+class WeightedMinRuleState(nn.Module):
+    """SBR min-over-body operator scaled by a LEARNED per-rule confidence.
+
+    ``head(g) = sigmoid(w_{rule(g)}) * min(body_scores_g)`` — the rule-path
+    (pool-iter) analogue of :class:`repr_state.RuleWeightedStateRepr`'s
+    sigmoid mode: each rule learns its own precision, so chains by noisy
+    rules are discounted while chains by precise rules approach their body
+    t-norm. Combined with fact-pinned pools (all-fact bodies → t-norm 1.0)
+    a proof by rule ``r`` scores exactly ``sigmoid(w_r)`` — calibrated
+    provability, which lets deeper grounding convert new proofs into
+    ranking gains instead of saturating rule noise to certainty.
+
+    ``w`` initializes to ``+2`` (sigmoid ≈ 0.88): rules start trusted;
+    training demotes the ones whose firings back corrupted negatives.
+    """
+
+    def __init__(self, num_rules: int) -> None:
+        super().__init__()
+        if num_rules < 1:
+            raise ValueError(f"num_rules must be >= 1, got {num_rules}")
+        self.rule_weights = nn.Parameter(torch.full((num_rules,), 2.0))
+
+    def forward(self, body_emb: Tensor, rule_idx: Tensor) -> Tensor:
+        # body_emb: [N_f, M] — body atom scores after invalid slots masked to +1
+        head_score = body_emb.min(dim=-1).values                    # [N_f]
+        conf = torch.sigmoid(self.rule_weights)[rule_idx]           # [N_f]
+        return (conf * head_score).unsqueeze(-1)                    # [N_f, 1]
+
+
 class FilterSignRuleState(nn.Module):
     """DCR Gödel filter+sign aggregation.
 

@@ -58,7 +58,8 @@ from .repr_state import (
     SumStateRepr,
     TNormStateRepr,
 )
-from .repr_state_rule import FilterSignRuleState, MinRuleState, RuleMLPState
+from .repr_state_rule import (FilterSignRuleState, MinRuleState, RuleMLPState,
+                              WeightedMinRuleState)
 from .repr_traj import (
     BestCumulativeTrajRepr,
     BestEverStateScoreTrajRepr,
@@ -132,6 +133,7 @@ __all__ = [
     # State reprs (rule path — per firing)
     "FilterSignRuleState",
     "MinRuleState",
+    "WeightedMinRuleState",
     "RuleMLPState",
     # Traj reprs (proof path — sequential init/step)
     "BestCumulativeTrajRepr",

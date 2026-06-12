@@ -558,3 +558,30 @@ class TestR2NAggregation:
         out_mean = _run_emb_pool(mlp=self._two_rule_mlp(), aggregation="mean", **kw)
         assert abs(float(out_sum.item()) - 10.0) < 1e-4    # 10 + relu(-10)=0
         assert abs(float(out_mean.item()) - 5.0) < 1e-4    # (10 + 0) / 2
+
+
+class TestWeightedMinRuleState:
+    def test_weighted_min_scales_by_rule_confidence(self):
+        from kge_kernels.framework import WeightedMinRuleState
+        m = WeightedMinRuleState(2)
+        with torch.no_grad():
+            m.rule_weights.copy_(torch.tensor([10.0, -10.0]))  # sigma ~1 / ~0
+        body = torch.tensor([[0.9, 0.7], [0.9, 0.7]])
+        out = m(body, torch.tensor([0, 1])).squeeze(-1)
+        assert abs(float(out[0]) - 0.7) < 1e-3      # trusted rule: ~t-norm
+        assert float(out[1]) < 1e-3                 # distrusted rule: ~0
+
+    def test_weighted_min_in_scalar_pool_loop(self):
+        """Plugs into MinPoolLoop: max over (conf * t-norm) chains."""
+        from kge_kernels.framework import WeightedMinRuleState
+        m = WeightedMinRuleState(2)
+        with torch.no_grad():
+            m.rule_weights.copy_(torch.tensor([10.0, -10.0]))
+        score = _run_scalar_pool(
+            pool_size=6,
+            init_scores={1: 0.9, 2: 0.7, 3: 0.6, 4: 0.95, 5: 0.0},
+            A_in={0: torch.tensor([[1, 2]]), 1: torch.tensor([[3, 4]])},
+            A_out={0: torch.tensor([[5]]), 1: torch.tensor([[5]])},
+            query_idx=5, K=1, state_repr_fn=m, loop_cls=MinPoolLoop, M_max=2)
+        # rule0 (trusted): ~0.7; rule1 (distrusted): ~0 -> max ~= 0.7
+        assert abs(score - 0.7) < 1e-2
