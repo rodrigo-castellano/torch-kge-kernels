@@ -47,7 +47,6 @@ from ..framework.protocols import (
 )
 from ..framework.repr import Repr
 from ..framework.types import (
-    FiringsTensors,
     ProofEvidence,
     ProofState,
     RuleGroundings,

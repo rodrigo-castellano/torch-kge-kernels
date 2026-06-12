@@ -13,8 +13,7 @@ from kge_kernels.framework import (
     TNormTrajRepr,
 )
 from kge_kernels.models import TransE
-from kge_kernels.search import ProofScorer, SearchSpec, Searcher
-
+from kge_kernels.search import ProofScorer, Searcher, SearchSpec
 from tests.framework.conftest import make_structured_evidence
 
 

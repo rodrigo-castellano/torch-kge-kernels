@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 import torch
@@ -13,7 +12,6 @@ import torch
 from kge_kernels.inference import (
     KGEInference,
     _Atom,
-    _PyTorchKGEInference,
     find_latest_run,
     normalize_backend,
 )

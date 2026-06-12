@@ -19,7 +19,6 @@ import pytest
 import torch
 
 from kge_kernels.framework import (
-    BestCumulativeTrajRepr,
     CumulativeLogTrajRepr,
     MinStepTrajRepr,
     PolicyProductTrajRepr,

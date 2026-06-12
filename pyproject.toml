@@ -55,6 +55,7 @@ kge_kernels = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 filterwarnings = [
     # PyTorch's own torch/utils/mkldnn.py still uses the deprecated
     # ``@torch.jit.script_method`` decorator; the warning fires every

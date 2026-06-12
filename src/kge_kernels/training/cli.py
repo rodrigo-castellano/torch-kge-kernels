@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from typing import Mapping
 
+from ..runs import RunContext, run_cli
 from .config import TrainConfig
 from .experiment import pipeline
-from ..runs import RunContext, run_cli
 
 
 def run_experiment(ctx: RunContext, cfg: TrainConfig) -> Mapping[str, dict]:

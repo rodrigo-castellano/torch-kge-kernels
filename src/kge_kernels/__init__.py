@@ -96,17 +96,6 @@ from .framework import (
     TrajRepr,
 )
 
-# Experiment run-bundle machinery
-from .runs import (
-    LoggingConfig,
-    ModelConfig,
-    OutputConfig,
-    RegistryConfig,
-    ReportConfig,
-    RunContext,
-    run_cli,
-)
-
 # Loss functions
 from .losses import (
     BinaryCrossEntropyRagged,
@@ -136,6 +125,17 @@ from .models import (
     det_gather_rows,
     kge_default_scorer,
     recommended_eval_batch_size,
+)
+
+# Experiment run-bundle machinery
+from .runs import (
+    LoggingConfig,
+    ModelConfig,
+    OutputConfig,
+    RegistryConfig,
+    ReportConfig,
+    RunContext,
+    run_cli,
 )
 
 # Scoring pipeline (sampler, partial, types). KGE scoring itself is the

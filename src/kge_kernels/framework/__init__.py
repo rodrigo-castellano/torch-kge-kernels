@@ -58,8 +58,7 @@ from .repr_state import (
     SumStateRepr,
     TNormStateRepr,
 )
-from .repr_state_rule import (FilterSignRuleState, MinRuleState, RuleMLPState,
-                              WeightedMinRuleState)
+from .repr_state_rule import FilterSignRuleState, MinRuleState, RuleMLPState, WeightedMinRuleState
 from .repr_traj import (
     BestCumulativeTrajRepr,
     BestEverStateScoreTrajRepr,

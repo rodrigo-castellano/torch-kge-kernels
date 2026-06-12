@@ -17,6 +17,17 @@ training path.
 """
 from __future__ import annotations
 
+from .builder import (
+    Callbacks,
+    DataBundle,
+    OptimBundle,
+    build_callbacks,
+    build_data,
+    build_evaluator,
+    build_model,
+    build_optimizer,
+    run_evaluation,
+)
 from .checkpoints import (
     build_config_payload,
     config_from_payload,
@@ -31,17 +42,6 @@ from .checkpoints import (
     save_state_dict,
     unwrap_model,
     write_json_payload,
-)
-from .builder import (
-    Callbacks,
-    DataBundle,
-    OptimBundle,
-    build_callbacks,
-    build_data,
-    build_evaluator,
-    build_model,
-    build_optimizer,
-    run_evaluation,
 )
 from .config import KGETrainConfig, TrainArtifacts, TrainConfig
 from .epoch import (

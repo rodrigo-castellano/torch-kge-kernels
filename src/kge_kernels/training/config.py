@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-from kge_kernels.runs import LoggingConfig, ModelConfig, OutputConfig
+from kge_kernels.runs import LoggingConfig
 
 
 def _default_data_root() -> str:

@@ -34,9 +34,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from os.path import join
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import torch
+
+if TYPE_CHECKING:
+    from ..scoring.sampler import Sampler
 
 from .loaders import (
     TripleExample,

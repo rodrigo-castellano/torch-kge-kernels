@@ -24,7 +24,6 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-
 # ============================================================================
 # Pure-tensor lookup helper (used by PartialScorer.score_atoms)
 # ============================================================================

@@ -50,9 +50,9 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
 # In-process resolution of torch-ns (matches run_3way_sweep.py).
 _spec = importlib.util.find_spec("torch_ns")
@@ -600,14 +600,21 @@ def _train_one(cfg) -> dict:
             }
         # Dual-eval path: inline pipeline() so the trained model stays
         # in scope for a 2nd test eval with k=test_negatives_exhaustive.
-        from torch_ns.experiment import normalize_kge_only_args, set_seed
         from torch_ns.builder import (
-            build_data, build_model, build_optimizer, build_callbacks,
+            build_callbacks,
+            build_data,
+            build_model,
+            build_optimizer,
         )
         from torch_ns.evaluator import (
-            build_evaluator, run_evaluation as _run_evaluation,
+            build_evaluator,
         )
+        from torch_ns.evaluator import (
+            run_evaluation as _run_evaluation,
+        )
+        from torch_ns.experiment import normalize_kge_only_args, set_seed
         from torch_ns.train import train as _train_loop
+
         from kge_kernels.eval import RankingEvaluator, SamplerCandidates
 
         cfg = normalize_kge_only_args(cfg)
@@ -697,7 +704,9 @@ def _torch_seed_subprocess(
     concurrently. Each subprocess gets its own CUDA context. The
     spawned process re-invokes this script with ``--torch-cell``.
     """
-    import subprocess, json, tempfile
+    import json
+    import subprocess
+    import tempfile
     out = Path(tempfile.NamedTemporaryFile(
         mode='w', suffix='.json', delete=False).name)
     cell_arg = f"{dataset}:{reasoner}:{grounder or ''}:{seed}"
@@ -726,8 +735,8 @@ def _torch_seed_subprocess(
 def _profile_one(cfg) -> dict:
     """ms/batch + peak memory via ns's existing profile_train + profile_eval."""
     sys.path.insert(0, os.path.join(NS_REPO, "tests"))
-    from profiling.profile_train import run as profile_train_run
     from profiling.profile_eval import run as profile_eval_run
+    from profiling.profile_train import run as profile_train_run
 
     train_metrics = profile_train_run(cfg)["metrics"]
     eval_metrics = profile_eval_run(cfg)["metrics"]
@@ -1250,7 +1259,8 @@ def _open_run_bundle(experiment_name: Optional[str], run_name: Optional[str]):
     works while the sweep is running.
     """
     from contextlib import contextmanager
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from kge_kernels.runs.context import _TeeStream
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -1406,7 +1416,8 @@ def _render_report(rows: List[dict]) -> str:
         for r in rows:
             if "ms_batch_train" not in r:
                 continue
-            f = lambda k: f"{r[k]:.2f}" if r.get(k) is not None else "—"
+            def f(k, _r=r):
+                return f"{_r[k]:.2f}" if _r.get(k) is not None else "—"
             lines.append(
                 f"| {r['dataset']} | {r['reasoner']} | {r['grounder'] or '—'} | "
                 f"{f('ms_batch_train')} | {f('fwd_gpu_ms_batch')} | "

@@ -38,11 +38,9 @@ from kge_kernels.framework import (
     TNormTrajRepr,
 )
 from kge_kernels.framework.select import BeamSelect
-from kge_kernels.search import ProofScorer, SearchSpec, make_searcher
 from kge_kernels.models import TransE
-
+from kge_kernels.search import ProofScorer, SearchSpec, make_searcher
 from tests.framework.conftest import make_structured_evidence
-
 
 # ───────────────────────────────────────────────────────────────────────
 # SBR

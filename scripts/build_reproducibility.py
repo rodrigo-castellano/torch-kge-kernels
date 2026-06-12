@@ -11,9 +11,11 @@ For each cell we keep the LATEST run (by filesystem timestamp). Output:
 - docs/reproducibility.md   (human-readable table)
 """
 from __future__ import annotations
-import csv, json, re, os, sys, glob
-from pathlib import Path
+
+import json
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 REPO_ROOT = Path("/home/castellanoontiv/repos/torch-kge-kernels-swarm/tkk-consolidation")
@@ -418,9 +420,6 @@ def main():
     for cell_key in sorted(by_cell.keys()):
         d, r, g = cell_key
         backends = by_cell[cell_key]
-        torch_mrr = backends.get("torch-ns", {}).get("primary_mrr_pct", "—")
-        keras_main_mrr = backends.get("keras-main", {}).get("primary_mrr_pct", "—")
-        keras_ijcai_mrr = backends.get("keras-ijcai", {}).get("primary_mrr_pct", "—")
         paper = PAPER.get((d, r, g))
         paper_disp = f"{paper:.1f}" if paper is not None else "—"
         if d in INFLATED_DATASETS and paper is not None:
@@ -461,7 +460,7 @@ def main():
     print(f"Wrote: {out_md}")
 
     # Brief stdout summary
-    print(f"\nLatest cells per backend:")
+    print("\nLatest cells per backend:")
     counts = {}
     for k in latest:
         counts[k[3]] = counts.get(k[3], 0) + 1

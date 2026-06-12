@@ -29,7 +29,6 @@ from .config import LoggingConfig
 from .context import RunContext
 from .layout import build_run_id, build_run_paths
 
-
 BOOLEAN_TRUE = {"true", "t", "yes", "y", "on", "1"}
 BOOLEAN_FALSE = {"false", "f", "no", "n", "off", "0"}
 

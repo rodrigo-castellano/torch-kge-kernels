@@ -16,7 +16,6 @@ from torch import Tensor
 
 from kge_kernels.models import build_model
 
-
 _BACKEND_ALIASES = {
     "torch": "pytorch",
     "pytorch": "pytorch",

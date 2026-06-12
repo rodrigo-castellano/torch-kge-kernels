@@ -22,13 +22,10 @@ Output format:
 
 import argparse
 import gc
-import json
 import os
 import queue
-import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -1235,7 +1232,7 @@ def print_estimates(estimates: List[Dict], output_format: str):
               f"{total_facts:>12,} {format_size(total_size):>12} {format_time(total_time):>10}")
 
     print("=" * 90)
-    print(f"Note: Estimates assume ~4,000 anchors/sec throughput. Actual may vary.")
+    print("Note: Estimates assume ~4,000 anchors/sec throughput. Actual may vary.")
     print(f"      File size for {'parquet' if output_format == 'parquet' else 'text'} format.")
     print()
 
@@ -1368,7 +1365,7 @@ Examples:
             print(f"  {ds:<20} ({sig})")
         print("-" * 50)
         print(f"Total: {len(available)} datasets")
-        print(f"\nUse --dataset <name> or --dataset all to process")
+        print("\nUse --dataset <name> or --dataset all to process")
         return
 
     # Parse dataset list
@@ -1525,7 +1522,7 @@ Examples:
     total_elapsed = time.time() - total_start_time
 
     print(f"\n{'='*90}")
-    print(f"FINAL SUMMARY")
+    print("FINAL SUMMARY")
     print(f"{'='*90}")
     print(f"{'Dataset':<15} {'Facts':>12} {'Time':>10} {'Size':>12} {'Output':<40}")
     print("-" * 90)

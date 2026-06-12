@@ -40,7 +40,6 @@ from ..models.base import det_gather_rows
 from .protocols import RuleStateRepr
 from .types import FiringsTensors
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # Embedding-pool variant (R2N)
 # ═══════════════════════════════════════════════════════════════════════

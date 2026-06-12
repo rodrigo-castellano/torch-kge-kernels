@@ -8,8 +8,8 @@ import os
 import pstats
 import time
 
-from kge_kernels.training.config import TrainConfig
 from kge_kernels.eval.checkpoint import evaluate_checkpoint
+from kge_kernels.training.config import TrainConfig
 from kge_kernels.training.experiment import pipeline
 
 

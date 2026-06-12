@@ -39,7 +39,6 @@ from torch import Tensor
 from .candidates import CandidateSource, Mode
 from .ranking import compute_ranks, metrics_from_ranks
 
-
 ScoreFn = Callable[[Tensor, Tensor, Mode], Tensor]
 """``(q_buf [B, 3], pool_buf [B, K_fixed+1], mode) -> [B, K_fixed+1]``.
 
@@ -209,7 +208,7 @@ class RankingEvaluator:
             scores_out = torch.zeros(M, N, P, dtype=torch.float32, device=device)
 
         # Save / restore training mode (only if the scorer has it — PPOScorer doesn't).
-        scorer_obj = getattr(self, "_scorer_obj", None)  # not stored; check the closure target instead
+        # (scorer training-mode save/restore intentionally skipped — see below.)
         # Generic: try to find a model with .training. Most callers pass nn.Module-bound methods.
         # Skip by default; if needed, callers can do this themselves around the call.
 

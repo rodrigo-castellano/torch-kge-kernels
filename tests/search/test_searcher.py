@@ -3,24 +3,23 @@ from __future__ import annotations
 
 import torch
 
-from kge_kernels.framework.select import BeamSelect, ExhaustiveSelect
-from kge_kernels.search import (
-    DirectSearcher,
-    MultiRolloutSearcher,
-    ProofScorer,
-    SearchSpec,
-    Searcher,
-    make_scorer_from_searcher,
-    make_searcher,
-)
 from kge_kernels.framework import (
     KGEScoreAtom,
     MaxQueryRepr,
     TNormStateRepr,
     TNormTrajRepr,
 )
+from kge_kernels.framework.select import BeamSelect
 from kge_kernels.models import TransE
-
+from kge_kernels.search import (
+    DirectSearcher,
+    MultiRolloutSearcher,
+    ProofScorer,
+    Searcher,
+    SearchSpec,
+    make_scorer_from_searcher,
+    make_searcher,
+)
 from tests.framework.conftest import make_structured_evidence
 
 
@@ -67,7 +66,7 @@ def test_make_scorer_head_mode_replaces_col1():
         def set_gumbel_scale(self, scale): pass
 
     scorer = make_scorer_from_searcher(_FakeSearcher(), "score")
-    B, C = 2, 3
+
     q_buf = torch.tensor([[10, 20, 30], [40, 50, 60]])
     pool_buf = torch.tensor([[1, 2, 3], [4, 5, 6]])
     scores = scorer(q_buf, pool_buf, "head")

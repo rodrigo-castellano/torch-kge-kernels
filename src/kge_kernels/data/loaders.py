@@ -22,7 +22,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
-
 # ============================================================================
 # Triple example + format detection
 # ============================================================================

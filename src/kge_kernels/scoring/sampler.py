@@ -19,7 +19,6 @@ from torch import Tensor as _Tensor
 
 from .types import LongTensor, SamplerConfig, Tensor
 
-
 # ============================================================================
 # Internal hashing utilities
 # ============================================================================

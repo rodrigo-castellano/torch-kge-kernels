@@ -13,14 +13,17 @@ Both paths use the same tkk ``Sampler``, same ``KGEModel`` subclasses,
 same ``evaluate()``. The ``ns`` column measures the full framework
 overhead on a KGE-only model.
 """
-import os, sys, time, argparse
-from types import SimpleNamespace
+import argparse
 
 # Resolve the torch-ns checkout via its editable install. tkk-consolidation
 # renamed the umbrella package from ``experiments``/``ns_lib`` to
 # ``torch_ns``; ``find_spec`` here also exists to surface a clean error if
 # torch-ns isn't installed in the active env.
 import importlib.util
+import os
+import sys
+import time
+
 _spec = importlib.util.find_spec("torch_ns")
 if _spec and _spec.submodule_search_locations:
     NS_REPO = os.path.dirname(next(iter(_spec.submodule_search_locations)))
@@ -31,7 +34,7 @@ else:
     )
     sys.path.insert(0, NS_REPO)
 
-import torch
+import torch  # noqa: E402  (sys.path setup above)
 
 DATA_ROOT = os.path.expanduser("~/repos/data-swarm/main")
 SEED = 0

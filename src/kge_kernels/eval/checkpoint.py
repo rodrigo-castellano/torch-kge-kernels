@@ -11,8 +11,8 @@ from typing import Dict
 
 import torch
 
-from .candidates import SamplerCandidates
 from ..models.scorer import kge_default_scorer, recommended_eval_batch_size
+from .candidates import SamplerCandidates
 from .ranking_evaluator import RankingEvaluator
 
 
@@ -142,7 +142,8 @@ def evaluate_checkpoint(
     batch_size = recommended_eval_batch_size(model, num_entities) if not eval_negs else max(1, cfg.eval_chunk_size or 512)
 
     print(f"Evaluating {split_name} split from {weights_path} ...")
-    scorer = lambda q, p, m: kge_default_scorer(model, q, p, m)
+    def scorer(q, p, m):
+        return kge_default_scorer(model, q, p, m)
     evaluator = RankingEvaluator(
         scorer=scorer,
         candidates=candidates,
