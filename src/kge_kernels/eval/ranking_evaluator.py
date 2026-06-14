@@ -29,6 +29,7 @@ Compile contract
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Literal, Optional, Tuple
@@ -230,6 +231,16 @@ class RankingEvaluator:
                 elapsed_s=time.perf_counter() - t0,
             )
 
+        # Opt-in eval progress (KGE_EVAL_PROGRESS=1): one line per (query-batch,
+        # mode) chunk with the chunk wall + running ETA. Off by default => the
+        # hot path is byte-identical and incurs no extra cuda sync. Per-instance
+        # ``self.progress`` (default True) lets callers silence frequent passes
+        # (e.g. per-epoch validation) while keeping the final test eval verbose.
+        verbose = bool(os.environ.get("KGE_EVAL_PROGRESS")) and getattr(self, "progress", True)
+        n_batches = (N + B - 1) // B
+        total_chunks = n_batches * M
+        done_chunks = 0
+
         for q_start in range(0, N, B):
             q_end = min(q_start + B, N)
             q_slice = triples[q_start:q_end]                  # [actual_B, 3]
@@ -242,6 +253,10 @@ class RankingEvaluator:
                 self._q_buf[actual_B:].zero_()
 
             for mode_idx, mode in enumerate(modes):
+                if verbose:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    _c0 = time.perf_counter()
                 # Eager: get candidates for the active rows.
                 cand_ents, cand_valid = self.candidates.candidates(q_slice, mode)
                 # cand_ents: [actual_B, K_fixed]; cand_valid: [actual_B, K_fixed]
@@ -277,6 +292,17 @@ class RankingEvaluator:
                 valid_out[mode_idx, q_start:q_start + actual_B] = True
                 if scores_out is not None:
                     scores_out[mode_idx, q_start:q_start + actual_B] = pool_scores[:actual_B]
+
+                if verbose:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    done_chunks += 1
+                    _el = time.perf_counter() - t0
+                    _eta = _el / done_chunks * (total_chunks - done_chunks)
+                    print(f"[eval] q {q_end}/{N} ({100 * q_end / N:.0f}%) "
+                          f"batch {q_start // B + 1}/{n_batches} mode={mode} "
+                          f"chunk={(time.perf_counter() - _c0) * 1000:.0f}ms "
+                          f"| elapsed {_el:.1f}s ETA {_eta:.0f}s", flush=True)
 
         return RankingResult(
             triples=triples,
