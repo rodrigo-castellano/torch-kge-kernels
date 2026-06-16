@@ -224,6 +224,23 @@ class _RotateBase(KGEModel):
         t_re, t_im = self._split_ent(t)
         return torch.cat([hr_re - t_re, hr_im - t_im], dim=-1)
 
+    def pool_feature(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
+        """Per-component magnitude ``sqrt((rh-t)_re^2 + (rh-t)_im^2)``, the
+        geometric primitive for the R2N rotate pool. Shape ``[..., half_dim]``,
+        non-negative — this is the per-component modulus keras-ns
+        ``RotatE.call`` produces (``kge.py:382``).
+
+        Unlike :meth:`compose` (signed ``rh - t``, whose components cancel under
+        a sum → degenerate ``sigmoid(sum)``), every component here is a
+        non-negative distance contribution. The R2N consumer negates it so that
+        ``sigmoid(sum(-feature))`` is a proximity truth score (close → higher),
+        mirroring ComplEx's ``sum(hermitian_real_vec)`` pool + ``sigmoid(sum)``
+        head; the sign convention lives in ``torch_ns.reasoners.r2n``."""
+        hr_re, hr_im = self._hr(h, r)
+        t_re, t_im = self._split_ent(t)
+        d_re, d_im = hr_re - t_re, hr_im - t_im
+        return torch.sqrt(d_re * d_re + d_im * d_im + 1e-9)     # [..., half_dim]
+
 
 class RotatE(_RotateBase):
     """RotatE knowledge graph embedding (complex rotation).

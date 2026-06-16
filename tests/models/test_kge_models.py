@@ -67,6 +67,31 @@ def test_compose_returns_embedding(name, builder):
     assert emb.shape[1] >= 1
 
 
+@pytest.mark.parametrize("cls_name", ["rotate", "rotate_ns"])
+@pytest.mark.parametrize("p_norm", [1, 2])
+def test_rotate_pool_feature(cls_name, p_norm):
+    """RotatE/RotatENS pool_feature: per-component modulus, shape [B, half_dim],
+    non-negative (the keras-ns RotatE.call feature). The R2N consumer negates
+    it, so sigmoid(sum(-feature)) is a proximity score: discriminative over
+    distinct triples and <= 0.5 (close → ~0.5, far → ~0), with a zeroed pool
+    → sigmoid(0) = 0.5. Contrast the signed compose pool, whose components
+    cancel under the sum → ~0.5 everywhere (degenerate)."""
+    from kge_kernels.models import build_model
+    torch.manual_seed(0)
+    model = build_model(name=cls_name, num_entities=12, num_relations=5,
+                        dim=8, gamma=6.0, p_norm=p_norm)
+    h = torch.tensor([0, 1, 2, 3]); r = torch.tensor([0, 1, 2, 3]); t = torch.tensor([4, 5, 6, 7])
+    feat = model.pool_feature(h, r, t)
+    assert feat.shape == (4, model.half_dim)
+    assert (feat >= 0).all()
+    score = torch.sigmoid((-feat).sum(-1))          # the R2N head sees -feature
+    assert ((score >= 0) & (score <= 0.5 + 1e-6)).all()
+    assert score.std() > 1e-4                       # discriminative, not degenerate
+    # zeroed pool (no-firing, zero_unwritten) → neutral 0.5
+    z = torch.sigmoid((-torch.zeros_like(feat)).sum(-1))
+    assert torch.allclose(z, torch.full_like(z, 0.5))
+
+
 def test_transe_score_triples_value():
     """Sanity check: TransE score is -|| h+r-t || (≤ 0)."""
     torch.manual_seed(0)
