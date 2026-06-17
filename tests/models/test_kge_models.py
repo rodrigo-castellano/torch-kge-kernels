@@ -71,11 +71,7 @@ def test_compose_returns_embedding(name, builder):
 @pytest.mark.parametrize("p_norm", [1, 2])
 def test_rotate_pool_feature(cls_name, p_norm):
     """RotatE/RotatENS pool_feature: per-component modulus, shape [B, half_dim],
-    non-negative (the keras-ns RotatE.call feature). The R2N consumer negates
-    it, so sigmoid(sum(-feature)) is a proximity score: discriminative over
-    distinct triples and <= 0.5 (close → ~0.5, far → ~0), with a zeroed pool
-    → sigmoid(0) = 0.5. Contrast the signed compose pool, whose components
-    cancel under the sum → ~0.5 everywhere (degenerate)."""
+    non-negative (the keras-ns RotatE.call feature; a geometric primitive)."""
     from kge_kernels.models import build_model
     torch.manual_seed(0)
     model = build_model(name=cls_name, num_entities=12, num_relations=5,
@@ -84,12 +80,27 @@ def test_rotate_pool_feature(cls_name, p_norm):
     feat = model.pool_feature(h, r, t)
     assert feat.shape == (4, model.half_dim)
     assert (feat >= 0).all()
-    score = torch.sigmoid((-feat).sum(-1))          # the R2N head sees -feature
-    assert ((score >= 0) & (score <= 0.5 + 1e-6)).all()
-    assert score.std() > 1e-4                       # discriminative, not degenerate
-    # zeroed pool (no-firing, zero_unwritten) → neutral 0.5
-    z = torch.sigmoid((-torch.zeros_like(feat)).sum(-1))
-    assert torch.allclose(z, torch.full_like(z, 0.5))
+
+
+@pytest.mark.parametrize("cls_name", ["rotate", "rotate_ns"])
+def test_rotate_dot_feature(cls_name):
+    """dot_feature = Re(rh·conj(t)), the R2N rotate pool. Shape [B, half_dim],
+    IDENTITY-BEARING: distinct (h,r,t) give distinct features (unlike the
+    distance/modulus pool, which is ~0 for every true fact and so collapses
+    identity). This is what lets the rule MLP discriminate gold from rule-valid
+    alternatives — the core of the RotatE r2n fix (docs/ROTATE_BASELINES.md §4)."""
+    from kge_kernels.models import build_model
+    torch.manual_seed(0)
+    model = build_model(name=cls_name, num_entities=12, num_relations=5,
+                        dim=8, gamma=6.0, p_norm=2)
+    h = torch.tensor([0, 1, 2, 3]); r = torch.tensor([0, 0, 0, 0]); t = torch.tensor([4, 5, 6, 7])
+    feat = model.dot_feature(h, r, t)
+    assert feat.shape == (4, model.half_dim)
+    # identity-bearing: different tails (same h,r) → different feature rows
+    assert feat.std(dim=0).max() > 1e-4
+    # the r2n head sees sigmoid(scale*sum+bias); plain sigmoid(sum) is in (0,1)
+    s = torch.sigmoid(feat.sum(-1))
+    assert ((s > 0) & (s < 1)).all()
 
 
 def test_transe_score_triples_value():

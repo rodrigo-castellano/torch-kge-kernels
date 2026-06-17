@@ -241,6 +241,23 @@ class _RotateBase(KGEModel):
         d_re, d_im = hr_re - t_re, hr_im - t_im
         return torch.sqrt(d_re * d_re + d_im * d_im + 1e-9)     # [..., half_dim]
 
+    def dot_feature(self, h: Tensor, r: Tensor, t: Tensor) -> Tensor:
+        """Per-component alignment ``Re(rh · conj(t)) = rh_re*t_re + rh_im*t_im``.
+        Shape ``[..., half_dim]``. The RotatE analog of ComplEx's
+        ``hermitian_real_vec``: an IDENTITY-BEARING dot-product feature (depends
+        on the actual head/tail embeddings, not their difference), whose sum is a
+        similarity score (high when ``rh`` aligns with ``t``, i.e. a true fact).
+
+        This is the R2N pool that lets the rule MLP DISCRIMINATE which entities a
+        rule fired over. :meth:`pool_feature` (the modulus ``|rh-t|``) is ~0 for
+        every true fact → it collapses entity identity, so the MLP can't tell
+        gold from a rule-valid alternative (the countries_s2 multi-conclusion
+        failure). The dot feature keeps the tail identity, mirroring why ComplEx
+        r2n discriminates on the same rules."""
+        hr_re, hr_im = self._hr(h, r)
+        t_re, t_im = self._split_ent(t)
+        return hr_re * t_re + hr_im * t_im                     # [..., half_dim]
+
 
 class RotatE(_RotateBase):
     """RotatE knowledge graph embedding (complex rotation).
